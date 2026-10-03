@@ -10,6 +10,7 @@ let job={id:'task',server_id:'host-0',server_name:'Host 0',actor:'admin',action:
 let queued={...structuredClone(job),id:'queued',status:'queued',queue_position:1,waiting_for:'pull_up',progress:{}};
 let dashboard={servers,thresholds,jobs:[queued,job]},requests=0,refreshAll=0,lastPlan=null;
 const history={from:now-3600,to:now,hours:1,resolution_seconds:60,poll_seconds:15,points:Array.from({length:61},(_,i)=>({time:now-3600+i*60,cpu:i===30?null:20+i/10,memory:40,disk:42,temperature:48,cpu_peak:30,temperature_peak:52,disks:[],samples:4,attempts:4})),disk_mounts:['/']};
+let telegram={enabled:false,chat_id:'',token_saved:false,demo:true,last_sent:null,last_error:'',next_attempt:0,rules:[],servers:servers.map(s=>({id:s.id,name:s.name,monitoring_enabled:true}))},telegramTests=0;
 const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'harbour/static',req.url==='/'?'index.html':req.url.replace('/static/',''));try{res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html');res.end(fs.readFileSync(file));}catch{res.writeHead(404).end();}});
 (async()=>{
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -19,6 +20,8 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  const page=await browser.newPage({viewport:{width:1280,height:800}}),errors=[];page.on('pageerror',err=>errors.push(err.message));
  await page.route('**/api/**',async route=>{const url=new URL(route.request().url());let data;
  if(url.pathname==='/api/config')data={demo:true,version:'test'};
+ else if(url.pathname==='/api/notifications'){if(route.request().method()==='PUT'){const body=route.request().postDataJSON();assert.equal(body.rules.length,servers.length*4);telegram={...telegram,...body,token_saved:!!body.bot_token||telegram.token_saved};delete telegram.bot_token;}data=telegram;}
+ else if(url.pathname==='/api/notifications/test'){telegramTests++;data={ok:true,simulated:true};}
  else if(url.pathname==='/api/me')data={id:'admin',name:'admin',role:'admin',csrf:'test'};
  else if(url.pathname==='/api/dashboard'){requests++;data=dashboard;}
  else if(url.pathname==='/api/jobs/task')data=job;
@@ -185,6 +188,35 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
   dashboard.jobs=dashboard.servers[0].services.map((c,i)=>({...job,id:'colour-'+i,targets:JSON.stringify([c.id]),target_names:[c.container]}));
   await page.evaluate(()=>load());await page.evaluate(()=>{state.tab='activity';renderMain();});await page.locator('.activity-row').first().scrollIntoViewIfNeeded();await page.screenshot({path:'test-results/activity-status-v0110.png'});
  }
+ // Telegram matrix: independent timers, saved credential handling, dirty guard and mobile layout.
+ await page.setViewportSize({width:1280,height:900});
+ await page.evaluate(()=>{setMobilePanel(false);document.querySelector('#sidebar-menu').open=true;});
+ await page.getByRole('button',{name:'Notifications',exact:true}).click();
+ await page.locator('#telegram-form').waitFor();
+ assert.equal(await page.locator('.telegram-rule').count(),96);
+ const cpu=page.getByRole('checkbox',{name:'Host 0 CPU notifications',exact:true});
+ const delay=page.getByRole('spinbutton',{name:'Host 0 CPU trigger delay in minutes',exact:true});
+ const repeat=page.getByRole('spinbutton',{name:'Host 0 CPU repeat interval in minutes',exact:true});
+ assert.equal(await delay.isDisabled(),true);await cpu.check();await delay.fill('2');await repeat.fill('0');
+ await page.getByRole('checkbox',{name:'Enable Telegram',exact:true}).check();
+ await page.locator('[name=bot_token]').fill('123456789:synthetic_token_only_1234567890');await page.locator('[name=chat_id]').fill('-100123456789');
+ await page.getByRole('button',{name:'Simulate test message',exact:true}).click();
+ await page.getByText('Save your changes before sending a test message.',{exact:true}).waitFor();assert.equal(telegramTests,0);
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();await page.getByRole('button',{name:'Keep editing',exact:true}).click();
+ await page.getByRole('button',{name:'Save',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('[name=bot_token]').value==='');
+ assert.equal(await page.locator('#telegram-form').isVisible(),true);
+ assert.deepEqual(telegram.rules.find(r=>r.server_id==='host-0'&&r.kind==='cpu'),{server_id:'host-0',kind:'cpu',enabled:true,delay_seconds:120,repeat_seconds:0});
+ assert.equal(await page.locator('[name=clear_token]').isDisabled(),false);
+ await page.getByRole('button',{name:'Simulate test message',exact:true}).click();
+ await page.getByText('Test simulated. No message was sent.',{exact:true}).waitFor();assert.equal(telegramTests,1);
+ await page.evaluate(()=>load());assert.equal(await repeat.inputValue(),'0');
+ if(process.env.HARBOUR_TEST_CAPTURE){for(const theme of ['dark','light']){await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await page.locator('.telegram-modal').screenshot({path:`test-results/telegram-${theme}-v0113.png`});}}
+ await page.setViewportSize({width:390,height:844});await page.waitForTimeout(300);
+ assert.equal(await page.locator('.telegram-modal').evaluate(el=>el.getBoundingClientRect().right<=innerWidth),true);
+ assert.equal(await page.locator('.telegram-table-wrap').evaluate(el=>el.scrollWidth>el.clientWidth),true);
+ if(process.env.HARBOUR_TEST_CAPTURE)await page.locator('.telegram-modal').screenshot({path:'test-results/telegram-mobile-v0113.png'});
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();assert.equal(await page.locator('#discard-guard').count(),0);
  assert.deepEqual(errors,[]);assert.ok(requests>=4);
  console.log('PASS: changed-value rendering, desktop/mobile scroll, focus/caret, expanded panels, persistent animation, live progress/log scroll, task counts, collapsible filters, refresh-all, chart hover/touch/keyboard/missing values, container and Activity status colours, bulk notification dismissal, inline stack chips, combined service filters and matching-only bulk actions');
  }finally{await browser.close();server.close();}

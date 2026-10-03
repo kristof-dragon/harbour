@@ -105,6 +105,17 @@ def initialize():
           resolution INTEGER NOT NULL, payload TEXT NOT NULL,
           PRIMARY KEY(server_id,bucket,resolution));
         CREATE INDEX IF NOT EXISTS history_time ON resource_history(bucket);
+        CREATE TABLE IF NOT EXISTS notification_rules (
+          server_id TEXT REFERENCES servers(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0,
+          delay_seconds INTEGER NOT NULL DEFAULT 300,
+          repeat_seconds INTEGER NOT NULL DEFAULT 3600,
+          PRIMARY KEY(server_id,kind));
+        CREATE TABLE IF NOT EXISTS notification_state (
+          server_id TEXT, kind TEXT, entities TEXT NOT NULL DEFAULT '{}',
+          checked REAL NOT NULL DEFAULT 0, last_sent REAL,
+          PRIMARY KEY(server_id,kind),
+          FOREIGN KEY(server_id,kind) REFERENCES notification_rules(server_id,kind) ON DELETE CASCADE);
         """)
         def add_columns(table, columns):
             existing = {r[1] for r in con.execute("PRAGMA table_info(" + table + ")")}

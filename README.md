@@ -19,6 +19,8 @@ For Nginx Proxy Manager on a separate instance, choose setup option **2**. In NP
 
 Open your configured URL and sign in. Use **Menu → Add server** to connect a Linux host with Python 3.9+. Choose **Docker host** (also requires Docker, Compose v2 and an SSH account with Docker access) or **Plain server** for resource monitoring. Fetch and accept its host fingerprint, then generate or import an SSH key and install it from the form using a one-time password, or copy it manually. Optional password login is available after acknowledging its warning. Use **Server settings → Edit SSH connection** to switch authentication methods or replace keys without deleting the server.
 
+For Telegram alerts, open **Menu → Notifications**, save your bot token and Chat ID, select warnings per server, and set their trigger and repeat intervals. Use **Send test message** to check delivery; a repeat interval of **0** sends once until the issue clears.
+
 To update, keep your existing `.env` and data volume:
 
 ```sh

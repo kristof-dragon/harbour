@@ -588,3 +588,33 @@ body.mobile-panel-open{overflow:hidden}
 .server-filters-panel{flex-shrink:0}.server-filters-panel>summary{cursor:pointer;list-style:none;gap:10px}.server-filters-panel>summary::-webkit-details-marker{display:none}.server-filters-panel>summary .count{margin-left:auto}.filter-chevron{width:14px;height:14px;color:var(--muted);transform:rotate(-90deg);transition:transform .18s}.server-filters-panel[open] .filter-chevron{transform:rotate(0)}.server-filters-panel>summary:focus-visible{outline:2px solid var(--accent);outline-offset:-3px}
 .breadcrumbs{min-width:0}.breadcrumbs .current{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.top-actions{flex-shrink:0}@media(max-width:800px){.breadcrumbs>span:not(.current){display:none}.breadcrumbs .mobile-menu{flex-shrink:0}.topbar{gap:8px}.topbar .notification-chip{padding:6px 8px}}
 .history-content>.history-plot{height:100%;min-height:180px}.history-content>h3+.history-plot{height:calc(100% - 34px)}.history-plot>.history-chart{height:100%;min-height:180px}.history-grid .history-plot>.history-chart{height:auto;min-height:0}
+
+/* Compact notification matrix: one row per server, independent timers per type. */
+.modal.telegram-modal{width:min(970px,100%)}
+.telegram-modal .modal-header{position:sticky;top:-26px;z-index:5;background:var(--panel);padding:12px 0;margin-top:-12px}
+.telegram-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.telegram-heading h3{display:flex;align-items:center;gap:8px;margin:0}
+.telegram-tools{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:12px 0 16px}
+.telegram-table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px;max-height:44vh}
+.telegram-table{border-collapse:separate;border-spacing:0;width:100%;table-layout:fixed;font-size:12px;min-width:760px}
+.telegram-table th,.telegram-table td{border-bottom:1px solid var(--line);padding:8px;text-align:center}
+.telegram-table th{background:var(--panel);font-weight:550}
+.telegram-table thead th{position:sticky;top:0;z-index:2;padding:10px 6px}
+.telegram-table th:first-child{width:22%;text-align:left;position:sticky;left:0;z-index:1;overflow-wrap:anywhere}
+.telegram-table thead th:first-child{z-index:3}
+.telegram-table small{display:block;font-weight:400;font-size:10px;color:var(--muted);margin-top:5px}
+.telegram-table tr:last-child>:is(th,td){border-bottom:0}
+.telegram-table .tag{display:block;width:max-content;margin-top:3px;font-size:9px}
+.telegram-rule{display:grid;grid-template-columns:16px 1fr 1fr;gap:6px;align-items:center}
+.telegram-rule input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);margin:0}
+.telegram-rule input[type=number]{padding:6px 4px;text-align:center;font-size:12px;font-variant-numeric:tabular-nums}
+.telegram-rule:has(input:checked){color:var(--accent)}
+.telegram-rule input:disabled{opacity:.4}
+.telegram-footnote{margin-bottom:4px}
+.telegram-setup summary{display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--muted);list-style:none}
+.telegram-setup summary::-webkit-details-marker{display:none}
+.telegram-setup summary svg{width:13px;height:13px;transform:rotate(-90deg)}
+.telegram-setup[open] summary svg{transform:rotate(0)}
+.telegram-setup a{color:var(--accent)}
+.telegram-modal .form-actions{position:sticky;bottom:-26px;z-index:5;background:var(--panel);margin-top:14px;padding:14px 0}
+@media(max-width:650px){.modal.telegram-modal{padding:16px}.telegram-modal .modal-header{top:-16px}.telegram-modal .form-actions{bottom:-16px}.telegram-heading,.telegram-tools{flex-wrap:wrap}.telegram-table th:first-child{width:140px}.telegram-table-wrap{max-height:36vh}}

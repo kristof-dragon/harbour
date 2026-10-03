@@ -142,7 +142,7 @@ function renderSidebar(){
     <details id="server-filters-panel" class="server-filters-panel" ${state.filtersOpen?'open':''}><summary class="sidebar-heading between" title="Show or hide server filters"><span class="eyebrow">Your servers</span><span class="count" id="server-count" aria-live="polite">${active?servers.length+' / ':''}${state.data.servers.length}</span>${icon('down','filter-chevron')}</summary>
     <div class="server-filters">${filterControl('warnings','Warnings',[['with','With warnings'],['without','No warnings']])}${filterControl('status','Status',[['up','Up'],['down','Down'],['paused','Paused']])}${filterControl('updates','Updates',[['with','Available'],['without','None']])}</div></details>
     <nav class="server-list" aria-label="Servers">${serverCards(servers)}</nav>
-    <div class="sidebar-bottom"><details class="sidebar-menu" id="sidebar-menu" ${state.menuOpen?'open':''}><summary>${icon('menu')}<span>Menu</span>${icon('down','menu-chevron')}</summary><nav aria-label="Workspace menu">${admin()?button('onboard','Add server','plus','ghost sidebar-link'):''}${button('visuals','Visuals','sun','ghost sidebar-link')}${admin()?button('global-settings','Global settings','settings','ghost sidebar-link')+button('users','Manage users','users','ghost sidebar-link')+button('security','Security & sign-ins','shield','ghost sidebar-link'):''}${button('account','My account','users','ghost sidebar-link')}<div class="connection-note"><span class="dot"></span><span id="connection-status">${state.demo?'Demo workspace':'Background monitoring active'}</span></div></nav></details>
+    <div class="sidebar-bottom"><details class="sidebar-menu" id="sidebar-menu" ${state.menuOpen?'open':''}><summary>${icon('menu')}<span>Menu</span>${icon('down','menu-chevron')}</summary><nav aria-label="Workspace menu">${admin()?button('onboard','Add server','plus','ghost sidebar-link'):''}${button('visuals','Visuals','sun','ghost sidebar-link')}${admin()?button('global-settings','Global settings','settings','ghost sidebar-link')+button('notification-settings','Notifications','bell','ghost sidebar-link')+button('users','Manage users','users','ghost sidebar-link')+button('security','Security & sign-ins','shield','ghost sidebar-link'):''}${button('account','My account','users','ghost sidebar-link')}<div class="connection-note"><span class="dot"></span><span id="connection-status">${state.demo?'Demo workspace':'Background monitoring active'}</span></div></nav></details>
     <div class="sidebar-footer"><span class="app-version">Harbour v${e(state.version)}</span><span class="footer-account" title="${e(state.user.name)} · ${admin()?'Administrator':'Read-only user'}">${e(state.user.name)}</span>${iconButton('logout','Sign out','logout')}</div></div><div class="resize-handle" role="separator" aria-label="Resize server pane" aria-orientation="vertical" aria-valuemin="18" aria-valuemax="40" aria-valuenow="${Math.round(parseFloat(document.documentElement.style.getPropertyValue('--sidebar'))||23)}" tabindex="0"></div>`);
 }
 function visuals(){
@@ -339,7 +339,7 @@ function finishDiscard(discard){
 }
 window.addEventListener('beforeunload',event=>{if(overlayDirty()){event.preventDefault();event.returnValue='';}});
 // Guard navigation between overlays as well as closing by X, Escape or backdrop.
-const overlayNavigation=new Set(['job','prune','visuals','global-settings','server-settings','onboard','edit-connection','account','users','remove-user','remove-server','monitoring','security','security-policy','security-log','mfa-begin','mfa-disable','mfa-recovery','warnings','updates','notifications','select-server','notice-server','logout']);
+const overlayNavigation=new Set(['notification-settings','job','prune','visuals','global-settings','server-settings','onboard','edit-connection','account','users','remove-user','remove-server','monitoring','security','security-policy','security-log','mfa-begin','mfa-disable','mfa-recovery','warnings','updates','notifications','select-server','notice-server','logout']);
 document.addEventListener('click',event=>{const action=event.target.closest('[data-action]')?.dataset.action;if(overlayNavigation.has(action)&&overlayDirty()){event.preventDefault();event.stopImmediatePropagation();const target=event.target.closest('[data-action]');requestDiscard(()=>target.click());}},true);
 let previousFocus=null;
 function modal(title,content,wide=false){
@@ -446,7 +446,9 @@ document.addEventListener('click',async event=>{
     busyViewNodes.add(el);el.disabled=true;
     if(monitorActions.has(a)){await handleMonitorAction(a,el);return;}
     if(securityActions.has(a)){await handleSecurityAction(a,el);return;}
-    if(a==='demo-login'){state.user=await api('/demo-login','POST');await load(true);}
+    if(a==='notification-settings')await notificationSettings();
+    else if(a==='telegram-test')await testTelegram();
+    else if(a==='demo-login'){state.user=await api('/demo-login','POST');await load(true);}
     else if(a==='logout'){await api('/logout','POST');state.user=null;renderLogin();}
     else if(a==='refresh-all'){const result=await api('/servers/refresh-all','POST');for(const job of result.jobs)state.lastJobs.set(job.id,'queued');await load();toast(count(result.jobs.length,'server')+' queued for refresh'+(result.errors.length?' · '+result.errors.map(err=>err.name+': '+err.detail).join('; '):''),Boolean(result.errors.length));}
     else if(a==='refresh'||a==='check-updates'){const r=await api(`/servers/${current().id}/${a==='refresh'?'refresh':'check-updates'}`,'POST');state.lastJobs.set(r.id,'queued');toast(a==='refresh'?'Refreshing server readings…':'Checking configured image tags…');await load();}
@@ -475,7 +477,8 @@ document.addEventListener('submit',async event=>{
   try{
     if(monitorForms.has(form.id)){await handleMonitorForm(form,data);return;}
     if(securityForms.has(form.id)){await handleSecurityForm(form,data);return;}
-    if(form.id==='login-form'){state.user=await api('/login','POST',data);state.authMessage='';await load(true);}
+    if(form.id==='telegram-form'){await saveTelegram(form);}
+    else if(form.id==='login-form'){state.user=await api('/login','POST',data);state.authMessage='';await load(true);}
     else if(form.id==='rename-form'){await api('/servers/'+form.dataset.id,'PATCH',data);markFormSaved(form);await load();$('#modal-title').textContent=current().name+' settings';toast('Server renamed');}
     else if(form.id==='threshold-form'){const values=Object.fromEntries(Object.entries(data).map(([k,v])=>[k,Number(v)]));await api(form.dataset.server?`/servers/${form.dataset.server}/thresholds`:'/thresholds','PUT',values);markFormSaved(form);await load();toast('Thresholds saved');}
     else if(form.id==='onboard-form'){

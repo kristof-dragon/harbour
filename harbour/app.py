@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from . import __version__, auth, demo, history, remote_probe, ssh, store, volumes
+from . import __version__, auth, demo, history, notifications, remote_probe, ssh, store, volumes
 from .auth import authenticated, admin
 
 pool = ThreadPoolExecutor(max_workers=4)
@@ -100,9 +100,11 @@ def refresh_server(id_, updates=False):
         store.execute("UPDATE servers SET error=?,connection_status=?,latency_ms=? WHERE id=?", (str(exc)[:1000], status, latency, id_))
         history.record(id_, latency_ms=latency, up=status == "up")
         clear_resolved_warning_dismissals(id_)
+        observe_notifications(id_, successful=False)
         raise
     history.record(id_, snapshot.get("metrics"), snapshot.get("latency_ms"), up=True)
     clear_resolved_warning_dismissals(id_)
+    observe_notifications(id_)
 
 
 def poll_one(server, lock):
@@ -140,10 +142,12 @@ def poll_resources(server, lock):
                         (json.dumps(snapshot), time.time(), result.get('latency_ms'), id_))
         history.record(id_, metrics, result.get('latency_ms'), up=True)
         clear_resolved_warning_dismissals(id_)
+        observe_notifications(id_)
     except Exception as exc:
         status, latency = getattr(exc, 'status', 'unknown'), getattr(exc, 'latency_ms', None)
         history.record(id_, latency_ms=latency, up=status == 'up')
         store.execute('UPDATE servers SET error=?,connection_status=?,latency_ms=? WHERE id=?', (str(exc)[:1000], status, latency, id_))
+        observe_notifications(id_, successful=False)
     finally:
         lock.release()
 
@@ -218,15 +222,19 @@ async def lifespan(app):
     thread.start()
     retention = threading.Thread(target=retention_loop, daemon=True)
     retention.start()
+    telegram = threading.Thread(target=notifications.delivery_loop, args=(stop,), daemon=True)
+    telegram.start()
     yield
     stop.set()
     thread.join(timeout=1)
     retention.join(timeout=15)
+    telegram.join(timeout=15)
 
 
 app = FastAPI(title="Harbour", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(auth.router)
 app.include_router(history.router)
+app.include_router(notifications.router)
 
 
 @app.exception_handler(RequestValidationError)
@@ -317,6 +325,17 @@ def server_warnings(server, snapshot, threshold):
         if issue:
             warnings.append({"id": "service:" + s["id"], "title": s["name"] + " needs attention", "detail": issue})
     return warnings, stale
+
+
+def observe_notifications(server_id, successful=True):
+    try:
+        server = get_server(server_id)
+        warnings = server_warnings(server, json.loads(server['snapshot']), thresholds_for(server))[0] if successful else []
+        notifications.observe(server, warnings, successful, now=server['checked'] if successful else None)
+    except Exception:
+        # Notification storage must never turn a successful resource poll into a failure.
+        import logging
+        logging.error('Could not record Telegram warning state for server %s', server_id)
 
 
 def warning_notification(warning):
