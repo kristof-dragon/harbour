@@ -11,6 +11,10 @@ GB = 1_000_000_000
 
 def service(name, image, project=None, update=False, state="running", version=None):
     identity = (project or "solo") + "-" + name
+    available = version
+    if update and version:
+        prefix, patch = version.rsplit('.', 1) if '.' in version else ('', version)
+        available = (prefix + '.' if prefix else '') + str(int(patch) + 1)
     return {"id": identity, "name": name, "container": f"{project}-{name}-1" if project else name,
             "project": project, "image": image, "image_id": "sha256:" + "a" * 64,
             "version": version, "state": state, "health": "healthy" if state == "running" else None,
@@ -19,7 +23,7 @@ def service(name, image, project=None, update=False, state="running", version=No
             "working_dir": "/opt/stacks/" + project if project else None,
             "config_files": ["/opt/stacks/" + project + "/compose.yaml"] if project else [],
             "platform": {"os": "linux", "architecture": "amd64", "variant": ""},
-            "update": {"status": "available" if update else "current", "digest": "sha256:" + ("b" if update else "a") * 64, "checked": time.time()}}
+            "update": {"status": "available" if update else "current", "digest": "sha256:" + ("b" if update else "a") * 64, "version": available, "checked": time.time()}}
 
 
 def seed():

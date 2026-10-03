@@ -99,6 +99,19 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  dashboard.servers[0].services.splice(1);c.project=null;job.target_names=['removed-container'];
  await page.evaluate(()=>load());await page.evaluate(()=>{state.tab='activity';renderMain();});
  assert.match(await page.locator('[data-key="job:task"] .status-icon').getAttribute('class'),/status-grey/);
+ // Only confirmed newer versions get update badges and the Available version line.
+ c.project='stack';c.version='26.09.2';
+ for(const [status,version,updates,label] of [['current','26.09.2',0,'Current'],['available','26.10.0',1,'Update'],['current','26.08.0',0,'Current'],['unverified',null,0,'Version unverified']]){
+  c.update={status,version,digest:'sha256:candidate',reason:'Version comparison'};dashboard.servers[0].updates=updates;
+  await page.evaluate(()=>load());await page.evaluate(()=>{state.tab='containers';renderMain();});
+  if(await page.locator('details.group').getAttribute('open')===null)await page.locator('details.group>summary').click();
+  assert.equal(await page.locator('.service-summary>.tag').textContent(),status==='available'?' Update':label);
+  assert.equal(await page.locator('.available-version').count(),updates);
+  assert.match(await page.locator('.running-version').textContent(),/26\.09\.2/);
+  assert.equal(await page.locator('details.group>summary>.tag').textContent(),updates?' 1 update':status==='unverified'?'Not verified':'No updates');
+  assert.equal(await page.locator('[data-key="server:host-0"] .count-badge.update').count(),updates);
+ }
+ c.project=null;c.update={status:'available',version:'26.10.0',digest:'sha256:candidate'};dashboard.servers[0].updates=1;
  // Dismiss all empties notices but leaves resource warnings and server indicators visible.
  dashboard.servers[0].warnings=[{id:'cpu',title:'CPU usage is high',detail:'99% used',dismissed:false}];
  await page.evaluate(()=>load());await page.getByRole('button',{name:'Open notifications',exact:true}).click();

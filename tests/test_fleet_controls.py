@@ -213,6 +213,6 @@ def test_available_version_uses_exact_manifest_and_never_pulls(monkeypatch):
         raise RuntimeError('Buildx unavailable')
     monkeypatch.setattr(remote_probe,'run',missing)
     result=remote_probe.check_updates([service])[0]
-    assert result['update']['status']=='available' and result['update']['version'] is None
+    assert result['update']['status']=='unverified' and result['update']['version'] is None
     raw[0]['OCIManifest']['annotations']={'org.opencontainers.image.version':'2.2.0'}
     assert remote_probe.check_updates([service])[0]['update']['version']=='2.2.0'

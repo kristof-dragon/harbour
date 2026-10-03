@@ -62,6 +62,64 @@ def image_version(labels):
     return None
 
 
+def compare_versions(running, candidate):
+    """Return candidate precedence, or None for labels without a known ordering.
+
+    Accept numeric releases (including calendar versions), common prereleases
+    and LinuxServer packaging revisions. Never sort arbitrary hashes as releases.
+    """
+    if not isinstance(running, str) or not isinstance(candidate, str):
+        return None
+    running, candidate = running.strip(), candidate.strip()
+    if not running or not candidate:
+        return None
+    if running == candidate:
+        return 0
+    pattern = (r'[vV]?(\d+(?:\.\d+)*)'
+               r'(?:[-.]?(dev|alpha|a|beta|b|rc|pre|preview)[.-]?(\d+)?)?'
+               r'(?:-r(\d+))?(?:-ls(\d+))?(?:\+[0-9A-Za-z.-]+)?')
+    parsed = [re.fullmatch(pattern, value) for value in (running, candidate)]
+    if not all(parsed):
+        return None
+    width = max(len(match[1].split('.')) for match in parsed)
+    def key(match):
+        release = tuple(int(n) for n in match[1].split('.'))
+        stage = {'dev': -1, 'alpha': 0, 'a': 0, 'beta': 1, 'b': 1,
+                 'pre': 2, 'preview': 2, 'rc': 2, None: 3}[match[2]]
+        return release + (0,) * (width-len(release)), stage, int(match[3] or 0), int(match[4] or 0), int(match[5] or 0)
+    old, new = map(key, parsed)
+    return (new > old) - (new < old)
+
+
+def image_matches_update(service, update):
+    # Classic Docker exposes the config ID; the containerd store exposes an
+    # index/image ID and the actual container's platform manifest separately.
+    manifest = service.get('image_manifest_digest')
+    if manifest and update.get('manifest_digest'):
+        return manifest == update['manifest_digest']
+    return bool(update.get('digest')) and service.get('image_id') == update['digest']
+
+
+def classify_update(service, update):
+    """Apply the version policy to fresh checks and previously stored checks."""
+    if update.get('status') not in {'available', 'current', 'unverified'}:
+        return dict(update)
+    result = {k: v for k, v in update.items() if k not in {'reason', 'error'}}
+    if image_matches_update(service, update):
+        result.update(status='current', reason='The running image matches the checked image.')
+        return result
+    precedence = compare_versions(service.get('version'), update.get('version'))
+    if precedence == 1:
+        result.update(status='available', reason='A newer version is available for the configured image tag.')
+    elif precedence == 0:
+        result.update(status='current', reason='The version is unchanged. Image rebuilds do not trigger update notifications.')
+    elif precedence == -1:
+        result.update(status='current', reason='The checked version is older than the running version.')
+    else:
+        result.update(status='unverified', reason='A newer version could not be verified from the image labels. A different digest alone is not an update.')
+    return result
+
+
 def available_version(image, manifest, config_digest):
     """Read labels from the exact remote manifest, never a tag that may have moved."""
     entries = manifest if isinstance(manifest, list) else [manifest]
@@ -97,16 +155,35 @@ def inventory():
     for start in range(0, len(ids), 50):
         containers.extend(json.loads(run(["docker", "inspect", *ids[start:start + 50]])))
     images = {}
-    for image in {c["Image"] for c in containers}:
+    # Read the container's platform from its immutable image, never a mutable
+    # tag or the host's default platform within a multi-platform index.
+    def image_key(container):
+        platform = (container.get('ImageManifestDescriptor') or {}).get('platform') or {}
+        selected = '/'.join(platform[k] for k in ('os', 'architecture', 'variant') if platform.get(k))
+        return container['Image'], selected
+    for ref, platform in {image_key(c) for c in containers}:
         try:
-            images[image] = json.loads(run(["docker", "image", "inspect", image]))[0]
+            argv = ['docker', 'image', 'inspect', ref] + (['--platform', platform] if platform else [])
+            images[ref, platform] = json.loads(run(argv))[0]
         except RuntimeError:
-            images[image] = {}
+            images[ref, platform] = {}
+            if platform:
+                # Older Docker clients may not expose --platform. Accept the
+                # legacy inspection only if it describes the requested variant.
+                try:
+                    legacy = json.loads(run(['docker', 'image', 'inspect', ref]))[0]
+                    actual = '/'.join(legacy.get(k, '') for k in ('Os', 'Architecture', 'Variant')).rstrip('/')
+                    if actual == platform:
+                        images[ref, platform] = legacy
+                except RuntimeError:
+                    pass
     services = []
     for c in containers:
         labels = c["Config"].get("Labels") or {}
         project = labels.get("com.docker.compose.project")
-        image = images[c["Image"]]
+        image = images[image_key(c)]
+        manifest = c.get('ImageManifestDescriptor') or {}
+        platform = manifest.get('platform') or {"os": image.get("Os", "linux"), "architecture": image.get("Architecture"), "variant": image.get("Variant", "")}
         image_labels = (image.get("Config") or {}).get("Labels") or {}
         ports = []
         for port, bindings in (c["NetworkSettings"].get("Ports") or {}).items():
@@ -115,14 +192,15 @@ def inventory():
         services.append({
             "id": c["Id"], "name": name, "container": c["Name"].lstrip("/"),
             "project": project, "image": c["Config"]["Image"], "image_id": c["Image"],
-            "version": image_version(image_labels),
+            "image_manifest_digest": manifest.get('digest'),
+            "version": image_version(image_labels) or image_version(manifest.get('annotations') or {}),
             "state": c["State"]["Status"], "health": c["State"].get("Health", {}).get("Status"),
             "started": c["State"].get("StartedAt"), "ports": ports,
             "restart_policy": c["HostConfig"].get("RestartPolicy", {}).get("Name"),
             "mounts": [{"destination": m["Destination"], "type": m["Type"], "rw": m["RW"]} for m in c.get("Mounts", [])],
             "working_dir": labels.get("com.docker.compose.project.working_dir"),
             "config_files": labels.get("com.docker.compose.project.config_files", "").split(",") if project else [],
-            "platform": {"os": image.get("Os", "linux"), "architecture": image.get("Architecture"), "variant": image.get("Variant", "")},
+            "platform": {k: platform.get(k, '') for k in ('os', 'architecture', 'variant')},
             "update": {"status": "unchecked"},
         })
     return services
@@ -278,8 +356,8 @@ def timezone_info():
             "local_time": local.isoformat(timespec="seconds")}
 
 
-def remote_config_digest(manifest, platform):
-    """Compare the platform image config digest, not an index to a child digest."""
+def remote_image_identity(manifest, platform):
+    """Keep both digests of the selected platform; indexes aren't config IDs."""
     entries = manifest if isinstance(manifest, list) else [manifest]
     matches = []
     for entry in entries:
@@ -293,8 +371,17 @@ def remote_config_digest(manifest, platform):
         data = entry.get("SchemaV2Manifest") or entry.get("OCIManifest") or entry
         digest = data.get("config", {}).get("digest")
         if digest:
-            matches.append(digest)
-    return matches[0] if len(set(matches)) == 1 else None
+            matches.append((digest, descriptor.get('digest')))
+    configs = {config for config, _ in matches}
+    manifests = {digest for _, digest in matches}
+    if len(configs) != 1:
+        return None
+    return {'digest': next(iter(configs)), 'manifest_digest': next(iter(manifests)) if len(manifests) == 1 else None}
+
+
+def remote_config_digest(manifest, platform):
+    identity = remote_image_identity(manifest, platform)
+    return identity['digest'] if identity else None
 
 
 def check_updates(services):
@@ -308,13 +395,12 @@ def check_updates(services):
         if key not in cache:
             try:
                 raw = json.loads(run(["docker", "manifest", "inspect", "--verbose", image], timeout=45))
-                digest = remote_config_digest(raw, s["platform"])
-                cache[key] = {"digest": digest, "version": available_version(image, raw, digest) if digest != s["image_id"] else s.get("version")} if digest else {"error": "Registry did not return an unambiguous image for this platform."}
+                identity = remote_image_identity(raw, s["platform"])
+                cache[key] = {**identity, "version": s.get('version') if image_matches_update(s, identity) else available_version(image, raw, identity['digest'])} if identity else {"error": "Registry did not return an unambiguous image for this platform."}
             except Exception as exc:
                 cache[key] = {"error": str(exc)[:400]}
         result = cache[key]
-        s["update"] = {**result, "checked": time.time(), "status": "unknown" if "error" in result else (
-            "available" if result["digest"] != s["image_id"] else "current")}
+        s["update"] = classify_update(s, {**result, "checked": time.time(), "status": "unknown" if "error" in result else 'available'})
     return services
 
 

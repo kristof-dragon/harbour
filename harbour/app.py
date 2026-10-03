@@ -65,11 +65,10 @@ def preserve_update_checks(services, previous):
             continue
         update = prior.get('update', {})
         if prior.get('image_id') == service['image_id']:
-            service['update'] = dict(update) if update else service['update']
-        elif update.get('status') in {'available', 'current'} and update.get('digest') and update['digest'] == service['image_id']:
-            # The previously available config digest is now the running image.
-            service['update'] = {k: v for k, v in update.items() if k != 'error'}
-            service['update'].update(status='current', version=service.get('version'))
+            service['update'] = remote_probe.classify_update(service, update) if update else service['update']
+        elif update.get('status') in {'available', 'current', 'unverified'} and remote_probe.image_matches_update(service, update):
+            # The checked platform image is now running, on either image store.
+            service['update'] = remote_probe.classify_update(service, {**update, 'version': service.get('version')})
 
 
 def refresh_server(id_, updates=False):
@@ -355,6 +354,9 @@ def public_server(server, user):
     for warning in warnings:
         warning['dismissed'] = warning_notification(warning) in dismissed
     for s in services:
+        # Reclassify cached checks too, so an upgrade immediately clears old
+        # same-version badges without waiting for the next registry interval.
+        s['update'] = remote_probe.classify_update(s, s.get('update', {}))
         key = (s["project"] + "/" + s["name"]) if s["project"] else s["container"]
         s["notification_key"] = key
         s["dismissed"] = (key, s.get("update", {}).get("digest")) in dismissed

@@ -84,7 +84,7 @@ def test_local_refresh_reconciles_recreated_image_without_registry_requests(clie
     current=module.get_server('atlas');services=json.loads(current['snapshot'])['services']
     assert len(calls)==1 and current['update_checked']==before['update_checked']
     assert services[0]['version']=='1.143.0' and services[0]['update']['status']=='current'
-    assert services[1]['update']==previous['services'][1]['update']  # Unrelated update retained.
+    assert services[1]['update']==module.remote_probe.classify_update(services[1], previous['services'][1]['update'])  # Unrelated update retained.
 
 
 def test_reconciliation_does_not_guess_for_changed_tags_platforms_or_unknown_digests():
