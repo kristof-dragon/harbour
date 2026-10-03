@@ -29,7 +29,7 @@ python3 scripts/setup_env.py
 python3 scripts/start.py
 ```
 
-The interactive setup asks for the first administrator's username/password, the host port, and your proxy settings. Choose **NPM in Docker on this host** for a shared, dedicated Docker network; choose the second option if NPM runs elsewhere. Local HTTP is available for a loopback-only trial. The wizard creates `.env` with owner-only permissions (`600`) and refuses to overwrite an existing file.
+The interactive setup asks for the first administrator's username/password, the host port, and your proxy settings. Choose option **1** when NPM and Harbour share a dedicated Docker network on the same host. Choose **2** when NPM connects to the Harbour host through its LAN IP and selected host port (including NPM on another machine); this option defaults to listening on all IPv4 interfaces, with an optional specific bind address. It does not require entering the host's LAN IP during setup. Option **4** is for a reverse proxy running directly on the host, outside Docker. Local HTTP is available for a loopback-only trial. The wizard creates `.env` with owner-only permissions (`600`) and refuses to overwrite an existing file.
 
 Your password is entered privately and **only its salted scrypt hash** is written to `.env`. Each hash has a fresh random 128-bit salt. A separate 384-bit random `HARBOUR_SECRET` protects encrypted SSH keys and 2FA data. An encryption key does not need a password salt. No plaintext password is written to disk by the wizard; save your chosen password in your password manager.
 
@@ -39,11 +39,11 @@ If startup or receipt verification fails, the bootstrap fields are retained. If 
 
 A bare `docker compose up -d --build` **does start Harbour**, but cannot clean your host `.env`. If you already used it for first boot, run `python3 scripts/start.py` to complete the same verified cleanup. Once `FIRST_RUN=False`, either command is suitable for subsequent starts; the script additionally waits for health and checks that bootstrap fields are absent. It intentionally reads the generated, unquoted `KEY=value` format and ignores shell overrides of Harbour/Compose variables. Edit non-secret values in `.env` directly for configuration changes.
 
-Open your configured HTTPS origin, or <http://localhost:8080> for the local trial, and sign in with the account you chose. First-run credentials are used **only for an empty database**. Use **Menu → My account** to change your password or enable 2FA later.
+Open your configured HTTPS origin, or `http://localhost:<your-selected-port>` for the local trial, and sign in with the account you chose. First-run credentials are used **only for an empty database**. Use **Menu → My account** to change your password or enable 2FA later.
 
 The container runs as UID 10001, with a read-only root filesystem, no Linux capabilities and no Docker socket mount. Data persists in the `harbour-data` named volume (prefixed by the Compose project). One process owns background polling and host locks; do not add multiple workers or replicas against this database. Keep `COMPOSE_PROJECT_NAME` unchanged after setup so the same data volume is used. Do not use `docker compose down -v` unless intentionally deleting all Harbour data.
 
-The default binding is loopback-only. If a proxy on a different machine must reach Harbour, select that deployment option and enter this Docker host's specific internal IPv4 address; allow access only from your proxy using your host firewall. Use HTTPS at NPM, the exact `HARBOUR_ORIGIN`, secure cookies, and explicit trusted proxies. Forwarded client IPs are ignored from all other peers.
+The Compose default publishes the selected port on all IPv4 host interfaces (`0.0.0.0`), so a separate LAN proxy can reach it without a specific bind address. The wizard uses that default for option 2, and loopback for the local trial, host-local proxy and shared-Docker-network choices. `HARBOUR_BIND_ADDRESS` is optional; set it to a specific host address only when you want to restrict listening. Keep access restricted to your LAN/proxy through the host firewall and router. Use HTTPS at NPM, the exact `HARBOUR_ORIGIN`, secure cookies, and explicit trusted proxies. Forwarded client IPs are ignored from all other peers.
 
 Docker references: [Compose startup/build and health waiting](https://docs.docker.com/reference/cli/docker/compose/up/), [Compose environment files](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/).
 
@@ -99,7 +99,32 @@ HARBOUR_TRUSTED_PROXIES=192.0.2.200/32
 
 Replace the example origin and proxy address with your actual values. Trust the **socket peer address Harbour sees for NPM**, preferably a fixed address on a dedicated Docker network. Avoid a shared subnet; never use `0.0.0.0/0` or `::/0` (rejected at startup). Forward the original client IP in `X-Forwarded-For`. Harbour walks the chain from the trusted proxy towards the client and ignores forwarded headers from untrusted direct peers. Keep Uvicorn's `--no-proxy-headers` flag: Harbour performs this validation itself.
 
-If NPM runs in Docker on the same host, join NPM to a dedicated private network first. The setup wizard records its existing name in `HARBOUR_PROXY_NETWORK` and selects `compose.npm.yaml` through `COMPOSE_FILE`; Harbour then joins that network automatically. In NPM, select scheme **http**, forward hostname **harbour**, forward port **8080**, and enable SSL for your internal hostname. Do not use `localhost` as NPM's upstream. Harbour's published port remains loopback-only. The supplied loopback port binding works for a proxy on the host, not an unrelated proxy container. Do not expose the backend directly on an untrusted network. If a shared NAT makes many users appear to have the same IP, a ban affects all of them.
+If NPM runs in Docker on the same host, join NPM to a dedicated private network first. The setup wizard records its existing name in `HARBOUR_PROXY_NETWORK` and selects `compose.npm.yaml` through `COMPOSE_FILE`; Harbour then joins that network automatically. In NPM, select scheme **http**, forward hostname **harbour**, forward port **8080**, and enable SSL for your internal hostname. Do not use `localhost` as NPM's upstream. The shared-network wizard option restricts Harbour's published port to loopback. The supplied loopback port binding works for a proxy on the host, not an unrelated proxy container. Do not expose the backend directly on an untrusted network. If a shared NAT makes many users appear to have the same IP, a ban affects all of them.
+
+### Selected port and a 502 from NPM
+
+**`HARBOUR_PORT` controls the published host port.** The application, container listener and in-container health check remain on 8080. Compose reads your choice from `.env` when starting; setup does not replace placeholders in `compose.yaml`. In `${HARBOUR_PORT:-8080}`, `8080` is only the fallback when that variable is unset or empty.
+
+For example, with `HARBOUR_PORT=8384` and no bind override, the mapping is `0.0.0.0:8384 → container:8080`. A short Compose mapping `${HARBOUR_PORT:-8080}:8080` is also sufficient: it publishes on the host's interfaces. No particular bind IP is required. The supplied long form keeps an optional IPv4 bind restriction available. The Compose file names these separately as `published` (your host port) and `target` (container port). The start script prints Docker's actual mapping and verifies it matches the configured port. An existing container needs `up` to recreate it after port changes; `docker compose restart` does not change its mapping.
+
+| How NPM connects | Forward hostname / IP | Forward port | Harbour bind address |
+| --- | --- | --- | --- |
+| Shared Docker network | `harbour` | `8080` | Loopback is fine; host port is unused by NPM |
+| Through the Harbour host's LAN IP | Harbour host's actual LAN IP | Your selected port, e.g. `8384` | `0.0.0.0` (default), or that specific LAN IP |
+| Proxy directly on the host, outside Docker | `127.0.0.1` | Your selected port, e.g. `8384` | `127.0.0.1` |
+
+Use **HTTP** for NPM's upstream scheme in each case; HTTPS terminates at NPM. A loopback-only published port cannot be reached through the host's LAN IP. A separate proxy container's `127.0.0.1` points to itself. A 502 means the proxy could not complete its upstream request; do not infer the reason just from the template's fallback port.
+
+On the Harbour Docker host, this displays only the effective published endpoint, without dumping `.env` secrets:
+
+```sh
+docker compose port harbour 8080
+docker compose ps
+```
+
+For an NPM proxy that connects through the host's LAN IP, keep your existing `.env` and set `HARBOUR_PORT=8384` plus `HARBOUR_BIND_ADDRESS=0.0.0.0` (or remove that optional line). An existing `HARBOUR_BIND_ADDRESS=127.0.0.1` from the older wizard must be changed or removed. Run `python3 scripts/start.py` to recreate the container, then set NPM's upstream to **http / the Harbour host's actual LAN IP / 8384**. Do not enter `0.0.0.0` as NPM's upstream; it is only a listening address. Keep the existing `HARBOUR_SECRET`, `FIRST_RUN`, project name and data volume. Do not rerun first-admin setup to change a port. From the proxy's network, check `http://<the-Harbour-host-LAN-IP>:8384/api/health`; a healthy backend returns `{"status":"ok"}`. If NPM still reports 502, inspect its upstream/error log and confirm host firewall reachability and the HTTP scheme.
+
+See [Docker's distinction between host and container ports](https://docs.docker.com/compose/how-tos/networking/#default-network-and-service-discovery).
 
 **Security & sign-ins** shows the effective origin, trusted proxies, cookie mode, session settings, authentication events and active bans. Defaults: idle 30 minutes, absolute 12 hours, IP and User-Agent binding enabled, 15-minute ban after five failed password/2FA attempts within 15 minutes. Background/dashboard polling does not extend idle sessions; real UI activity sends a separate heartbeat. Browser upgrades or network changes may require a fresh sign-in.
 

@@ -60,14 +60,18 @@ def test_malformed_hash_does_not_fall_back_to_plaintext(seed, monkeypatch):
 
 def test_setup_hashes_secret_input_and_refuses_overwrite(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(setup_env, "ROOT", tmp_path)
-    answers = iter(["3", "admin", "8080"])
+    answers = iter(["3", "admin", "8384"])
     monkeypatch.setattr("builtins.input", lambda _: next(answers))
     password = "private $with#quotes'\\unicode-£"
     monkeypatch.setattr(setup_env.getpass, "getpass", lambda _: password)
     setup_env.main()
     path = tmp_path / ".env"
     original, values = start.read_env(path)
-    assert password not in original and password not in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert password not in original and password not in output
+    assert values["HARBOUR_PORT"] == "8384"
+    assert values["HARBOUR_ORIGIN"] == "http://localhost:8384"
+    assert "http://127.0.0.1:8384" in output
     assert password_ok(password, values["HARBOUR_ADMIN_PASSWORD_HASH"])
     assert len(values["HARBOUR_SECRET"]) == 64
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -89,8 +93,8 @@ def test_proxy_and_bind_validation():
     for value in ("0.0.0.0/0", "::/0", "", "not-an-address"):
         with pytest.raises(ValueError):
             setup_env.proxies(value)
-    with pytest.raises(ValueError):
-        setup_env.bind_address("0.0.0.0")
+    assert setup_env.bind_address("0.0.0.0") == "0.0.0.0"
+    assert setup_env.lan_bind_address("0.0.0.0") == "0.0.0.0"
 
 
 def test_cleanup_only_after_receipt_and_recreates_without_secrets(seed, monkeypatch):
@@ -98,6 +102,8 @@ def test_cleanup_only_after_receipt_and_recreates_without_secrets(seed, monkeypa
     calls = []
     def compose(*args, **kwargs):
         calls.append(args)
+        if args[0] == "port":
+            return "127.0.0.1:8080\n"
         if args[0] == "up" and "--force-recreate" in args:
             _, values = start.read_env(path)
             assert values["FIRST_RUN"] == "False"
@@ -148,3 +154,58 @@ def test_refuse_symlink_or_changed_env(tmp_path):
     with pytest.raises(RuntimeError, match="changed"):
         start.retire_credentials(target, "FIRST_RUN=True\n")
     assert target.read_text() == "FIRST_RUN=False\n"
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "127.3.4.5", "169.254.1.2", "224.0.0.1"])
+def test_lan_proxy_cannot_accidentally_use_unreachable_bind(address):
+    with pytest.raises(ValueError):
+        setup_env.lan_bind_address(address)
+
+
+def test_lan_proxy_wizard_uses_selected_host_port(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(setup_env, "ROOT", tmp_path)
+    answers = iter(["2", "admin", "8384", "https://harbour.example.test", "198.51.100.2", "127.0.0.1", "198.51.100.3"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr(setup_env.getpass, "getpass", lambda _: "setup-test-password")
+    setup_env.main()
+    _, values = start.read_env(tmp_path / ".env")
+    assert values["HARBOUR_PORT"] == "8384" and values["HARBOUR_BIND_ADDRESS"] == "198.51.100.3"
+    assert "COMPOSE_FILE" not in values
+    assert "NPM upstream: scheme=http, hostname=198.51.100.3, port=8384" in capsys.readouterr().out
+
+
+def test_shared_network_reports_internal_port_separately(capsys):
+    setup_env.show_connections({"HARBOUR_PORT": "8384", "COMPOSE_FILE": "compose.yaml:compose.npm.yaml",
+                               "HARBOUR_BIND_ADDRESS": "127.0.0.1",
+                               "HARBOUR_PROXY_NETWORK": "test-proxy"})
+    output = capsys.readouterr().out
+    assert "http://127.0.0.1:8384" in output
+    assert "NPM upstream: scheme=http, hostname=harbour, port=8080" in output
+
+
+def test_separate_proxy_default_needs_no_specific_bind_address(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(setup_env, "ROOT", tmp_path)
+    answers = iter(["2", "admin", "8384", "https://harbour.example.test", "198.51.100.2", ""])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    monkeypatch.setattr(setup_env.getpass, "getpass", lambda _: "setup-test-password")
+    setup_env.main()
+    _, values = start.read_env(tmp_path / ".env")
+    assert values["HARBOUR_PORT"] == "8384" and values["HARBOUR_BIND_ADDRESS"] == "0.0.0.0"
+    output = capsys.readouterr().out
+    assert "NPM upstream: scheme=http, hostname=<Harbour-host-IP>, port=8384" in output
+    assert "hostname=0.0.0.0" not in output and "http://0.0.0.0" not in output
+
+
+def test_start_rejects_unexpected_published_port(seed, monkeypatch):
+    path = start.ROOT / ".env"
+    start.retire_credentials(path, path.read_text())
+    with path.open("a") as output:
+        output.write("HARBOUR_PORT=8384\n")
+    def compose(*args, **kwargs):
+        if args[0] == "port":
+            return "127.0.0.1:8080\n"
+        if "--check-clean" in args:
+            return '{"clean":true}'
+    monkeypatch.setattr(start, "compose", compose)
+    with pytest.raises(RuntimeError, match="published port does not match"):
+        start.start()

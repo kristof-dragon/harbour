@@ -2,7 +2,13 @@ services:
   harbour:
     build: .
     ports:
-      - "${HARBOUR_BIND_ADDRESS:-127.0.0.1}:${HARBOUR_PORT:-8080}:8080"
+      # HARBOUR_PORT is the externally published HOST port.
+      # The application and its health check always use 8080 inside the container.
+      - target: 8080
+        published: "${HARBOUR_PORT:-8080}"
+        # Optional restriction; otherwise publish on all IPv4 host interfaces.
+        host_ip: "${HARBOUR_BIND_ADDRESS:-0.0.0.0}"
+        protocol: tcp
     environment:
       FIRST_RUN: ${FIRST_RUN:-False}
       HARBOUR_ADMIN: ${HARBOUR_ADMIN:-}

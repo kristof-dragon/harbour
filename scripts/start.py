@@ -10,6 +10,11 @@ import subprocess
 import sys
 import tempfile
 
+if __package__:
+    from .setup_env import show_connections
+else:
+    from setup_env import show_connections
+
 ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP_KEYS = {"HARBOUR_ADMIN", "HARBOUR_ADMIN_PASSWORD_HASH", "HARBOUR_BOOTSTRAP_ID", "HARBOUR_PASSWORD"}
 
@@ -91,6 +96,11 @@ def start():
     result = json.loads(compose("exec", "-T", "harbour", "python", "-m", "harbour.bootstrap", "--check-clean", capture=True))
     if not result.get("clean"):
         raise RuntimeError("Bootstrap environment is not clean. Check .env and rerun this script.")
+    published = compose("port", "harbour", "8080", capture=True).strip()
+    expected = values.get("HARBOUR_PORT") or "8080"
+    if expected != "0" and not any(address.rsplit(":", 1)[-1] == expected for address in published.splitlines()):
+        raise RuntimeError("Docker's published port does not match HARBOUR_PORT. Check Compose overrides and recreate the container.")
+    show_connections(values, published)
     print("Harbour is healthy. Open " + values.get("HARBOUR_ORIGIN", "your configured origin") + ".")
     print("FIRST_RUN=False is set. Keep .env / HARBOUR_SECRET and the data volume backed up securely.")
 

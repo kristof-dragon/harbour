@@ -47,8 +47,15 @@ def network_name(value):
 
 def bind_address(value):
     address = ipaddress.IPv4Address(value)
-    if address.is_unspecified or address.is_multicast:
-        raise ValueError("Use loopback or this machine's specific internal IPv4 address.")
+    if address.is_multicast:
+        raise ValueError("Use 0.0.0.0 for all IPv4 interfaces, loopback, or a specific host address.")
+    return str(address)
+
+
+def lan_bind_address(value):
+    address = ipaddress.IPv4Address(bind_address(value))
+    if address.is_loopback or address.is_link_local or address.is_reserved or int(address) == 0xffffffff:
+        raise ValueError("Use 0.0.0.0 (all IPv4 interfaces) or the Harbour host's LAN IP. A separate proxy cannot reach a loopback-only listener.")
     return str(address)
 
 
@@ -60,8 +67,8 @@ def port(value):
 
 
 def deployment_mode(value):
-    if value not in ("1", "2", "3"):
-        raise ValueError("Choose 1, 2 or 3.")
+    if value not in ("1", "2", "3", "4"):
+        raise ValueError("Choose 1, 2, 3 or 4.")
     return value
 
 
@@ -97,21 +104,43 @@ def write_env(path, values):
         os.fsync(output.fileno())
 
 
+def show_connections(values, published=None):
+    host = values.get("HARBOUR_BIND_ADDRESS") or "0.0.0.0"
+    host_port = values.get("HARBOUR_PORT") or "8080"
+    upstream_host = "<Harbour-host-IP>" if ipaddress.ip_address(host).is_unspecified else host
+    print("Published mapping: " + (published or host + ":" + host_port) + " -> container:8080")
+    print("Host-facing HTTP endpoint: http://" + upstream_host + ":" + host_port)
+    print("Container listener / health check: port 8080 (independent of the host port).")
+    shared_network = "compose.npm.yaml" in values.get("COMPOSE_FILE", "").split(":")
+    if shared_network:
+        print("NPM upstream: scheme=http, hostname=harbour, port=8080.")
+        print("NPM must share Docker network: " + values.get("HARBOUR_PROXY_NETWORK", "(check .env)"))
+        print("The selected host port is used only when connecting through the Docker host's published address.")
+    elif values.get("HARBOUR_TRUSTED_PROXIES"):
+        print(f"NPM upstream: scheme=http, hostname={upstream_host}, port={host_port}.")
+        if ipaddress.ip_address(host).is_loopback:
+            print("This loopback address works only for a proxy running directly on the host, not a separate proxy container or machine.")
+    if values.get("HARBOUR_SECURE_COOKIE", "false").lower() == "true":
+        print("Use HTTPS in the browser; NPM's connection to Harbour uses HTTP.")
+
+
 def main():
     path = ROOT / ".env"
     if path.exists() or path.is_symlink():
         raise RuntimeError(".env already exists. Edit its non-secret settings directly; never regenerate HARBOUR_SECRET for an existing database.")
     print("Harbour setup — secrets stay on this machine. Nothing is sent to GitHub.")
-    print("1. Nginx Proxy Manager in Docker on this host (recommended)")
-    print("2. HTTPS reverse proxy on the host or another internal machine")
+    print("1. NPM and Harbour share a Docker network on this host")
+    print("2. NPM connects via this host's LAN IP and selected host port")
     print("3. Local HTTP only, for an initial trial")
-    mode = ask("Deployment", "1", deployment_mode)
+    print("4. HTTPS reverse proxy running directly on this host (outside Docker)")
+    mode = ask("Deployment", "2", deployment_mode)
     values = {"COMPOSE_PROJECT_NAME": "harbour", "FIRST_RUN": "True"}
     values["HARBOUR_ADMIN"] = ask("First admin username", "admin", username)
     values["HARBOUR_ADMIN_PASSWORD_HASH"] = admin_password()
     values["HARBOUR_BOOTSTRAP_ID"] = secrets.token_hex(16)
     values["HARBOUR_SECRET"] = secrets.token_urlsafe(48)
-    values["HARBOUR_PORT"] = ask("Host port", "8080", port)
+    print("The selected port is published on the Docker host. The container keeps listening on 8080.")
+    values["HARBOUR_PORT"] = ask("Externally published host port", "8080", port)
     values["HARBOUR_BIND_ADDRESS"] = "127.0.0.1"
     if mode == "3":
         values["HARBOUR_ORIGIN"] = "http://localhost:" + values["HARBOUR_PORT"]
@@ -125,13 +154,12 @@ def main():
         if mode == "1":
             values["HARBOUR_PROXY_NETWORK"] = ask("Existing dedicated Docker network already joined by NPM", validate=network_name)
             values["COMPOSE_FILE"] = "compose.yaml:compose.npm.yaml"
-        else:
-            values["HARBOUR_BIND_ADDRESS"] = ask("Listen IPv4 (loopback for host proxy; local LAN IP for remote proxy)", "127.0.0.1", bind_address)
+        elif mode == "2":
+            values["HARBOUR_BIND_ADDRESS"] = ask("Optional bind address (0.0.0.0 listens on all IPv4 interfaces)", "0.0.0.0", lan_bind_address)
     write_env(path, values)
     print("Created .env with owner-only permissions (600). It contains a salted scrypt password hash, never the plaintext password.")
     print("Save your chosen password in your password manager. Keep a separate secure backup of HARBOUR_SECRET.")
-    if mode == "1":
-        print("In NPM: forward HTTP to harbour:8080 on the chosen network; enable HTTPS and forward X-Forwarded-For.")
+    show_connections(values)
     print("Next: python3 scripts/start.py")
     print("This builds/starts Docker, verifies the seeded admin, removes bootstrap fields, sets FIRST_RUN=False, and recreates the container without the bootstrap hash.")
 
