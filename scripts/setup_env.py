@@ -105,10 +105,9 @@ def write_env(path, values):
 
 
 def show_connections(values, published=None):
-    host = values.get("HARBOUR_BIND_ADDRESS") or "0.0.0.0"
     host_port = values.get("HARBOUR_PORT") or "8080"
-    upstream_host = "<Harbour-host-IP>" if ipaddress.ip_address(host).is_unspecified else host
-    print("Published mapping: " + (published or host + ":" + host_port) + " -> container:8080")
+    upstream_host = "<Harbour-host-IP>"
+    print("Published mapping: " + (published or host_port) + " -> container:8080")
     print("Host-facing HTTP endpoint: http://" + upstream_host + ":" + host_port)
     print("Container listener / health check: port 8080 (independent of the host port).")
     shared_network = "compose.npm.yaml" in values.get("COMPOSE_FILE", "").split(":")
@@ -118,8 +117,6 @@ def show_connections(values, published=None):
         print("The selected host port is used only when connecting through the Docker host's published address.")
     elif values.get("HARBOUR_TRUSTED_PROXIES"):
         print(f"NPM upstream: scheme=http, hostname={upstream_host}, port={host_port}.")
-        if ipaddress.ip_address(host).is_loopback:
-            print("This loopback address works only for a proxy running directly on the host, not a separate proxy container or machine.")
     if values.get("HARBOUR_SECURE_COOKIE", "false").lower() == "true":
         print("Use HTTPS in the browser; NPM's connection to Harbour uses HTTP.")
 
@@ -155,7 +152,7 @@ def main():
             values["HARBOUR_PROXY_NETWORK"] = ask("Existing dedicated Docker network already joined by NPM", validate=network_name)
             values["COMPOSE_FILE"] = "compose.yaml:compose.npm.yaml"
         elif mode == "2":
-            values["HARBOUR_BIND_ADDRESS"] = ask("Optional bind address (0.0.0.0 listens on all IPv4 interfaces)", "0.0.0.0", lan_bind_address)
+            values["HARBOUR_BIND_ADDRESS"] = ask("Optional bind address for a custom port mapping (unused by default)", "0.0.0.0", lan_bind_address)
     write_env(path, values)
     print("Created .env with owner-only permissions (600). It contains a salted scrypt password hash, never the plaintext password.")
     print("Save your chosen password in your password manager. Keep a separate secure backup of HARBOUR_SECRET.")

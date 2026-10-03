@@ -71,7 +71,7 @@ def test_setup_hashes_secret_input_and_refuses_overwrite(tmp_path, monkeypatch, 
     assert password not in original and password not in output
     assert values["HARBOUR_PORT"] == "8384"
     assert values["HARBOUR_ORIGIN"] == "http://localhost:8384"
-    assert "http://127.0.0.1:8384" in output
+    assert "http://<Harbour-host-IP>:8384" in output
     assert password_ok(password, values["HARBOUR_ADMIN_PASSWORD_HASH"])
     assert len(values["HARBOUR_SECRET"]) == 64
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -171,7 +171,7 @@ def test_lan_proxy_wizard_uses_selected_host_port(tmp_path, monkeypatch, capsys)
     _, values = start.read_env(tmp_path / ".env")
     assert values["HARBOUR_PORT"] == "8384" and values["HARBOUR_BIND_ADDRESS"] == "198.51.100.3"
     assert "COMPOSE_FILE" not in values
-    assert "NPM upstream: scheme=http, hostname=198.51.100.3, port=8384" in capsys.readouterr().out
+    assert "NPM upstream: scheme=http, hostname=<Harbour-host-IP>, port=8384" in capsys.readouterr().out
 
 
 def test_shared_network_reports_internal_port_separately(capsys):
@@ -179,7 +179,7 @@ def test_shared_network_reports_internal_port_separately(capsys):
                                "HARBOUR_BIND_ADDRESS": "127.0.0.1",
                                "HARBOUR_PROXY_NETWORK": "test-proxy"})
     output = capsys.readouterr().out
-    assert "http://127.0.0.1:8384" in output
+    assert "http://<Harbour-host-IP>:8384" in output
     assert "NPM upstream: scheme=http, hostname=harbour, port=8080" in output
 
 
