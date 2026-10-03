@@ -4,6 +4,7 @@ import hmac
 import io
 import json
 import socket
+import threading
 import time
 from pathlib import Path
 
@@ -47,6 +48,42 @@ class ProbeError(RuntimeError):
         self.latency_ms = latency_ms
 
 
+class Cancelled(RuntimeError):
+    """An intentionally cancelled read, never a server health failure."""
+
+
+class Cancellation:
+    def __init__(self):
+        self.event = threading.Event()
+        self.lock = threading.Lock()
+        self.closer = None
+
+    def is_set(self):
+        return self.event.is_set()
+
+    def check(self):
+        if self.is_set():
+            raise Cancelled('Resource check cancelled')
+
+    def bind(self, closer):
+        with self.lock:
+            self.closer = closer
+        if self.is_set():
+            closer()
+            self.check()
+
+    def stop(self):
+        self.event.set()
+        with self.lock:
+            closer = self.closer
+        if closer:
+            closer()
+
+    def unbind(self):
+        with self.lock:
+            self.closer = None
+
+
 class HostKeyMismatch(paramiko.SSHException):
     pass
 
@@ -78,13 +115,18 @@ def stored_key(key_id):
     return parse_key(credential["private_key"], credential.get("passphrase"))
 
 
-def connect(server, **credential):
+def connect(server, cancel=None, **credential):
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(PinnedHostKey(server["fingerprint"]))
     try:
+        if cancel:
+            cancel.bind(client.close)
+            cancel.check()
         client.connect(server["host"], port=server["port"], username=server["username"],
                        allow_agent=False, look_for_keys=False, timeout=10, auth_timeout=15, banner_timeout=15,
                        disabled_algorithms=DISABLED_ALGORITHMS, **credential)
+        if cancel:
+            cancel.check()
         return client
     except Exception:
         client.close()
@@ -183,22 +225,26 @@ class ProgressFrames:
         return self.result
 
 
-def request(server, payload, on_event=None):
+def request(server, payload, on_event=None, cancel=None):
     if store.DEMO:
         raise RuntimeError("SSH is disabled in demo mode")
     client = None
     credential = {}
     connected, latency_ms = False, None
     try:
+        if cancel:
+            cancel.check()
         credential = ({'password': store.cipher().decrypt(server['password_encrypted'].encode()).decode()}
                       if server.get('auth_method') == 'password' else {'pkey': stored_key(server['key_id'])})
-        client = connect(server, **credential)
+        client = connect(server, **credential, **({'cancel': cancel} if cancel else {}))
         transport = client.get_transport()
         transport.set_keepalive(20)
         connected = True
         begin = time.monotonic()
         _, reply, _ = client.exec_command("true", timeout=10)
         while not reply.channel.exit_status_ready():
+            if cancel:
+                cancel.check()
             if time.monotonic() - begin > 10:
                 raise TimeoutError("SSH latency check timed out")
             time.sleep(.005)
@@ -214,6 +260,8 @@ def request(server, payload, on_event=None):
         else:
             source += "\ntry:\n print(json.dumps(handle(json.loads(" + repr(json.dumps(payload)) + "))))\nexcept Exception as exc:\n print(json.dumps({'error': str(exc)}))\n"
         stdin, stdout, stderr = client.exec_command("python3 -", timeout=15)
+        if cancel:
+            cancel.check()
         stdin.write(source)
         stdin.flush()
         stdin.channel.shutdown_write()
@@ -222,6 +270,8 @@ def request(server, payload, on_event=None):
         frames = ProgressFrames(on_event) if streaming else None
         deadline = time.monotonic() + (900 if payload.get("updates") or payload.get("operation") == "execute" else 90)
         while True:
+            if cancel:
+                cancel.check()
             if channel.recv_ready():
                 chunk = channel.recv(65536)
                 if frames:
@@ -245,6 +295,8 @@ def request(server, payload, on_event=None):
         result["latency_ms"] = latency_ms
         return result
     except Exception as exc:
+        if cancel and cancel.is_set():
+            raise Cancelled('Resource check cancelled') from None
         status = "up" if connected else "down" if isinstance(exc, (OSError, TimeoutError)) else "unknown"
         message = str(exc)
         if server.get('auth_method') == 'password' and not connected and not isinstance(exc, HostKeyMismatch):
@@ -256,3 +308,5 @@ def request(server, payload, on_event=None):
     finally:
         if client:
             client.close()
+        if cancel:
+            cancel.unbind()

@@ -3,11 +3,12 @@ import json
 import math
 import threading
 import time
+from contextlib import nullcontext
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import remote_probe, store, volumes
+from . import polling, remote_probe, store, volumes
 from .auth import admin, authenticated
 
 router = APIRouter(prefix="/api")
@@ -83,13 +84,16 @@ def put(con, server_id, bucket, resolution, payload):
     con.execute("INSERT OR REPLACE INTO resource_history VALUES (?,?,?,?)", (server_id, bucket, resolution, json.dumps(payload)))
 
 
-def record(server_id, metrics=None, latency_ms=None, up=False, now=None):
+def record(server_id, metrics=None, latency_ms=None, up=False, now=None, connection=None):
     now = time.time() if now is None else now
     resolution = policy()["week1_minutes"] * 60
     bucket = int(now // resolution * resolution)
-    with store.db() as con:
-        con.execute("BEGIN IMMEDIATE")
+    with (nullcontext(connection) if connection is not None else store.db()) as con:
+        if connection is None:
+            con.execute("BEGIN IMMEDIATE")
         server = con.execute("SELECT * FROM servers WHERE id=?", (server_id,)).fetchone()
+        if not server:
+            return
         if metrics and server:
             metrics = {**metrics, "disks": [d for d in metrics["disks"] if volumes.options(dict(server), d["mount"])["monitor"]]}
         payload = sample_payload(metrics, latency_ms, up)
@@ -206,6 +210,7 @@ def save_policy(body: MonitoringPolicy, user=Depends(admin)):
     if any(n not in options for n, options in zip(sizes, choices)) or any(b < a or b % a for a, b in zip(sizes, sizes[1:])):
         raise HTTPException(400, "Older tiers must use equal or coarser resolutions that are multiples of the previous tier")
     store.execute("UPDATE settings SET value=? WHERE key='monitoring'", (json.dumps(values),))
+    polling.changed.set()
     # Retention applies on the next hourly sweep; no large synchronous deletion in a request.
     return {"ok": True}
 
@@ -218,9 +223,14 @@ class ServerMonitoring(BaseModel):
 
 @router.put("/servers/{id_}/monitoring")
 def save_server_monitoring(id_: str, body: ServerMonitoring, user=Depends(admin)):
-    if not store.one("SELECT 1 FROM servers WHERE id=?", (id_,)):
+    server = store.one("SELECT monitoring_enabled FROM servers WHERE id=?", (id_,))
+    if not server:
         raise HTTPException(404, "Server not found")
-    store.execute("UPDATE servers SET monitoring_enabled=?,poll_seconds=? WHERE id=?", (int(body.enabled), body.poll_seconds, id_))
+    with store.db() as con:
+        con.execute("UPDATE servers SET monitoring_enabled=?,poll_seconds=? WHERE id=?", (int(body.enabled), body.poll_seconds, id_))
+        if body.enabled and not server["monitoring_enabled"]:
+            con.execute("UPDATE servers SET last_attempt=NULL WHERE id=?", (id_,))
+    polling.changed.set()
     return {"ok": True}
 
 

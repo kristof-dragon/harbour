@@ -49,7 +49,7 @@ def test_next_job_starts_before_deferred_refresh_and_paused_host_gets_local_deta
     def refresh(id_, updates=False):
         refreshes.append((id_, updates));refresh_started.set();assert finish_refresh.wait(3)
         raise RuntimeError('Synthetic monitoring failure after task completion')
-    monkeypatch.setattr(module, 'refresh_server', refresh)
+    monkeypatch.setattr(module, 'refresh_inventory', refresh)
     try:
         module.poll_due();assert refresh_started.wait(1)
         # A deliberately blocked follow-up cannot keep completed jobs running.
@@ -103,6 +103,6 @@ def test_scheduled_registry_checks_still_run_when_due(client,monkeypatch):
     store.execute("UPDATE servers SET last_attempt=0,update_checked=0 WHERE id='atlas'")
     calls=[];done=threading.Event()
     def refresh(id_, updates=False):calls.append((id_,updates));done.set()
-    monkeypatch.setattr(module,'refresh_server',refresh)
+    monkeypatch.setattr(module,'refresh_inventory',refresh)
     module.poll_due();assert done.wait(1)
     assert calls==[('atlas',True)]

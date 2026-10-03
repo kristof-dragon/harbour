@@ -20,7 +20,7 @@ def submit(client, action='pull', host='atlas', targets=None):
 def test_fifo_queue_continues_after_failure_without_blocking_other_hosts(client,monkeypatch):
     monkeypatch.setattr(store,'DEMO',False)
     entered=threading.Event();release=threading.Event();calls=[]
-    def request(server,payload,on_event=None):
+    def request(server,payload,on_event=None,**kwargs):
         calls.append((server['id'],payload['action']))
         if server['id']=='atlas' and payload['action']=='pull':
             on_event({'kind':'step','completed':0,'total':1,'label':'Pulling images'})
@@ -55,7 +55,7 @@ def test_resources_record_while_docker_is_busy_and_preserve_container_inventory(
     before=module.get_server('atlas');snapshot=json.loads(before['snapshot'])
     metrics=copy.deepcopy(snapshot['metrics']);metrics['cpu']=63.2;metrics['docker']=None
     completed=threading.Event();requests=[]
-    def request(server,payload,on_event=None):
+    def request(server,payload,on_event=None,**kwargs):
         requests.append(payload);completed.set()
         return {'metrics':metrics,'latency_ms':5.4}
     monkeypatch.setattr(ssh,'request',request)
@@ -100,7 +100,7 @@ def test_connection_change_while_queued_fails_without_remote_execution(client,mo
 def test_quiet_command_keeps_heartbeat_and_elapsed_information(client,monkeypatch):
     monkeypatch.setattr(store,'DEMO',False)
     entered=threading.Event();release=threading.Event()
-    def request(server,payload,on_event=None):
+    def request(server,payload,on_event=None,**kwargs):
         on_event({'kind':'step','completed':0,'total':1,'label':'Applying containers'})
         on_event({'kind':'heartbeat'});entered.set();release.wait(3)
         return {'ok':True,'output':''}
@@ -149,13 +149,13 @@ def test_resource_pool_does_not_wait_for_saturated_docker_workers(client,monkeyp
         store.execute("UPDATE servers SET last_attempt=0 WHERE id='atlas'")
         seen=threading.Event()
         original=module.poll_resources
-        def resources(server,lock):
-            try:original(server,lock)
+        def resources(server,lock,**kwargs):
+            try:original(server,lock,**kwargs)
             finally:seen.set()
         monkeypatch.setattr(module,'poll_resources',resources)
         try:
-            module.poll_due()  # Full poll waits for a worker and reserves the Docker lock.
-            module.poll_due()  # Lightweight pool is independent.
+            module.poll_due()  # Inventory waits for a worker; resources start independently.
+            module.poll_due()  # Repeated scheduling does not duplicate a resource check.
             assert seen.wait(1) and module.server_lock('atlas').locked()
         finally:blocker.set()
 

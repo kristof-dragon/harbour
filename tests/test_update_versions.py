@@ -168,7 +168,9 @@ def test_action_refresh_clears_only_applied_updates(client, monkeypatch, action,
         calls.append(payload['operation'])
         if payload['operation'] == 'execute':
             return {'ok': ok, 'output': 'Done' if ok else 'Apply failed'}
-        assert payload['operation'] == 'snapshot' and payload['updates'] is False
+        if payload['operation'] == 'resources':
+            return {'metrics': copy.deepcopy(observed['metrics'])}
+        assert payload['operation'] == 'snapshot' and payload['updates'] is False and payload['resources'] is False
         return observed
     monkeypatch.setattr(module.ssh, 'request', request)
     task = submit(client, action)
@@ -177,5 +179,5 @@ def test_action_refresh_clears_only_applied_updates(client, monkeypatch, action,
     current = next(s for s in client.get('/api/dashboard').json()['servers'] if s['id'] == 'atlas')
     assert current['services'][0]['update']['status'] == ('current' if applied else 'available')
     assert current['updates'] == (2 if applied else 3)
-    assert calls == ['execute', 'snapshot']
+    assert calls == ['execute', 'resources', 'snapshot']
     assert module.get_server('atlas')['update_checked'] == before['update_checked']

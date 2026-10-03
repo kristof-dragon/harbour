@@ -118,7 +118,7 @@ def test_plain_creation_and_refresh_payload(client,monkeypatch):
     assert server['server_type']=='plain'
     snap=readings()
     def request(server,payload):
-        assert payload=={'operation':'snapshot','updates':False,'server_type':'plain'}
+        assert payload=={'operation':'resources'}
         return copy.deepcopy(snap)
     monkeypatch.setattr(module.ssh,'request',request)
     module.refresh_server(id_,updates=True)

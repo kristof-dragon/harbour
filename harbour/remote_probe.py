@@ -481,6 +481,8 @@ def handle(request, emit=None):
     if operation == "snapshot":
         if request.get("updates"):
             services = check_updates(services)
+        if request.get('resources') is False:
+            return {'services': services, 'docker': run(['docker', 'version', '--format', '{{.Server.Version}}']).strip() if docker else None}
         return {"metrics": metrics(docker=docker), "services": services}
     if operation == "execute":
         targets = list(request['targets'])

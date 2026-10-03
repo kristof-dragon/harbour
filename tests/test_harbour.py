@@ -18,6 +18,9 @@ from harbour import app as module, demo, remote_probe, ssh, store
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DATA", tmp_path)
     monkeypatch.setattr(store, "DEMO", True)
+    # Tests explicitly advance poll_due; background timers must not race API
+    # assertions or begin unrelated network work in SSH fixture tests.
+    monkeypatch.setattr(module, 'poll_loop', lambda: module.stop.wait())
     with TestClient(module.app) as client:
         login = client.post("/api/login", json={"name": "admin", "password": "test-password-strong"})
         assert login.status_code == 200

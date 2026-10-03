@@ -23,11 +23,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from . import __version__, auth, demo, history, notifications, remote_probe, ssh, store, volumes
+from . import __version__, auth, demo, history, notifications, polling, remote_probe, ssh, store, volumes
 from .auth import authenticated, admin
 
 pool = ThreadPoolExecutor(max_workers=4)
-resource_pool = ThreadPoolExecutor(max_workers=4)
+resource_workers = None
+inventory_attempts = {}
+scheduler_guard = threading.RLock()
+scheduler_wake = polling.changed
 stop = threading.Event()
 locks = {}
 locks_guard = threading.Lock()
@@ -71,125 +74,204 @@ def preserve_update_checks(services, previous):
             service['update'] = remote_probe.classify_update(service, {**update, 'version': service.get('version')})
 
 
+def resource_lock(id_):
+    with locks_guard:
+        return resource_locks.setdefault(id_, threading.Lock())
+
+
 def refresh_server(id_, updates=False):
+    # Manual refresh shares the same resource lock as the dedicated worker.
     server = get_server(id_)
-    store.execute("UPDATE servers SET last_attempt=? WHERE id=?", (time.time(), id_))
+    lock = resource_lock(id_)
+    lock.acquire()
+    poll_resources(server, lock, raise_errors=True)
+    refresh_inventory(id_, updates)
+
+
+def refresh_inventory(id_, updates=False):
+    """Merge Docker inventory without overwriting independently sampled resources."""
+    server = get_server(id_)
     try:
-        previous = json.loads(server["snapshot"])
-        if store.DEMO:
-            snapshot = previous
-            if snapshot.get("metrics"):
-                snapshot["metrics"]["timezone"] = demo.demo_timezone(id_)
-            snapshot["latency_ms"] = {"atlas": 1.8, "luna": 2.4, "edge": 18.6, "backup": 3.2}.get(id_, 2)
+        if server['server_type'] == 'plain':
+            result = {'services': [], 'docker': None}
+        elif store.DEMO:
+            result = json.loads(server['snapshot'])
+            result['docker'] = result.get('metrics', {}).get('docker')
             if updates:
-                for service in snapshot.get("services", []):
-                    service["update"]["checked"] = time.time()
+                for service in result.get('services', []):
+                    service['update']['checked'] = time.time()
         else:
-            snapshot = ssh.request(server, {"operation": "snapshot", "updates": updates and server["server_type"] == "docker", "server_type": server["server_type"]})
-            if not updates:
-                preserve_update_checks(snapshot['services'], previous.get('services', []))
-            snapshot["history"] = (previous.get("history", []) + [snapshot["metrics"]["cpu"]])[-48:]
-        if server["server_type"] == "plain":
-            snapshot["services"] = []
-            snapshot.get("metrics", {})["docker"] = None
-        store.execute("UPDATE servers SET snapshot=?, error=NULL, checked=?, update_checked=?,latency_ms=?,connection_status='up' WHERE id=?",
-                      (json.dumps(snapshot), time.time(), time.time() if updates else server["update_checked"], snapshot.get("latency_ms"), id_))
-    except Exception as exc:
-        status = getattr(exc, "status", "unknown")
-        latency = getattr(exc, "latency_ms", None)
-        store.execute("UPDATE servers SET error=?,connection_status=?,latency_ms=? WHERE id=?", (str(exc)[:1000], status, latency, id_))
-        history.record(id_, latency_ms=latency, up=status == "up")
-        clear_resolved_warning_dismissals(id_)
-        observe_notifications(id_, successful=False)
-        raise
-    history.record(id_, snapshot.get("metrics"), snapshot.get("latency_ms"), up=True)
-    clear_resolved_warning_dismissals(id_)
-    observe_notifications(id_)
-
-
-def poll_one(server, lock):
-    try:
-        refresh_server(server["id"], not server.get('_details_only') and time.time() - server["update_checked"] > history.policy()["update_check_hours"]*3600)
-    except Exception:
-        pass  # Persisted on the server and surfaced in the dashboard.
-    finally:
-        lock.release()
-        dispatch_queued(server['id'])
-
-
-def poll_resources(server, lock):
-    """Continue lightweight readings while Docker holds the operation lock."""
-    id_ = server['id']
-    try:
-        store.execute('UPDATE servers SET last_attempt=? WHERE id=?', (time.time(), id_))
-        if store.DEMO:
-            result = json.loads(get_server(id_)['snapshot'])
-            result['latency_ms'] = server['latency_ms']
-        else:
-            result = ssh.request(server, {'operation': 'resources'})
+            result = ssh.request(server, {'operation': 'snapshot', 'updates': updates,
+                                         'server_type': server['server_type'], 'resources': False})
         with store.db() as con:
             con.execute('BEGIN IMMEDIATE')
             row = con.execute('SELECT * FROM servers WHERE id=?', (id_,)).fetchone()
             if not row or connection_signature(dict(row)) != connection_signature(server):
                 return
             snapshot = json.loads(row['snapshot'])
+            services = result.get('services', [])
+            if not updates:
+                preserve_update_checks(services, snapshot.get('services', []))
+            snapshot['services'] = services
+            snapshot['docker'] = result.get('docker')
+            if snapshot.get('metrics'):
+                snapshot['metrics']['docker'] = result.get('docker')
+            snapshot.pop('docker_error', None)
+            con.execute('UPDATE servers SET snapshot=?,update_checked=? WHERE id=?',
+                        (json.dumps(snapshot), time.time() if updates else row['update_checked'], id_))
+    except Exception as exc:
+        # A Docker/registry failure must not mark a responding host down or insert
+        # a missing resource sample while its dedicated worker is healthy.
+        with store.db() as con:
+            con.execute('BEGIN IMMEDIATE')
+            row = con.execute('SELECT * FROM servers WHERE id=?', (id_,)).fetchone()
+            if row and connection_signature(dict(row)) == connection_signature(server):
+                snapshot = json.loads(row['snapshot'])
+                snapshot['docker_error'] = str(exc)[:1000]
+                con.execute('UPDATE servers SET snapshot=? WHERE id=?', (json.dumps(snapshot), id_))
+        raise
+    clear_resolved_warning_dismissals(id_)
+
+
+def poll_one(server, lock):
+    try:
+        refresh_inventory(server['id'], not server.get('_details_only') and time.time() - server['update_checked'] > history.policy()['update_check_hours']*3600)
+    except Exception:
+        pass  # Persisted on the server and surfaced in the dashboard.
+    finally:
+        with scheduler_guard:
+            inventory_attempts[server['id']] = time.time()
+        lock.release()
+        dispatch_queued(server['id'])
+
+
+def poll_resources(server, lock, cancel=None, background=False, raise_errors=False, release_lock=True):
+    """One resource reading; no Docker calls and no shared network worker pool."""
+    id_ = server['id']
+    def valid(row):
+        return row and connection_signature(dict(row)) == connection_signature(server) and (not background or row['monitoring_enabled']) and not (cancel and cancel.is_set())
+    try:
+        with store.db() as con:
+            con.execute('BEGIN IMMEDIATE')
+            row = con.execute('SELECT * FROM servers WHERE id=?', (id_,)).fetchone()
+            if not valid(row):
+                return
+            con.execute('UPDATE servers SET last_attempt=? WHERE id=?', (time.time(), id_))
+        if store.DEMO:
+            result = json.loads(server['snapshot'])
+            result['latency_ms'] = server['latency_ms']
+            if result.get('metrics'):
+                result['metrics']['timezone'] = demo.demo_timezone(id_)
+        else:
+            result = ssh.request(server, {'operation': 'resources'}, **({'cancel': cancel} if cancel else {}))
+        with store.db() as con:
+            con.execute('BEGIN IMMEDIATE')
+            row = con.execute('SELECT * FROM servers WHERE id=?', (id_,)).fetchone()
+            if not valid(row):
+                return
+            snapshot = json.loads(row['snapshot'])
             metrics = result['metrics']
-            metrics['docker'] = snapshot.get('metrics', {}).get('docker')
+            metrics['docker'] = snapshot.get('docker', snapshot.get('metrics', {}).get('docker')) if row['server_type'] == 'docker' else None
             snapshot['metrics'] = metrics
+            if row['server_type'] == 'plain':
+                snapshot['services'] = []
             snapshot['latency_ms'] = result.get('latency_ms')
             snapshot['history'] = (snapshot.get('history', []) + [metrics['cpu']])[-48:]
-            con.execute("UPDATE servers SET snapshot=?,checked=?,latency_ms=?,connection_status='up' WHERE id=?",
-                        (json.dumps(snapshot), time.time(), result.get('latency_ms'), id_))
-        history.record(id_, metrics, result.get('latency_ms'), up=True)
+            now = time.time()
+            con.execute("UPDATE servers SET snapshot=?,error=NULL,checked=?,latency_ms=?,connection_status='up' WHERE id=?",
+                        (json.dumps(snapshot), now, result.get('latency_ms'), id_))
+            history.record(id_, metrics, result.get('latency_ms'), up=True, now=now, connection=con)
         clear_resolved_warning_dismissals(id_)
         observe_notifications(id_)
+    except ssh.Cancelled:
+        pass
     except Exception as exc:
         status, latency = getattr(exc, 'status', 'unknown'), getattr(exc, 'latency_ms', None)
-        history.record(id_, latency_ms=latency, up=status == 'up')
-        store.execute('UPDATE servers SET error=?,connection_status=?,latency_ms=? WHERE id=?', (str(exc)[:1000], status, latency, id_))
+        with store.db() as con:
+            con.execute('BEGIN IMMEDIATE')
+            row = con.execute('SELECT * FROM servers WHERE id=?', (id_,)).fetchone()
+            if not valid(row):
+                return
+            con.execute('UPDATE servers SET error=?,connection_status=?,latency_ms=? WHERE id=?', (str(exc)[:1000], status, latency, id_))
+            history.record(id_, latency_ms=latency, up=status == 'up', connection=con)
         observe_notifications(id_, successful=False)
+        if raise_errors:
+            raise
+    finally:
+        if release_lock:
+            lock.release()
+
+
+def run_resource_worker(id_, cancel):
+    lock = resource_lock(id_)
+    if not lock.acquire(blocking=False):
+        return  # A manual refresh is already collecting this host's reading.
+    try:
+        server = store.one('SELECT * FROM servers WHERE id=?', (id_,))
+        if server:
+            poll_resources(server, lock, cancel=cancel, background=True, release_lock=False)
     finally:
         lock.release()
 
 
 def poll_due():
+    global resource_workers
+    with scheduler_guard:
+        if stop.is_set():
+            return
+        if resource_workers is None:
+            resource_workers = polling.ServerWorkers(run_resource_worker)
+        servers = store.rows('SELECT * FROM servers')
+        interval = history.policy()['poll_seconds']
+        resource_workers.sync({s['id']: (connection_signature(s), bool(s['monitoring_enabled']), s['poll_seconds'] or interval) for s in servers})
+        for id_ in inventory_attempts.keys() - {s['id'] for s in servers}:
+            inventory_attempts.pop(id_, None)
+        for server in servers:
+            due = time.time() - (server['last_attempt'] or 0) >= (server['poll_seconds'] or interval)
+            if server['monitoring_enabled'] and due:
+                resource_workers.request(server['id'])
+    # Never hold the scheduler lock while dispatching Docker jobs: their completion
+    # path also updates scheduling state before releasing the per-server lock.
     with queue_guard:
         for id_ in list(job_queues):
             dispatch_queued(id_)
-    interval = history.policy()["poll_seconds"]
-    for server in store.rows("SELECT * FROM servers"):
-        resources_due = server['monitoring_enabled'] and time.time() - (server["last_attempt"] or 0) >= (server["poll_seconds"] or interval)
+    for server in servers:
         with queue_guard:
             details_due = server['id'] in detail_refreshes
-        if resources_due or details_due:
-            # Submit only once per host; don't grow an unbounded queue during slow registry calls.
-            lock = server_lock(server["id"])
-            if lock.acquire(blocking=False):
-                with queue_guard:
-                    server['_details_only'] = server['id'] in detail_refreshes
-                    detail_refreshes.discard(server['id'])
-                try:
-                    pool.submit(poll_one, server, lock)
-                except Exception:
-                    if server['_details_only']:
-                        with queue_guard:
-                            detail_refreshes.add(server['id'])
-                    lock.release()
-                    raise
-            elif resources_due:
-                with locks_guard:
-                    resource_lock = resource_locks.setdefault(server['id'], threading.Lock())
-                if resource_lock.acquire(blocking=False):
-                    try:
-                        resource_pool.submit(poll_resources, server, resource_lock)
-                    except Exception:
-                        resource_lock.release()
-                        raise
+        with scheduler_guard:
+            last = inventory_attempts.get(server['id'], server['last_attempt'] or 0)
+        inventory_due = (server['server_type'] == 'docker' and server['monitoring_enabled']
+                         and time.time() - last >= (server['poll_seconds'] or interval))
+        if inventory_due or details_due:
+            lock = server_lock(server['id'])
+            if not lock.acquire(blocking=False):
+                continue
+            with queue_guard:
+                server['_details_only'] = server['id'] in detail_refreshes
+                detail_refreshes.discard(server['id'])
+            with scheduler_guard:
+                inventory_attempts[server['id']] = time.time()
+            try:
+                pool.submit(poll_one, server, lock)
+            except Exception:
+                if server['_details_only']:
+                    with queue_guard:
+                        detail_refreshes.add(server['id'])
+                lock.release()
+                raise
 
 
 def poll_loop():
-    while not stop.wait(5):
-        poll_due()
+    while not stop.is_set():
+        scheduler_wake.wait(5)
+        scheduler_wake.clear()
+        if stop.is_set():
+            break
+        try:
+            poll_due()
+        except Exception:
+            import logging
+            logging.exception('Monitoring scheduler failed; retrying on the next pass')
 
 
 def retention_loop():
@@ -210,6 +292,7 @@ def retention_loop():
 
 @asynccontextmanager
 async def lifespan(app):
+    global resource_workers
     auth.trusted_proxies()
     store.initialize()
     with queue_guard:
@@ -218,17 +301,26 @@ async def lifespan(app):
         demo.seed()
         demo.seed_history()
     stop.clear()
+    scheduler_wake.clear()
+    with scheduler_guard:
+        inventory_attempts.clear()
+        resource_workers = polling.ServerWorkers(run_resource_worker)
     thread = threading.Thread(target=poll_loop, daemon=True)
     thread.start()
     retention = threading.Thread(target=retention_loop, daemon=True)
     retention.start()
     telegram = threading.Thread(target=notifications.delivery_loop, args=(stop,), daemon=True)
     telegram.start()
-    yield
-    stop.set()
-    thread.join(timeout=1)
-    retention.join(timeout=15)
-    telegram.join(timeout=15)
+    try:
+        yield
+    finally:
+        stop.set()
+        scheduler_wake.set()
+        thread.join()
+        resource_workers.close()
+        resource_workers = None
+        retention.join(timeout=15)
+        telegram.join(timeout=15)
 
 
 app = FastAPI(title="Harbour", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -297,6 +389,8 @@ def thresholds_for(server):
 def server_warnings(server, snapshot, threshold):
     services = snapshot.get("services", []) if server["server_type"] == "docker" else []
     warnings = []
+    if server["server_type"] == "docker" and snapshot.get("docker_error") and not server['error']:
+        warnings.append({"id": "docker", "title": "Docker inventory check failed", "detail": snapshot["docker_error"]})
     interval = server["poll_seconds"] or history.policy()["poll_seconds"]
     stale = not server["checked"] or time.time() - server["checked"] > max(120, interval*2 + 15)
     if server["error"]:
@@ -330,6 +424,8 @@ def server_warnings(server, snapshot, threshold):
 def observe_notifications(server_id, successful=True):
     try:
         server = get_server(server_id)
+        if successful and not server['checked']:
+            return
         warnings = server_warnings(server, json.loads(server['snapshot']), thresholds_for(server))[0] if successful else []
         notifications.observe(server, warnings, successful, now=server['checked'] if successful else None)
     except Exception:
@@ -482,6 +578,8 @@ def save_server_settings(id_: str, body: ServerSettingsInput, user=Depends(admin
             con.execute('UPDATE servers SET name=?,thresholds=?,volume_settings=?,monitoring_enabled=?,poll_seconds=?,server_type=? WHERE id=?',
                         (body.name, body.thresholds.model_dump_json() if body.thresholds else None,
                          json.dumps(config), int(body.enabled), body.poll_seconds, body.server_type, id_))
+            if body.enabled and not server['monitoring_enabled']:
+                con.execute('UPDATE servers SET last_attempt=NULL WHERE id=?', (id_,))
             if server['server_type'] != body.server_type:
                 snapshot = json.loads(server['snapshot'])
                 snapshot['services'] = []
@@ -490,6 +588,7 @@ def save_server_settings(id_: str, body: ServerSettingsInput, user=Depends(admin
                             (json.dumps(snapshot), id_))
     finally:
         lock.release()
+    scheduler_wake.set()
     return {'ok': True, 'name': body.name}
 
 
@@ -508,6 +607,7 @@ def save_server_type(id_: str, body: ServerTypeInput, user=Depends(admin)):
                           (body.server_type, json.dumps(snapshot), id_))
     finally:
         lock.release()
+    scheduler_wake.set()
     return {'ok': True}
 
 
@@ -682,6 +782,7 @@ def add_server(body: ServerInput, user=Depends(admin)):
     store.execute("INSERT INTO servers (id,name,host,port,username,fingerprint,key_id,auth_method,password_encrypted,server_type,sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,(SELECT COALESCE(MAX(sort_order),0)+1 FROM servers))",
                   (id_, body.name, body.host, body.port, body.username, body.fingerprint, key_id, body.auth_method, encrypted_password, body.server_type))
     job = queue_job(id_, "refresh", [], user)
+    scheduler_wake.set()
     return {"id": id_, "job": job}
 
 
@@ -718,6 +819,7 @@ def update_connection(id_: str, body: ServerInput, request: Request, user=Depend
         if exc.status_code != 409:
             raise
         job = None  # Background monitoring may already be checking the saved connection.
+    scheduler_wake.set()
     return {'id': id_, 'job': job}
 
 
@@ -733,6 +835,7 @@ def delete_server(id_: str, user=Depends(admin)):
             store.execute("DELETE FROM ssh_keys WHERE id=? AND NOT EXISTS (SELECT 1 FROM servers WHERE key_id=?)", (server["key_id"], server["key_id"]))
     finally:
         lock.release()
+    scheduler_wake.set()
     return {"ok": True}
 
 
