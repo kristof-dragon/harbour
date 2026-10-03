@@ -352,8 +352,9 @@ to{transform:translateY(0);opacity:1}
 .demo-banner span:last-child{display:none}
 .tabs{gap:20px}
 .tabs .tab-meta{display:none}
-.table-heading{grid-template-columns:25px minmax(0,1fr)}
-.group-summary{grid-template-columns:25px minmax(0,1fr);padding:14px 12px;gap:6px}
+.table-heading{grid-template-columns:35px minmax(0,1fr)}
+.group-summary{grid-template-columns:35px minmax(0,1fr);padding:14px 12px;gap:6px}
+.group-summary>.flex{gap:4px}
 .group-icon{display:none}
 .group-icon.status-icon{display:grid;width:24px;height:24px;border-radius:6px}
 .group-icon.status-icon .icon{width:16px;height:16px}
