@@ -8,7 +8,7 @@ const metrics={cpu:24.2,cores:4,memory:{percent:42,total:8e9,used:3.36e9},disks:
 const servers=Array.from({length:24},(_,i)=>({id:'host-'+i,name:'Host '+i,host:'192.0.2.'+(i+1),port:22,metrics:structuredClone(metrics),services:[structuredClone(service)],warnings:[],updates:1,checked:now,update_checked:now,monitoring_enabled:true,connection_status:'up',poll_seconds:15,latency_ms:2,thresholds,server_type:'docker'}));
 let job={id:'task',server_id:'host-0',server_name:'Host 0',actor:'admin',action:'pull_up',status:'running',created:now,progress:{completed:0,total:2,label:'Pulling web',phase:'executing',started:now,heartbeat:now},target_names:['stack / web'],output:Array.from({length:100},(_,i)=>'Download layer '+i).join('\n')};
 let queued={...structuredClone(job),id:'queued',status:'queued',queue_position:1,waiting_for:'pull_up',progress:{}};
-let dashboard={servers,thresholds,jobs:[queued,job]},requests=0,refreshAll=0;
+let dashboard={servers,thresholds,jobs:[queued,job]},requests=0,refreshAll=0,lastPlan=null;
 const history={from:now-3600,to:now,hours:1,resolution_seconds:60,poll_seconds:15,points:Array.from({length:61},(_,i)=>({time:now-3600+i*60,cpu:i===30?null:20+i/10,memory:40,disk:42,temperature:48,cpu_peak:30,temperature_peak:52,disks:[],samples:4,attempts:4})),disk_mounts:['/']};
 const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'harbour/static',req.url==='/'?'index.html':req.url.replace('/static/',''));try{res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html');res.end(fs.readFileSync(file));}catch{res.writeHead(404).end();}});
 (async()=>{
@@ -24,6 +24,7 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  else if(url.pathname==='/api/jobs/task')data=job;
  else if(url.pathname.endsWith('/history'))data=history;
  else if(url.pathname==='/api/servers/refresh-all'){refreshAll++;data={jobs:[],errors:[]};}
+ else if(url.pathname.endsWith('/plan')){lastPlan=route.request().postDataJSON();data={token:'test-plan',commands:[]};}
  else if(url.pathname==='/api/dismiss-all'){
   let dismissed=0;
   for(const s of dashboard.servers){for(const w of s.warnings){if(!w.dismissed)dismissed++;w.dismissed=true;}for(const c of s.services){if(c.update?.status==='available'&&!c.dismissed){dismissed++;c.dismissed=true;}}s.updates=0;}
@@ -108,10 +109,61 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
   assert.equal(await page.locator('.service-summary>.tag').textContent(),status==='available'?' Update':label);
   assert.equal(await page.locator('.available-version').count(),updates);
   assert.match(await page.locator('.running-version').textContent(),/26\.09\.2/);
-  assert.equal(await page.locator('details.group>summary>.tag').textContent(),updates?' 1 update':status==='unverified'?'Not verified':'No updates');
+  assert.equal(await page.locator('details.group>summary .group-updates').textContent(),updates?' 1':status==='unverified'?'Not verified':'No updates');
   assert.equal(await page.locator('[data-key="server:host-0"] .count-badge.update').count(),updates);
  }
  c.project=null;c.update={status:'available',version:'26.10.0',digest:'sha256:candidate'};dashboard.servers[0].updates=1;
+ // Header filters combine with search and constrain bulk actions to matching services.
+ const originalServices=dashboard.servers[0].services;
+ dashboard.servers[0].services=[['web','stack','running',true],['worker','stack','exited',true],['db','stack','running',false],['boot','stack','restarting',true],['idle',null,'exited',false],['paused',null,'paused',false]].map(([id,project,runtime,update])=>({...structuredClone(c),id,name:id,container:id,project,image:'example/'+id+':latest',state:runtime,update:{status:update?'available':'current',version:update?'26.10.0':'26.09.2'}}));
+ await page.evaluate(()=>load());await page.evaluate(()=>{state.tab='containers';state.search='';state.selected.clear();renderMain();});
+ assert.equal(await page.locator('.group-name .group-services').textContent(),'4 services');
+ assert.equal(await page.locator('.group-name .group-updates').getAttribute('aria-label'),'3 updates available');
+ assert.equal(await page.locator('.group-summary>.tag,.group-summary>.muted').count(),0);
+ assert.equal(await page.locator('.table-heading .sliding-control').count(),2);
+ const statusFilter=page.locator('#container-filter-status'),updateFilter=page.locator('#container-filter-updates');
+ const visibleIds=()=>page.locator('.service').evaluateAll(nodes=>nodes.map(n=>n.dataset.open.slice(8)));
+ await page.getByRole('checkbox',{name:'Select stack stack',exact:true}).check();
+ await statusFilter.getByRole('button',{name:'Running',exact:true}).click();
+ assert.deepEqual(await visibleIds(),['web','db','boot']);
+ assert.deepEqual(await page.evaluate(()=>[...state.selected]),['web','db','boot']);
+ assert.equal(await page.locator('.group-services').textContent(),'3 of 4 services');
+ await updateFilter.getByRole('button',{name:'Updates',exact:true}).click();
+ assert.deepEqual(await visibleIds(),['web','boot']);
+ await page.locator('[data-action=bulk][data-kind=pull_up]').click();
+ assert.deepEqual(lastPlan,{action:'pull_up',targets:['web','boot']});
+ await page.getByRole('button',{name:'Cancel',exact:true}).click();
+ await page.locator('#service-search').fill('web');assert.deepEqual(await visibleIds(),['web']);
+ assert.deepEqual(await page.evaluate(()=>[...state.selected]),['web']);
+ await page.locator('#service-search').fill('');
+ dashboard.servers[0].metrics.cpu++;await page.evaluate(()=>load());
+ assert.equal(await statusFilter.getByRole('button',{name:'Running',exact:true}).getAttribute('aria-pressed'),'true');
+ assert.deepEqual(await visibleIds(),['web','boot']);
+ await statusFilter.getByRole('button',{name:'Stopped',exact:true}).click();assert.deepEqual(await visibleIds(),['worker']);
+ await page.getByRole('checkbox',{name:'Select all visible services',exact:true}).check();
+ assert.deepEqual(await page.evaluate(()=>[...state.selected]),['worker']);
+ await updateFilter.getByRole('button',{name:'No updates',exact:true}).click();assert.deepEqual(await visibleIds(),['idle','paused']);
+ assert.deepEqual(await page.evaluate(()=>[...state.selected]),[]);
+ await updateFilter.getByRole('button',{name:'No updates',exact:true}).click();
+ await statusFilter.getByRole('button',{name:'Stopped',exact:true}).click();assert.equal((await visibleIds()).length,6);
+ await page.getByRole('checkbox',{name:'Select all visible services',exact:true}).check();
+ assert.deepEqual(await page.evaluate(()=>[...state.selected]),['group:stack','idle','paused']);
+ await page.getByRole('checkbox',{name:'Select all visible services',exact:true}).uncheck();
+ await page.locator('#service-search').fill('absent');assert.equal(await page.getByText('No matching containers',{exact:true}).isVisible(),true);
+ await page.locator('#service-search').fill('');
+ if(process.env.HARBOUR_TEST_CAPTURE){
+  fs.mkdirSync('test-results',{recursive:true});
+  await page.evaluate(()=>document.querySelector('#toasts').style.visibility='hidden');
+  for(const theme of ['dark','light']){await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await page.locator('.service-table').screenshot({path:`test-results/stack-chips-${theme}-v0112.png`});}
+ }
+ await page.setViewportSize({width:390,height:844});
+ await page.evaluate(()=>setMobilePanel(false));await page.waitForTimeout(300);
+ await statusFilter.getByRole('button',{name:'Running',exact:true}).click();
+ assert.deepEqual(await visibleIds(),['web','db','boot']);
+ assert.equal(await page.locator('.container-filters').evaluate(el=>el.getBoundingClientRect().right<=innerWidth),true);
+ if(process.env.HARBOUR_TEST_CAPTURE)await page.locator('.service-table').screenshot({path:'test-results/stack-chips-mobile-v0112.png'});
+ await statusFilter.getByRole('button',{name:'Running',exact:true}).click();
+ await page.setViewportSize({width:1280,height:800});dashboard.servers[0].services=originalServices;await page.evaluate(()=>load());
  // Dismiss all empties notices but leaves resource warnings and server indicators visible.
  dashboard.servers[0].warnings=[{id:'cpu',title:'CPU usage is high',detail:'99% used',dismissed:false}];
  await page.evaluate(()=>load());await page.getByRole('button',{name:'Open notifications',exact:true}).click();
@@ -134,6 +186,6 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
   await page.evaluate(()=>load());await page.evaluate(()=>{state.tab='activity';renderMain();});await page.locator('.activity-row').first().scrollIntoViewIfNeeded();await page.screenshot({path:'test-results/activity-status-v0110.png'});
  }
  assert.deepEqual(errors,[]);assert.ok(requests>=4);
- console.log('PASS: changed-value rendering, desktop/mobile scroll, focus/caret, expanded panels, persistent animation, live progress/log scroll, task counts, collapsible filters, refresh-all, chart hover/touch/keyboard/missing values, container and Activity status colours, bulk notification dismissal');
+ console.log('PASS: changed-value rendering, desktop/mobile scroll, focus/caret, expanded panels, persistent animation, live progress/log scroll, task counts, collapsible filters, refresh-all, chart hover/touch/keyboard/missing values, container and Activity status colours, bulk notification dismissal, inline stack chips, combined service filters and matching-only bulk actions');
  }finally{await browser.close();server.close();}
 })().catch(err=>{console.error(err);server.close();process.exitCode=1;});
