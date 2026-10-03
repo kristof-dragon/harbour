@@ -33,6 +33,7 @@ locks = {}
 locks_guard = threading.Lock()
 queue_guard = threading.RLock()
 job_queues = {}
+detail_refreshes = set()
 resource_locks = {}
 STATIC = Path(__file__).with_name("static")
 
@@ -47,6 +48,28 @@ def get_server(id_):
     if not server:
         raise HTTPException(404, "Server not found")
     return server
+
+
+def preserve_update_checks(services, previous):
+    """Reconcile local image IDs with the last registry check, including recreations."""
+    old = {s['id']: s for s in previous}
+    identities = {}
+    for service in previous:
+        identity = (service.get('project'), service['name'] if service.get('project') else service['container'])
+        identities.setdefault(identity, []).append(service)
+    for service in services:
+        identity = (service.get('project'), service['name'] if service.get('project') else service['container'])
+        matches = identities.get(identity, [])
+        prior = old.get(service['id']) or (matches[0] if len(matches) == 1 else {})
+        if prior.get('image') != service['image'] or prior.get('platform') != service.get('platform'):
+            continue
+        update = prior.get('update', {})
+        if prior.get('image_id') == service['image_id']:
+            service['update'] = dict(update) if update else service['update']
+        elif update.get('status') in {'available', 'current'} and update.get('digest') and update['digest'] == service['image_id']:
+            # The previously available config digest is now the running image.
+            service['update'] = {k: v for k, v in update.items() if k != 'error'}
+            service['update'].update(status='current', version=service.get('version'))
 
 
 def refresh_server(id_, updates=False):
@@ -65,11 +88,7 @@ def refresh_server(id_, updates=False):
         else:
             snapshot = ssh.request(server, {"operation": "snapshot", "updates": updates and server["server_type"] == "docker", "server_type": server["server_type"]})
             if not updates:
-                old = {s["id"]: s for s in previous.get("services", [])}
-                for s in snapshot["services"]:
-                    prior = old.get(s["id"], {})
-                    if prior.get("image_id") == s["image_id"]:
-                        s["update"] = prior["update"]
+                preserve_update_checks(snapshot['services'], previous.get('services', []))
             snapshot["history"] = (previous.get("history", []) + [snapshot["metrics"]["cpu"]])[-48:]
         if server["server_type"] == "plain":
             snapshot["services"] = []
@@ -87,7 +106,7 @@ def refresh_server(id_, updates=False):
 
 def poll_one(server, lock):
     try:
-        refresh_server(server["id"], time.time() - server["update_checked"] > history.policy()["update_check_hours"]*3600)
+        refresh_server(server["id"], not server.get('_details_only') and time.time() - server["update_checked"] > history.policy()["update_check_hours"]*3600)
     except Exception:
         pass  # Persisted on the server and surfaced in the dashboard.
     finally:
@@ -132,17 +151,26 @@ def poll_due():
         for id_ in list(job_queues):
             dispatch_queued(id_)
     interval = history.policy()["poll_seconds"]
-    for server in store.rows("SELECT * FROM servers WHERE monitoring_enabled=1"):
-        if time.time() - (server["last_attempt"] or 0) >= (server["poll_seconds"] or interval):
+    for server in store.rows("SELECT * FROM servers"):
+        resources_due = server['monitoring_enabled'] and time.time() - (server["last_attempt"] or 0) >= (server["poll_seconds"] or interval)
+        with queue_guard:
+            details_due = server['id'] in detail_refreshes
+        if resources_due or details_due:
             # Submit only once per host; don't grow an unbounded queue during slow registry calls.
             lock = server_lock(server["id"])
             if lock.acquire(blocking=False):
+                with queue_guard:
+                    server['_details_only'] = server['id'] in detail_refreshes
+                    detail_refreshes.discard(server['id'])
                 try:
                     pool.submit(poll_one, server, lock)
                 except Exception:
+                    if server['_details_only']:
+                        with queue_guard:
+                            detail_refreshes.add(server['id'])
                     lock.release()
                     raise
-            else:
+            elif resources_due:
                 with locks_guard:
                     resource_lock = resource_locks.setdefault(server['id'], threading.Lock())
                 if resource_lock.acquire(blocking=False):
@@ -178,6 +206,8 @@ def retention_loop():
 async def lifespan(app):
     auth.trusted_proxies()
     store.initialize()
+    with queue_guard:
+        detail_refreshes.clear()
     if store.DEMO:
         demo.seed()
         demo.seed_history()
@@ -776,6 +806,7 @@ def queue_details(job, pending=None):
 def work_job(server, action, targets, commands, job_id, lock):
     progress = {'completed': 0, 'total': len(commands or []), 'label': 'Connecting to server', 'started': time.time(), 'phase': 'connecting', 'phase_started': time.time()}
     live_output, last_saved = '', 0
+    refresh_details = False
 
     def event_update(event):
         nonlocal live_output, last_saved
@@ -835,20 +866,18 @@ def work_job(server, action, targets, commands, job_id, lock):
             store.execute("UPDATE servers SET snapshot=?,checked=? WHERE id=?", (json.dumps(snapshot), time.time(), server["id"]))
             output = live_output + "\nSimulated operation completed. No real host was contacted."
         else:
+            refresh_details = True
             result = ssh.request(server, {"operation": "execute", "action": action, "targets": targets, "target_refs": target_refs, "expected": commands}, on_event=event_update)
             output, status = result["output"], "succeeded" if result["ok"] else "failed"
-            progress.update(label='Refreshing resources and checking image versions' if action in {'up', 'pull_up'} else 'Refreshing server readings', phase='refreshing', phase_started=time.time())
-            store.execute('UPDATE jobs SET progress=?,output=? WHERE id=?', (json.dumps(progress), output, job_id))
-            try:
-                refresh_server(server["id"], action in {"up", "pull_up"})
-            except Exception as exc:
-                output += "\nFollow-up monitoring failed: " + str(exc)
         progress['label'] = 'Completed' if status == 'succeeded' else 'Failed'
         store.execute("UPDATE jobs SET status=?,output=?,finished=?,progress=? WHERE id=?", (status, output[-60000:], time.time(), json.dumps(progress), job_id))
     except Exception as exc:
         progress['label'] = 'Failed'
         store.execute("UPDATE jobs SET status='failed',output=?,finished=?,progress=? WHERE id=?", ((live_output+'\n'+str(exc))[-60000:], time.time(), json.dumps(progress), job_id))
     finally:
+        if refresh_details:
+            with queue_guard:
+                detail_refreshes.add(server['id'])
         lock.release()
         dispatch_queued(server['id'])
 
