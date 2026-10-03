@@ -316,8 +316,11 @@ def public_server(server, user):
         key = (s["project"] + "/" + s["name"]) if s["project"] else s["container"]
         s["notification_key"] = key
         s["dismissed"] = (key, s.get("update", {}).get("digest")) in dismissed
-        if s.get("health") == "unhealthy" or s["state"] in {"restarting", "dead"}:
-            warnings.append({"id": "service:" + s["id"], "title": s["name"] + " needs attention", "detail": s.get("health") or s["state"]})
+        # Docker can retain the last health result after a container stops.
+        issue = s["state"] if s["state"] in {"restarting", "dead"} else (
+            "unhealthy" if s["state"] == "running" and s.get("health") == "unhealthy" else None)
+        if issue:
+            warnings.append({"id": "service:" + s["id"], "title": s["name"] + " needs attention", "detail": issue})
     return {"id": server["id"], "name": server["name"], "host": server["host"], "port": server["port"],
             "username": server["username"], "fingerprint": server["fingerprint"], "checked": server["checked"],
             "update_checked": server["update_checked"], "error": server["error"], "stale": stale,

@@ -91,6 +91,34 @@ def test_dismissal_renotifies_new_digest(client):
     assert client.get("/api/dashboard").json()["servers"][0]["updates"] == 3
 
 
+def test_container_health_warnings_follow_current_runtime_state(client):
+    snapshot = json.loads(store.one("SELECT snapshot FROM servers WHERE id='atlas'")["snapshot"])
+    snapshot["metrics"]["cpu"] = 99
+    service = snapshot["services"][0]
+    for state, health, issue in [
+        ("running", "unhealthy", "unhealthy"),
+        ("exited", "unhealthy", None),
+        ("created", "unhealthy", None),
+        ("paused", "unhealthy", None),
+        ("running", "starting", None),
+        ("running", "healthy", None),
+        ("running", None, None),
+        ("restarting", "healthy", "restarting"),
+        ("dead", "unhealthy", "dead"),
+        ("running", "unhealthy", "unhealthy"),
+    ]:
+        service.update(state=state, health=health)
+        store.execute("UPDATE servers SET snapshot=? WHERE id='atlas'", (json.dumps(snapshot),))
+        server = client.get("/api/dashboard").json()["servers"][0]
+        warnings = [w for w in server["warnings"] if w["id"].startswith("service:")]
+        assert warnings == ([{"id": "service:" + service["id"],
+                              "title": service["name"] + " needs attention", "detail": issue}] if issue else [])
+        # Suppressing stale health must not hide resource warnings or erase Docker's readings.
+        assert any(w["id"] == "cpu" for w in server["warnings"])
+        assert server["services"][0]["state"] == state
+        assert server["services"][0]["health"] == health
+
+
 def test_plan_execute_replay_and_pull_does_not_apply(client):
     def execute(action):
         p = client.post("/api/servers/atlas/plan", json={"action": action, "targets": ["group:immich"]})
