@@ -6,7 +6,7 @@ if(!hourChoices.includes(cardHours))cardHours=6;
 const cardCache=new Map();
 const historyState={server:null,hours:24,resolution:0,mode:'combined',stat:'average',selected:new Set(Object.keys(resourceMeta)),resource:'cpu',disk:'',data:null,sequence:0};
 const monitorActions=new Set(['history','history-mode','history-tab','history-refresh','monitoring']);
-const monitorForms=new Set(['monitoring-form','server-monitoring-form','volumes-form','server-type-form']);
+const monitorForms=new Set(['monitoring-form','server-settings-form']);
 const uptime=n=>n==null?'Unavailable':`${Math.floor(n/86400)}d ${Math.floor(n%86400/3600)}h ${Math.floor(n%3600/60)}m`;
 const hourOptions=value=>hourChoices.map(h=>`<option value="${h}" ${h===value?'selected':''}>${h<48?count(h,'hour'):h/24+' days'}</option>`).join('');
 const resolutionLabel=n=>n<3600?n/60+' min':n<86400?n/3600+' hour'+(n>3600?'s':''):n/86400+' days';
@@ -103,9 +103,40 @@ async function fetchHistory(){
   try{const data=await api(`/servers/${server}/history?hours=${hours}&resolution=${resolution}${disk?'&disk='+encodeURIComponent(disk):''}`);if(seq!==historyState.sequence||!$('#history-explorer'))return;historyState.data=data;renderHistory();}
   catch(error){if($('#history-explorer'))formError(error.message);}
 }
-function serverTypeForm(s){return `<hr class="section-rule"><form id="server-type-form" data-id="${e(s.id)}"><h3>${fieldCaption('Server type','Plain servers collect resources only. Docker hosts also discover containers, check images and support Docker actions.')}</h3><label>Mode<select name="server_type"><option value="docker" ${s.server_type==='docker'?'selected':''}>Docker host</option><option value="plain" ${s.server_type==='plain'?'selected':''}>Plain server · resources only</option></select></label><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">Save server type</button></div></form>`;}
-function volumeSettingsForm(s){return `<hr class="section-rule"><form id="volumes-form" data-id="${e(s.id)}"><h3>${fieldCaption('Volumes','Monitor stores this volume’s history. Warn enables disk thresholds. Use in cards selects the disk shown in the resource card and sidebar; if several are selected, the highest percentage is shown. Existing history is retained when monitoring is disabled.')}</h3><div class="volume-table-wrap"><table class="volume-settings"><thead><tr><th>Volume</th><th>Monitor</th><th>Warn</th><th>Use in cards</th></tr></thead><tbody>${(s.metrics?.disks||[]).map(d=>`<tr data-volume="${e(d.mount)}"><th><span class="mono">${e(d.mount)}</span><small>${d.present?capacity(d.total)+' · '+capacity(d.free)+' free':'Not mounted'}</small></th>${['monitor','warn','card'].map(key=>`<td><input type="checkbox" data-volume-option="${key}" aria-label="${key==='card'?'Use in cards':key==='warn'?'Warn':'Monitor'} ${e(d.mount)}" ${d[key]?'checked':''} ${key!=='monitor'&&!d.monitor?'disabled':''}></td>`).join('')}</tr>`).join('')}</tbody></table></div>${!s.metrics?.disks?.length?'<p class="hint">Volumes appear after a successful check.</p>':''}<div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">Save volumes</button></div></form>`;}
-function serverMonitoringForm(s){return `<hr class="section-rule"><h3>Server checks</h3><form id="server-monitoring-form" data-id="${e(s.id)}"><label class="check-line"><input name="enabled" type="checkbox" ${s.monitoring_enabled?'checked':''}>Background monitoring enabled</label><label>${fieldCaption('Polling interval (seconds)','Leave blank to inherit. A slower host can use 300 seconds; checks never overlap on one host. Pausing keeps history and permits manual refresh.')}<input aria-label="Polling interval (seconds)" name="poll_seconds" type="number" min="15" max="3600" placeholder="Use global interval" value="${s.poll_override??''}"></label><p class="hint">Effective interval: ${s.poll_seconds}s.</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">Save server checks</button></div></form>`;}
+function volumeSettingsTable(s){
+  const size=n=>n==null?'—':(n/1e9).toLocaleString(undefined,{maximumSignificantDigits:4});
+  return `<div class="volume-table-wrap" tabindex="0" aria-label="Volume settings"><table class="volume-settings"><thead><tr><th scope="col">Volume path</th><th scope="col">Total GB</th><th scope="col">Free GB</th><th scope="col">Monitor</th><th scope="col">Warn</th><th scope="col">Use in cards</th></tr></thead><tbody>${(s.metrics?.disks||[]).map(d=>`<tr data-volume="${e(d.mount)}"><th scope="row" class="mono" title="${e(d.mount)}${d.present?'':' · Not mounted'}">${e(d.mount)}</th><td title="${e(d.present?capacity(d.total):'Not mounted')}">${size(d.total)}</td><td title="${e(d.present?capacity(d.free):'Not mounted')}">${size(d.free)}</td>${['monitor','warn','card'].map(key=>`<td><input type="checkbox" data-volume-option="${key}" aria-label="${key==='card'?'Use in cards':key==='warn'?'Warn':'Monitor'} ${e(d.mount)}" ${d[key]?'checked':''} ${key!=='monitor'&&!d.monitor?'disabled':''}></td>`).join('')}</tr>`).join('')}</tbody></table></div>${!s.metrics?.disks?.length?'<p class="hint">Volumes appear after a successful check.</p>':''}`;
+}
+function serverSettings(s){
+  const mode=s.override?'custom':'global';
+  const fields=[['cpu','CPU %',1,100],['memory','Memory %',1,100],['disk','Disk %',1,100],['disk_free_gb','Free space GB',0,1000000],['temperature','Temperature °C',1,180]];
+  modal(`<span class="server-settings-name">${e(s.name)}</span><input name="name" aria-label="Server name" value="${e(s.name)}" maxlength="80" required hidden>${iconButton('edit-server-name','Edit server name','pencil')}<span class="settings-context">settings</span>`,
+    `<form id="server-settings-form" data-id="${e(s.id)}">
+      <section class="settings-section"><div class="settings-section-heading"><h3>${fieldCaption('Warning thresholds','Global inherits the workspace limits. Custom sets limits for this server. Disk warnings trigger on either usage or free space for volumes with Warn enabled. CPU and memory use the latest sample. CPU temperature uses package / SoC sensors; other device sensors warn separately.')}</h3><input type="hidden" name="threshold_mode" value="${mode}">${slidingControl('threshold-mode','Threshold source',[['global','Global'],['custom','Custom']],mode,'settings-choice','data-field="threshold_mode"')}</div>
+      <div class="threshold-row">${fields.map(([key,label,min,max])=>`<label>${label}<input name="${key}" type="number" min="${min}" max="${max}" step="0.1" value="${s.thresholds[key]}" required ${s.override?'':'disabled'}></label>`).join('')}</div></section>
+      <section class="settings-section settings-checks"><div class="settings-type"><h3>${fieldCaption('Server type','Plain servers collect resources only. Docker hosts also discover containers, check images and support Docker actions.')}</h3><input type="hidden" name="server_type" value="${s.server_type}">${slidingControl('settings-server-type','Server type',[['docker','Docker host'],['plain','Plain server']],s.server_type,'settings-choice','data-field="server_type"')}</div>
+      <label class="settings-poll">${fieldCaption('Poll interval (s)','Leave blank to inherit the global interval. Checks never overlap on a host; pausing keeps history and permits manual refresh.')}<input aria-label="Polling interval (seconds)" name="poll_seconds" type="number" min="15" max="3600" placeholder="Global" title="Current effective interval: ${s.poll_seconds}s" value="${s.poll_override??''}"></label><label class="check-line settings-enabled"><input name="enabled" type="checkbox" ${s.monitoring_enabled?'checked':''}>Monitoring enabled</label></section>
+      <section class="settings-section settings-volumes"><div class="settings-section-heading"><h3>${fieldCaption('Volumes','Monitor stores this volume’s history. Warn enables disk thresholds. Use in cards selects the disk in the resource card and sidebar; if several are selected, the highest percentage is shown. Existing history is retained when monitoring is disabled. Capacities use decimal GB.')}</h3></div>${volumeSettingsTable(s)}</section>
+      <div class="form-error" role="alert"></div><div class="form-actions settings-save">${button('remove-server','Remove server','trash','danger ghost small',`title="Remove from Harbour; services on the host are unaffected"`)}<button class="primary" type="submit">Save</button></div>
+    </form>`);
+  const form=$('#server-settings-form'),header=$('.modal-header');
+  form.prepend(header); // Keep the editable title inside the same saved/guarded form.
+  const close=$('[data-action=close]',header);
+  close.before(buttonElement('edit-connection','SSH connection','key','small'));
+  $('.modal').classList.add('server-settings-modal');
+}
+function buttonElement(action,label,ico,cls){const template=document.createElement('template');template.innerHTML=button(action,label,ico,cls);return template.content.firstElementChild;}
+function setServerSettingsChoice(el){
+  const form=$('#server-settings-form');if(!form||form.dataset.busy)return;
+  const field=el.dataset.field,value=el.dataset.value,input=form.elements[field];
+  if(input.value===value)return;
+  if(field==='threshold_mode'){
+    const inputs=[...form.querySelectorAll('.threshold-row input')];
+    if(input.value==='custom')form.thresholdDraft=Object.fromEntries(inputs.map(i=>[i.name,i.value]));
+    for(const i of inputs){i.disabled=value==='global';i.value=value==='global'?state.data.thresholds[i.name]:(form.thresholdDraft?.[i.name]??i.value);}
+  }
+  input.value=value;updateSlidingControl(el.closest('.sliding-control'),value);
+}
 async function monitoringSettings(){
   const p=await api('/monitoring');
   const resolutionSelect=(label,key,options)=>`<label>${label}<select name="${key}">${options.map(n=>`<option value="${n}" ${p[key]===n?'selected':''}>${n} minutes</option>`).join('')}</select></label>`;
@@ -119,11 +150,15 @@ async function handleMonitorAction(action,el){
   if(action==='monitoring')await monitoringSettings();
 }
 async function handleMonitorForm(form,data){
-  if(form.id==='server-type-form'){await api(`/servers/${form.dataset.id}/type`,'PUT',{server_type:data.server_type});markFormSaved(form);state.selected.clear();await load();toast('Server type saved');}
-  if(form.id==='volumes-form'){const volumes=[...form.querySelectorAll('[data-volume]')].map(row=>({mount:row.dataset.volume,monitor:row.querySelector('[data-volume-option=monitor]').checked,warn:row.querySelector('[data-volume-option=warn]').checked,card:row.querySelector('[data-volume-option=card]').checked}));await api(`/servers/${form.dataset.id}/volumes`,'PUT',{volumes});markFormSaved(form);cardCache.clear();await load();toast('Volume settings saved');}
+  if(form.id==='server-settings-form'){
+    const volumes=[...form.querySelectorAll('[data-volume]')].map(row=>({mount:row.dataset.volume,...Object.fromEntries(['monitor','warn','card'].map(key=>[key,row.querySelector('[data-volume-option='+key+']').checked]))}));
+    const thresholds=data.threshold_mode==='global'?null:Object.fromEntries(['cpu','memory','disk','disk_free_gb','temperature'].map(key=>[key,Number(data[key])]));
+    const saved=await api(`/servers/${form.dataset.id}/settings`,'PUT',{name:data.name,server_type:data.server_type,thresholds,volumes,enabled:data.enabled==='on',poll_seconds:data.poll_seconds?Number(data.poll_seconds):null});
+    form.elements.name.value=saved.name;form.elements.name.hidden=true;$('.server-settings-name',form).textContent=saved.name;$('.server-settings-name',form).hidden=false;$('[data-action=edit-server-name]',form).hidden=false;
+    markFormSaved(form);cardCache.clear();state.selected.clear();await load();toast('Server settings saved');
+  }
 
   if(form.id==='monitoring-form'){await api('/monitoring','PUT',Object.fromEntries(Object.entries(data).map(([k,v])=>[k,Number(v)])));markFormSaved(form);await load();toast('Monitoring and retention saved');}
-  if(form.id==='server-monitoring-form'){await api(`/servers/${form.dataset.id}/monitoring`,'PUT',{enabled:data.enabled==='on',poll_seconds:data.poll_seconds?Number(data.poll_seconds):null});markFormSaved(form);await load();toast('Server checks saved');}
 }
 document.addEventListener('change',async event=>{
   const el=event.target;

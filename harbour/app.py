@@ -250,7 +250,10 @@ def public_server(server, user):
 
 @app.get("/api/dashboard")
 def dashboard(user=Depends(authenticated)):
-    jobs = store.rows("SELECT id,server_id,server_name,actor,action,status,created,finished FROM jobs ORDER BY created DESC LIMIT 50")
+    jobs = store.rows("SELECT id,server_id,server_name,actor,action,status,created,finished,progress,target_names,targets FROM jobs ORDER BY created DESC LIMIT 50")
+    for job in jobs:
+        job['progress'] = json.loads(job['progress'])
+        job['target_names'] = stored_target_names(job)
     return {"servers": [public_server(s, user) for s in store.rows("SELECT * FROM servers ORDER BY sort_order,rowid")],
             "thresholds": {**store.DEFAULTS, **json.loads(store.one("SELECT value FROM settings WHERE key='thresholds'")["value"])}, "jobs": jobs}
 
@@ -288,24 +291,60 @@ class VolumeInput(Input):
     volumes: list[VolumeOption] = Field(max_length=500)
 
 
-@app.put('/api/servers/{id_}/volumes')
-def save_volumes(id_: str, body: VolumeInput, user=Depends(admin)):
-    server = get_server(id_)
+def volume_config(server, values):
     known = {d['mount'] for d in json.loads(server['snapshot']).get('metrics', {}).get('disks', [])} | set(volumes.preferences(server))
-    names = [v.mount for v in body.volumes]
+    names = [v.mount for v in values]
     if len(names) != len(set(names)) or any(name not in known for name in names):
         raise HTTPException(400, 'Choose from the discovered volumes')
     config = volumes.preferences(server)
-    for value in body.volumes:
+    for value in values:
         if not value.monitor and (value.warn or value.card):
             raise HTTPException(400, 'Enable monitoring before warnings or card display')
         config[value.mount] = value.model_dump(exclude={'mount'})
+    return config
+
+
+@app.put('/api/servers/{id_}/volumes')
+def save_volumes(id_: str, body: VolumeInput, user=Depends(admin)):
+    config = volume_config(get_server(id_), body.volumes)
     store.execute('UPDATE servers SET volume_settings=? WHERE id=?', (json.dumps(config), id_))
     return {'ok': True}
 
 
 class ServerTypeInput(Input):
     server_type: Literal['docker', 'plain']
+
+
+class ServerSettingsInput(ServerTypeInput):
+    name: str = Field(min_length=1, max_length=80)
+    thresholds: Thresholds | None
+    volumes: list[VolumeOption] = Field(max_length=500)
+    enabled: bool
+    poll_seconds: int | None = Field(default=None, ge=15, le=3600)
+
+
+@app.put('/api/servers/{id_}/settings')
+def save_server_settings(id_: str, body: ServerSettingsInput, user=Depends(admin)):
+    lock = server_lock(id_)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, 'Wait for the current server operation to finish, then save again')
+    try:
+        server = get_server(id_)
+        config = volume_config(server, body.volumes)
+        # One transaction prevents a rejected setting from leaving a partial save.
+        with store.db() as con:
+            con.execute('UPDATE servers SET name=?,thresholds=?,volume_settings=?,monitoring_enabled=?,poll_seconds=?,server_type=? WHERE id=?',
+                        (body.name, body.thresholds.model_dump_json() if body.thresholds else None,
+                         json.dumps(config), int(body.enabled), body.poll_seconds, body.server_type, id_))
+            if server['server_type'] != body.server_type:
+                snapshot = json.loads(server['snapshot'])
+                snapshot['services'] = []
+                snapshot.get('metrics', {})['docker'] = None
+                con.execute("UPDATE servers SET snapshot=?,error=NULL,checked=NULL,last_attempt=NULL,update_checked=0,connection_status='pending' WHERE id=?",
+                            (json.dumps(snapshot), id_))
+    finally:
+        lock.release()
+    return {'ok': True, 'name': body.name}
 
 
 @app.put('/api/servers/{id_}/type')
@@ -552,8 +591,8 @@ def delete_server(id_: str, user=Depends(admin)):
 
 
 class ActionInput(Input):
-    action: Literal["pull", "up", "restart", "pull_up"]
-    targets: list[str] = Field(min_length=1, max_length=200)
+    action: Literal["pull", "up", "restart", "pull_up", "prune", "start", "stop"]
+    targets: list[str] = Field(max_length=200)
 
 
 def connection_signature(server):
@@ -605,6 +644,27 @@ def execute_action(id_: str, body: ExecuteInput, user=Depends(admin)):
     return queue_job(id_, payload["action"], payload["targets"], user, commands, payload["nonce"], payload['connection'])
 
 
+def target_names(server, action, targets):
+    if action == 'prune':
+        return ['Entire Docker host']
+    if action in {'refresh', 'check'}:
+        return ['Server resources' if action == 'refresh' else 'All container images']
+    services = json.loads(server['snapshot']).get('services', []) if server else []
+    names = []
+    for target in targets:
+        selected = [s for s in services if s['id'] == target or 'group:' + str(s.get('project')) == target]
+        names.extend([(s['project'] + ' / ' if s.get('project') else '') + s.get('container', s['name']) for s in selected] or [target])
+    return list(dict.fromkeys(names))
+
+
+def stored_target_names(job):
+    names = json.loads(job['target_names'])
+    if names:
+        return names
+    server = store.one('SELECT snapshot FROM servers WHERE id=?', (job['server_id'],))
+    return target_names(server, job['action'], json.loads(job['targets'] or '[]'))
+
+
 def queue_job(id_, action, targets, user, commands=None, job_id=None, expected_connection=None):
     lock = server_lock(id_)
     if not lock.acquire(blocking=False):
@@ -616,8 +676,8 @@ def queue_job(id_, action, targets, user, commands=None, job_id=None, expected_c
             raise HTTPException(400, "Docker operations are disabled for plain servers")
         if expected_connection and expected_connection != connection_signature(server):
             raise HTTPException(409, 'Server connection changed; create a new preview')
-        store.execute("INSERT INTO jobs (id,server_id,server_name,actor,action,status,targets,created) VALUES (?,?,?,?,?,'queued',?,?)",
-                      (job_id, id_, server["name"], user["name"], action, json.dumps(targets), time.time()))
+        store.execute("INSERT INTO jobs (id,server_id,server_name,actor,action,status,targets,created,target_names) VALUES (?,?,?,?,?,'queued',?,?,?)",
+                      (job_id, id_, server["name"], user["name"], action, json.dumps(targets), time.time(), json.dumps(target_names(server, action, targets))))
         pool.submit(work_job, server, action, targets, commands, job_id, lock)
     except Exception:
         lock.release()
@@ -626,15 +686,40 @@ def queue_job(id_, action, targets, user, commands=None, job_id=None, expected_c
 
 
 def work_job(server, action, targets, commands, job_id, lock):
+    progress = {'completed': 0, 'total': len(commands or []), 'label': 'Connecting to server'}
+    live_output, last_saved = '', 0
+
+    def event_update(event):
+        nonlocal live_output, last_saved
+        kind = event.get('kind')
+        if kind == 'step':
+            progress.update({key: event[key] for key in ('completed', 'total', 'label')})
+            live_output = (live_output + '\n' + event['label'] + '\n')[-60000:]
+        elif kind == 'completed':
+            progress.update(completed=event['completed'], total=event['total'])
+        elif kind == 'output':
+            text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', str(event.get('text', ''))).replace('\r', '\n')
+            live_output = (live_output + text)[-60000:]
+        elif kind != 'heartbeat':
+            return
+        now = time.monotonic()
+        if kind in {'step', 'completed'} or now-last_saved >= .5:
+            store.execute('UPDATE jobs SET progress=?,output=? WHERE id=?', (json.dumps(progress), live_output, job_id))
+            last_saved = now
+
     try:
-        store.execute("UPDATE jobs SET status='running' WHERE id=?", (job_id,))
+        store.execute("UPDATE jobs SET status='running',progress=? WHERE id=?", (json.dumps(progress), job_id))
         output = ""
         status = "succeeded"
         if action in {"refresh", "check"}:
             refresh_server(server["id"], action == "check")
             output = "Demo readings refreshed." if store.DEMO else "Readings refreshed."
         elif store.DEMO:
-            time.sleep(0.6)
+            for index, command in enumerate(commands or []):
+                event_update({'kind': 'step', 'completed': index, 'total': len(commands), 'label': command['label']})
+                event_update({'kind': 'output', 'text': 'Simulating ' + shlex.join(command['argv']) + '\n'})
+                time.sleep(.6)
+                event_update({'kind': 'completed', 'completed': index+1, 'total': len(commands)})
             snapshot = json.loads(get_server(server["id"])["snapshot"])
             selected = {s["id"] for s in snapshot["services"] if s["id"] in targets or "group:" + str(s["project"]) in targets}
             for s in snapshot["services"]:
@@ -643,21 +728,28 @@ def work_job(server, action, targets, commands, job_id, lock):
                         s["pulled"] = True
                     if action in {"up", "pull_up"} and s.get("pulled"):
                         s["image_id"] = s["update"].get("digest", s["image_id"])
+                        s['version'] = s['update'].get('version') or s.get('version')
                         s["update"]["status"] = "current"
-                    if action in {"up", "pull_up", "restart"}:
+                    if action in {"up", "pull_up", "restart", "start"}:
                         s["state"] = "running"
+                    if action == 'stop':
+                        s['state'] = 'exited'
             store.execute("UPDATE servers SET snapshot=?,checked=? WHERE id=?", (json.dumps(snapshot), time.time(), server["id"]))
-            output = "Simulated operation completed. No real host was contacted."
+            output = live_output + "\nSimulated operation completed. No real host was contacted."
         else:
-            result = ssh.request(server, {"operation": "execute", "action": action, "targets": targets, "expected": commands})
+            result = ssh.request(server, {"operation": "execute", "action": action, "targets": targets, "expected": commands}, on_event=event_update)
             output, status = result["output"], "succeeded" if result["ok"] else "failed"
+            progress['label'] = 'Refreshing server readings'
+            store.execute('UPDATE jobs SET progress=?,output=? WHERE id=?', (json.dumps(progress), output, job_id))
             try:
                 refresh_server(server["id"], action in {"up", "pull_up"})
             except Exception as exc:
                 output += "\nFollow-up monitoring failed: " + str(exc)
-        store.execute("UPDATE jobs SET status=?,output=?,finished=? WHERE id=?", (status, output[-60000:], time.time(), job_id))
+        progress['label'] = 'Completed' if status == 'succeeded' else 'Failed'
+        store.execute("UPDATE jobs SET status=?,output=?,finished=?,progress=? WHERE id=?", (status, output[-60000:], time.time(), json.dumps(progress), job_id))
     except Exception as exc:
-        store.execute("UPDATE jobs SET status='failed',output=?,finished=? WHERE id=?", (str(exc)[-60000:], time.time(), job_id))
+        progress['label'] = 'Failed'
+        store.execute("UPDATE jobs SET status='failed',output=?,finished=?,progress=? WHERE id=?", ((live_output+'\n'+str(exc))[-60000:], time.time(), json.dumps(progress), job_id))
     finally:
         lock.release()
 
@@ -677,6 +769,8 @@ def job_detail(id_: str, user=Depends(admin)):
     job = store.one("SELECT * FROM jobs WHERE id=?", (id_,))
     if not job:
         raise HTTPException(404)
+    job['progress'] = json.loads(job['progress'])
+    job['target_names'] = stored_target_names(job)
     return job
 
 

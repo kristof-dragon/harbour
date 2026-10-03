@@ -8,6 +8,9 @@ import datetime
 import os
 import re
 import subprocess
+import codecs
+import selectors
+import signal
 import time
 from pathlib import Path
 
@@ -17,6 +20,38 @@ def run(argv, timeout=30, cwd=None):
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout or "Command failed")[-4000:])
     return result.stdout
+
+
+def run_stream(argv, emit, timeout=300, cwd=None):
+    """Forward bounded output chunks while the command is still running."""
+    output = ''
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+    with subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          start_new_session=True, bufsize=0) as process, selectors.DefaultSelector() as selector:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline, heartbeat = time.monotonic() + timeout, time.monotonic()
+        try:
+            while selector.get_map():
+                if time.monotonic() > deadline:
+                    raise TimeoutError('Command timed out. Check the server before retrying.')
+                for key, _ in selector.select(.1):
+                    chunk = os.read(key.fd, 4096)
+                    text = decoder.decode(chunk, final=not chunk)
+                    if text:
+                        output = (output + text)[-60000:]
+                        emit({'kind': 'output', 'text': text})
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                if time.monotonic() - heartbeat >= 1:
+                    emit({'kind': 'heartbeat'})
+                    heartbeat = time.monotonic()
+            if process.wait(timeout=max(.1, deadline-time.monotonic())):
+                raise RuntimeError(output[-4000:] or 'Command failed')
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+    return output
 
 
 def image_version(labels):
@@ -284,11 +319,15 @@ def check_updates(services):
 
 
 def plan(services, action, targets):
+    if action == 'prune':
+        if targets:
+            raise ValueError('System prune applies to the whole server, not selected services')
+        return [{'argv': ['docker', 'system', 'prune', '--force'], 'cwd': None, 'label': 'Docker system prune'}]
     if action == "pull_up":
         # Validate both phases first; finish every pull before any apply.
         apply = plan(services, "up", targets)
         return plan(services, "pull", targets) + apply
-    if action not in {"pull", "up", "restart"}:
+    if action not in {"pull", "up", "restart", "start", "stop"}:
         raise ValueError("Unsupported action")
     if not targets or len(targets) > 200:
         raise ValueError("Select between 1 and 200 targets")
@@ -327,7 +366,7 @@ def plan(services, action, targets):
         argv = ["docker", "compose", "--project-directory", cwd, "-p", project]
         for file in files:
             argv.extend(["-f", file])
-        argv += {"pull": ["pull"], "up": ["up", "-d"], "restart": ["restart"]}[action]
+        argv += {"pull": ["pull"], "up": ["up", "-d"], "restart": ["restart"], "start": ["start"], "stop": ["stop"]}[action]
         if project not in whole_groups:
             argv += ["--no-deps"] if action in {"up", "restart"} else []
             argv += sorted({s["name"] for s in members})
@@ -337,12 +376,12 @@ def plan(services, action, targets):
             continue
         if action == "up":
             raise ValueError("Apply requires a Compose project; standalone containers must be recreated using their original deployment definition")
-        argv = ["docker", "pull", s["image"]] if action == "pull" else ["docker", "restart", s["id"]]
+        argv = ["docker", "pull", s["image"]] if action == "pull" else ["docker", action, s["id"]]
         commands.append({"argv": argv, "cwd": None, "label": s["container"]})
     return commands
 
 
-def handle(request):
+def handle(request, emit=None):
     operation = request["operation"]
     docker = request.get("server_type", "docker") == "docker"
     if not docker and operation != "snapshot":
@@ -357,11 +396,17 @@ def handle(request):
         if commands != request["expected"]:
             raise ValueError("Server state changed after the preview. Refresh and confirm a new plan.")
         completed = []
-        for command in commands:
+        for index, command in enumerate(commands):
             try:
-                output = run(command["argv"], timeout=300, cwd=command["cwd"])
+                if emit:
+                    verb = next((v for v in ('pull', 'up', 'restart', 'start', 'stop', 'prune') if v in command['argv']), request['action'])
+                    emit({'kind': 'step', 'completed': index, 'total': len(commands), 'label': verb + ' · ' + command['label']})
+                    output = run_stream(command['argv'], emit, timeout=300, cwd=command['cwd'])
+                    emit({'kind': 'completed', 'completed': index+1, 'total': len(commands)})
+                else:
+                    output = run(command["argv"], timeout=300, cwd=command["cwd"])
                 completed.append(command["label"] + ":\n" + output[-12000:])
             except Exception as exc:
-                return {"ok": False, "output": "\n".join(completed + [command["label"] + ": " + str(exc)]), "completed": len(completed)}
-        return {"ok": True, "output": "\n".join(completed), "completed": len(completed)}
+                return {"ok": False, "output": "\n".join(completed + [command["label"] + ": " + str(exc)])[-60000:], "completed": len(completed)}
+        return {"ok": True, "output": "\n".join(completed)[-60000:], "completed": len(completed)}
     raise ValueError("Unsupported operation")

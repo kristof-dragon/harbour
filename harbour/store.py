@@ -113,6 +113,7 @@ def initialize():
                     con.execute("ALTER TABLE " + table + " ADD COLUMN " + name + " " + definition)
             return existing
         add_columns("users", {"totp_secret": "TEXT", "totp_last": "INTEGER NOT NULL DEFAULT -1"})
+        add_columns("jobs", {"progress": "TEXT NOT NULL DEFAULT '{}'", "target_names": "TEXT NOT NULL DEFAULT '[]'"})
         add_columns("servers", {"poll_seconds": "INTEGER", "monitoring_enabled": "INTEGER NOT NULL DEFAULT 1",
             "last_attempt": "REAL", "latency_ms": "REAL", "connection_status": "TEXT NOT NULL DEFAULT 'pending'",
             "auth_method": "TEXT NOT NULL DEFAULT 'key'", "password_encrypted": "TEXT", "server_type": "TEXT NOT NULL DEFAULT 'docker'",

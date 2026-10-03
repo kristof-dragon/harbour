@@ -535,3 +535,39 @@ body.mobile-panel-open{overflow:hidden}
 
 .discard-backdrop{position:fixed;inset:0;background:#0007;z-index:210;display:grid;place-items:center;padding:18px}.discard-dialog{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px;max-width:420px;width:100%;box-shadow:var(--shadow)}.discard-dialog h3{margin:0 0 12px}.discard-dialog p{font-size:13px;color:var(--muted)}
 .service-versions{display:flex;gap:4px 14px;flex-wrap:wrap;font-size:10px;margin-top:5px;font-weight:450}.running-version{color:var(--muted)}.available-version{color:var(--accent)}.service-title{min-width:0}.service-title>small{overflow-wrap:anywhere}.service-versions>span{overflow-wrap:anywhere}
+
+/* One compact server settings form; all edits share the footer Save action. */
+.modal.server-settings-modal{width:min(770px,100%);padding:18px 20px;max-height:calc(100dvh - 32px)}
+.server-settings-modal .modal-header{gap:10px;margin:0 0 12px}
+.server-settings-modal .modal-header h2{display:flex;align-items:center;gap:6px;flex:1;min-width:0;font-size:18px}
+.server-settings-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.server-settings-modal [name=name]{font-size:18px;font-weight:650;padding:4px 7px;max-width:300px}
+.server-settings-modal .settings-context{font-size:12px;font-weight:400;color:var(--muted)}
+.server-settings-modal .modal-header>button{flex-shrink:0}
+.server-settings-modal .settings-section{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}
+.server-settings-modal h3{font-size:12px;margin:0}
+.settings-section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
+.server-settings-modal .sliding-control{width:210px;flex-shrink:0}
+.server-settings-modal .sliding-control button{min-height:29px;padding:5px 9px;font-size:11px}
+.server-settings-modal .threshold-row{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}
+.server-settings-modal label{font-size:11px;gap:4px}
+.server-settings-modal input:not([type=checkbox]):not([name=name]){padding:6px 8px;height:32px;font-size:12px}
+.server-settings-modal .threshold-row input:disabled{opacity:.65;cursor:default}
+.server-settings-modal .settings-checks{display:flex;align-items:flex-end;gap:24px}
+.settings-type h3{margin-bottom:5px}.settings-poll{width:135px}.settings-enabled{margin:0 0 8px auto;white-space:nowrap}
+.server-settings-modal .volume-settings{table-layout:fixed;font-size:11px}
+.server-settings-modal .volume-settings th,.server-settings-modal .volume-settings td{padding:6px 5px;height:29px;white-space:nowrap}
+.server-settings-modal .volume-settings thead th{font-size:10px;font-weight:500;color:var(--muted)}
+.server-settings-modal .volume-settings th:first-child{width:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;font-weight:500}
+.server-settings-modal .volume-settings :is(th,td):not(:first-child){width:66px}
+.server-settings-modal .volume-settings :is(th,td):last-child{width:78px}
+.server-settings-modal .volume-settings :is(th,td):nth-child(2),.server-settings-modal .volume-settings :is(th,td):nth-child(3){text-align:right;font-variant-numeric:tabular-nums}
+.server-settings-modal .volume-settings input{margin:0;vertical-align:middle}
+.server-settings-modal .form-actions{margin-top:12px;padding-top:12px;justify-content:space-between;align-items:center}
+.server-settings-modal .form-actions button{padding:7px 13px}
+.server-settings-modal .form-actions .primary{min-width:95px}
+@media(max-width:650px){.modal.server-settings-modal{padding:16px;max-height:calc(100dvh - 20px)}.server-settings-modal .modal-header{flex-wrap:wrap}.server-settings-modal .modal-header h2{flex-basis:calc(100% - 50px);order:0}.server-settings-modal .modal-header>[data-action=close]{order:1}.server-settings-modal .modal-header>[data-action=edit-connection]{order:2}.server-settings-modal .threshold-row{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.server-settings-modal .settings-checks{flex-wrap:wrap;gap:12px}.settings-enabled{margin:0}.settings-poll{width:120px}.settings-section-heading{flex-wrap:wrap;gap:6px}.server-settings-modal .sliding-control{width:200px}.server-settings-modal .volume-settings{min-width:620px}.server-settings-modal .volume-table-wrap{max-width:100%}}
+
+.job-progress{display:grid;gap:5px;margin-top:8px;min-width:140px}.job-progress progress{display:block;width:100%;height:7px;border:0;border-radius:8px;overflow:hidden;accent-color:var(--accent)}.job-progress progress::-webkit-progress-bar{background:var(--hover);border-radius:8px}.job-progress progress::-webkit-progress-value{background:var(--accent);border-radius:8px;transition:width .25s}.job-progress progress:indeterminate{background:linear-gradient(90deg,var(--hover),var(--accent),var(--hover));background-size:200% 100%;animation:job-working 1.5s linear infinite}.job-progress span{font-size:11px;color:var(--muted)}.activity-text .job-progress{max-width:320px}.job-modal #job-heading{display:flex;justify-content:space-between;align-items:center;gap:12px}.job-modal #job-heading h3{font-size:14px;margin:0}.job-modal #job-output{height:300px;max-height:45vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;line-height:1.6;margin:16px 0 0}.job-modal .job-progress{margin-top:16px}@keyframes job-working{to{background-position:-200% 0}}@media(prefers-reduced-motion:reduce){.job-progress progress{animation:none!important;transition:none!important}}
+.activity-targets{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;font-size:11px!important}.job-modal #job-targets{font-size:11px;color:var(--muted);margin-top:8px;max-height:80px;overflow:auto;overflow-wrap:anywhere}
+.activity-row .activity-text{min-width:0}.activity-row>.activity-icon,.activity-row>.tag,.activity-row>button{flex-shrink:0}.job-indeterminate{height:7px;background:var(--hover);border-radius:8px;overflow:hidden}.job-indeterminate i{display:block;width:35%;height:100%;background:var(--accent);border-radius:8px;animation:job-pulse 1.5s ease-in-out infinite alternate}.job-failed progress::-webkit-progress-value{background:var(--red)}@keyframes job-pulse{to{transform:translateX(180%)}}@media(prefers-reduced-motion:reduce){.job-indeterminate i{animation:none}}

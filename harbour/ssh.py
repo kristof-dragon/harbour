@@ -152,7 +152,38 @@ def install_key(server, key_id, password):
     return {**result, 'verified': True}
 
 
-def request(server, payload):
+class ProgressFrames:
+    def __init__(self, on_event=None):
+        self.pending = bytearray()
+        self.result = None
+        self.on_event = on_event
+
+    def feed(self, chunk):
+        self.pending.extend(chunk)
+        while b'\n' in self.pending:
+            line, _, self.pending = self.pending.partition(b'\n')
+            if not line.strip():
+                continue
+            frame = json.loads(line)
+            if 'event' in frame:
+                if self.on_event:
+                    self.on_event(frame['event'])
+            elif 'result' in frame:
+                self.result = frame['result']
+            else:
+                raise RuntimeError('Invalid progress response')
+        if len(self.pending) > 8_000_000:
+            raise RuntimeError('Server response exceeded the 8 MB limit')
+
+    def finish(self):
+        if self.pending.strip():
+            self.feed(b'\n')
+        if not isinstance(self.result, dict):
+            raise RuntimeError('SSH ended before the operation result arrived. Check the server before retrying.')
+        return self.result
+
+
+def request(server, payload, on_event=None):
     if store.DEMO:
         raise RuntimeError("SSH is disabled in demo mode")
     client = None
@@ -177,17 +208,26 @@ def request(server, payload):
         reply.channel.close()
         source = Path(__file__).with_name("remote_probe.py").read_text()
         # repr(json) embeds only a data literal; host/user/commands never enter a shell string.
-        source += "\ntry:\n print(json.dumps(handle(json.loads(" + repr(json.dumps(payload)) + "))))\nexcept Exception as exc:\n print(json.dumps({'error': str(exc)}))\n"
+        streaming = payload.get('operation') == 'execute'
+        if streaming:
+            source += "\ndef emit(event):\n print(json.dumps({'event':event}), flush=True)\ntry:\n result=handle(json.loads(" + repr(json.dumps(payload)) + "), emit)\nexcept Exception as exc:\n result={'error':str(exc)}\nprint(json.dumps({'result':result}), flush=True)\n"
+        else:
+            source += "\ntry:\n print(json.dumps(handle(json.loads(" + repr(json.dumps(payload)) + "))))\nexcept Exception as exc:\n print(json.dumps({'error': str(exc)}))\n"
         stdin, stdout, stderr = client.exec_command("python3 -", timeout=15)
         stdin.write(source)
         stdin.flush()
         stdin.channel.shutdown_write()
         channel = stdout.channel
         output, errors = bytearray(), bytearray()
+        frames = ProgressFrames(on_event) if streaming else None
         deadline = time.monotonic() + (900 if payload.get("updates") or payload.get("operation") == "execute" else 90)
         while True:
             if channel.recv_ready():
-                output.extend(channel.recv(65536))
+                chunk = channel.recv(65536)
+                if frames:
+                    frames.feed(chunk)
+                else:
+                    output.extend(chunk)
             if channel.recv_stderr_ready():
                 errors.extend(channel.recv_stderr(65536))
             if len(output) + len(errors) > 8_000_000:
@@ -199,7 +239,7 @@ def request(server, payload):
             time.sleep(0.02)
         if channel.recv_exit_status() != 0:
             raise RuntimeError(errors.decode(errors="replace")[-1000:] or "Remote Python failed")
-        result = json.loads(output)
+        result = frames.finish() if frames else json.loads(output)
         if "error" in result:
             raise RuntimeError(result["error"])
         result["latency_ms"] = latency_ms
