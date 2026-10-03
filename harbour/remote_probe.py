@@ -19,6 +19,43 @@ def run(argv, timeout=30, cwd=None):
     return result.stdout
 
 
+def image_version(labels):
+    for key in ('org.opencontainers.image.version', 'org.label-schema.version', 'version'):
+        value = labels.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:200]
+    return None
+
+
+def available_version(image, manifest, config_digest):
+    """Read labels from the exact remote manifest, never a tag that may have moved."""
+    entries = manifest if isinstance(manifest, list) else [manifest]
+    candidates = []
+    for entry in entries:
+        data = entry.get('SchemaV2Manifest') or entry.get('OCIManifest') or entry
+        if data.get('config', {}).get('digest') != config_digest:
+            continue
+        version = image_version(data.get('annotations') or {})
+        if version:
+            return version
+        digest = entry.get('Descriptor', {}).get('digest')
+        if digest and re.fullmatch(r'sha256:[a-f0-9]{64}', digest):
+            candidates.append(digest)
+    if len(set(candidates)) != 1:
+        return None
+    repository = image.split('@')[0]
+    if ':' in repository.rsplit('/', 1)[-1]:
+        repository = repository.rsplit(':', 1)[0]
+    try:
+        # Optional Buildx uses the host's existing Docker registry credentials.
+        # This fetches configuration metadata only; no image layers are pulled.
+        config = json.loads(run(['docker', 'buildx', 'imagetools', 'inspect', '--format', '{{json .Image}}',
+                                 repository + '@' + candidates[0]], timeout=20))
+        return image_version((config.get('config') or {}).get('Labels') or {})
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        return None  # A missing label/plugin never converts a valid update check to failure.
+
+
 def inventory():
     ids = run(["docker", "ps", "-aq", "--no-trunc"]).split()
     containers = []
@@ -43,7 +80,7 @@ def inventory():
         services.append({
             "id": c["Id"], "name": name, "container": c["Name"].lstrip("/"),
             "project": project, "image": c["Config"]["Image"], "image_id": c["Image"],
-            "version": image_labels.get("org.opencontainers.image.version"),
+            "version": image_version(image_labels),
             "state": c["State"]["Status"], "health": c["State"].get("Health", {}).get("Status"),
             "started": c["State"].get("StartedAt"), "ports": ports,
             "restart_policy": c["HostConfig"].get("RestartPolicy", {}).get("Name"),
@@ -56,7 +93,7 @@ def inventory():
     return services
 
 
-def metrics():
+def metrics(docker=True):
     def cpu():
         with open("/proc/stat") as f:
             values = [int(v) for v in f.readline().split()[1:9]]
@@ -78,7 +115,7 @@ def metrics():
             continue
         try:
             stat = os.statvfs(mount)
-            identity = (device, stat.f_blocks, stat.f_bavail)
+            identity = mount
             if identity in seen or not stat.f_blocks:
                 continue
             seen.add(identity)
@@ -104,7 +141,7 @@ def metrics():
             "percent": round(100 * (total - available) / total, 1)}, "disks": disks,
             "uptime": uptime, "os": os_name, "kernel": os.uname().release,
             "temperature": temperatures(), "timezone": timezone_info(),
-            "docker": run(["docker", "version", "--format", "{{.Server.Version}}"]).strip()}
+            "docker": run(["docker", "version", "--format", "{{.Server.Version}}"]).strip() if docker else None}
 
 
 def temperature_kind(sensor):
@@ -114,10 +151,10 @@ def temperature_kind(sensor):
     if (chip == "coretemp" and re.fullmatch(r"(?:package|physical) id \d+", label)
             or chip in {"k10temp", "zenpower"} and label == "tdie"
             or chip.startswith("peci_cputemp") and label == "die"
-            or chip == "x86_pkg_temp"
+            or chip in {"x86_pkg_temp", "cpu_thermal", "cpu-thermal", "soc_thermal", "soc-thermal", "package_thermal", "package-thermal", "bcm2835_thermal"}
             or sensor["id"] == "demo:cpu" and sensor["label"] == "CPU package"):
         return "cpu_package"
-    if sensor.get("cpu") or chip in {"coretemp", "k10temp", "zenpower", "cpu_thermal", "cpu-thermal"} or "cpu" in chip:
+    if sensor.get("cpu") or chip in {"coretemp", "k10temp", "zenpower", "cpu_thermal", "cpu-thermal"} or "cpu" in chip or re.fullmatch(r"(?:bigcore\d*|littlecore)[_-]thermal", chip):
         return "cpu_auxiliary"
     return "other"
 
@@ -126,7 +163,7 @@ def package_order(sensor):
     # Package 0 before Package 1, etc. Never choose based on temperature.
     label = sensor["label"].lower()
     index = re.search(r"(?:package|physical) id (\d+)", label)
-    return (0 if label.startswith("coretemp · ") else 1, int(index[1]) if index else 0, label, sensor["id"])
+    return (0 if label.startswith("coretemp · ") else 1 if temperature_kind(sensor) == "cpu_package" and not label.startswith(("soc_thermal", "soc-thermal")) else 2, int(index[1]) if index else 0, label, sensor["id"])
 
 
 def temperature_summary(sensors):
@@ -164,19 +201,22 @@ def temperatures(root="/sys"):
                 sensors.append({"id": chip + ":" + hw.name + ":" + stem, "label": chip + " · " + label, "celsius": round(value, 1), "cpu": cpu})
             except ValueError:
                 continue
-    # An x86 package thermal zone can exist alongside unrelated hwmon devices.
-    have_hwmon = bool(sensors)
-    if not any(temperature_kind(s) == "cpu_package" for s in sensors):
-        for zone in sorted(Path(root).glob("class/thermal/thermal_zone*")):
-            try:
-                value = float(read(zone / "temp")) / 1000
-                label = read(zone / "type") or zone.name
-                if have_hwmon and label != "x86_pkg_temp":
-                    continue
-                if -40 <= value <= 180:
-                    sensors.append({"id": zone.name, "label": label, "celsius": round(value, 1), "cpu": "cpu" in label.lower() or "x86_pkg" in label.lower()})
-            except ValueError:
+    # Thermal zones are independent of hwmon discovery (notably on ARM).
+    # A zone can also be exposed via hwmon; retain just one copy of that type.
+    chips = {s["label"].split(" · ")[0].lower().replace("-", "_") for s in sensors}
+    for zone in sorted(Path(root).glob("class/thermal/thermal_zone*")):
+        try:
+            value = float(read(zone / "temp")) / 1000
+            label = read(zone / "type") or zone.name
+            if label.lower().replace("-", "_") in chips:
                 continue
+            # Intel exposes the same package through coretemp and this zone.
+            if label == "x86_pkg_temp" and any(s["label"].startswith("coretemp · ") and temperature_kind(s) == "cpu_package" for s in sensors):
+                continue
+            if -40 <= value <= 180:
+                sensors.append({"id": zone.name, "label": label, "celsius": round(value, 1), "cpu": "cpu" in label.lower() or "x86_pkg" in label.lower()})
+        except ValueError:
+            continue
     return temperature_summary(sensors)
 
 
@@ -234,7 +274,7 @@ def check_updates(services):
             try:
                 raw = json.loads(run(["docker", "manifest", "inspect", "--verbose", image], timeout=45))
                 digest = remote_config_digest(raw, s["platform"])
-                cache[key] = {"digest": digest} if digest else {"error": "Registry did not return an unambiguous image for this platform."}
+                cache[key] = {"digest": digest, "version": available_version(image, raw, digest) if digest != s["image_id"] else s.get("version")} if digest else {"error": "Registry did not return an unambiguous image for this platform."}
             except Exception as exc:
                 cache[key] = {"error": str(exc)[:400]}
         result = cache[key]
@@ -244,6 +284,10 @@ def check_updates(services):
 
 
 def plan(services, action, targets):
+    if action == "pull_up":
+        # Validate both phases first; finish every pull before any apply.
+        apply = plan(services, "up", targets)
+        return plan(services, "pull", targets) + apply
     if action not in {"pull", "up", "restart"}:
         raise ValueError("Unsupported action")
     if not targets or len(targets) > 200:
@@ -300,11 +344,14 @@ def plan(services, action, targets):
 
 def handle(request):
     operation = request["operation"]
-    services = inventory()
+    docker = request.get("server_type", "docker") == "docker"
+    if not docker and operation != "snapshot":
+        raise ValueError("Docker operations are disabled for plain servers")
+    services = inventory() if docker else []
     if operation == "snapshot":
         if request.get("updates"):
             services = check_updates(services)
-        return {"metrics": metrics(), "services": services}
+        return {"metrics": metrics(docker=docker), "services": services}
     if operation == "execute":
         commands = plan(services, request["action"], request["targets"])
         if commands != request["expected"]:

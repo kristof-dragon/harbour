@@ -158,7 +158,7 @@ def test_sensor_collection_faults_and_missing(tmp_path):
     assert remote_probe.temperatures('/nonexistent')['package'] is None
     thermal=tmp_path/'other/class/thermal/thermal_zone0';thermal.mkdir(parents=True)
     (thermal/'temp').write_text('61000');(thermal/'type').write_text('cpu-thermal')
-    assert remote_probe.temperatures(str(tmp_path/'other'))['package'] is None
+    assert remote_probe.temperatures(str(tmp_path/'other'))['package'] == 61
     assert remote_probe.temperatures(str(tmp_path/'other'))['sensors'][0]['celsius']==61
 
 

@@ -1,14 +1,14 @@
 'use strict';
-const resourceMeta = {cpu:{label:'CPU',unit:'%',color:'#2baf91',icon:'cpu'},memory:{label:'Memory',unit:'%',color:'#668bee',icon:'memory'},disk:{label:'Disk',unit:'%',color:'#bc86d6',icon:'disk'},temperature:{label:'CPU package',unit:'°C',color:'#e89548',icon:'temperature'}};
+const resourceMeta = {cpu:{label:'CPU',unit:'%',color:'#2baf91',icon:'cpu'},memory:{label:'Memory',unit:'%',color:'#668bee',icon:'memory'},disk:{label:'Disk',unit:'%',color:'#bc86d6',icon:'disk'},temperature:{label:'CPU / SoC',unit:'°C',color:'#e89548',icon:'temperature'}};
 const hourChoices=[1,3,6,12,24,48,168,336,672,2160,4320,8760,17520];
 let cardHours=Number(localStorage.getItem('harbour-card-hours'))||6;
 if(!hourChoices.includes(cardHours))cardHours=6;
 const cardCache=new Map();
-const historyState={server:null,hours:24,resolution:0,mode:'combined',stat:'average',selected:new Set(Object.keys(resourceMeta)),resource:'cpu',data:null,sequence:0};
+const historyState={server:null,hours:24,resolution:0,mode:'combined',stat:'average',selected:new Set(Object.keys(resourceMeta)),resource:'cpu',disk:'',data:null,sequence:0};
 const monitorActions=new Set(['history','history-mode','history-tab','history-refresh','monitoring']);
-const monitorForms=new Set(['monitoring-form','server-monitoring-form']);
+const monitorForms=new Set(['monitoring-form','server-monitoring-form','volumes-form','server-type-form']);
 const uptime=n=>n==null?'Unavailable':`${Math.floor(n/86400)}d ${Math.floor(n%86400/3600)}h ${Math.floor(n%3600/60)}m`;
-const hourOptions=value=>hourChoices.map(h=>`<option value="${h}" ${h===value?'selected':''}>${h<48?h+' hours':h/24+' days'}</option>`).join('');
+const hourOptions=value=>hourChoices.map(h=>`<option value="${h}" ${h===value?'selected':''}>${h<48?count(h,'hour'):h/24+' days'}</option>`).join('');
 const resolutionLabel=n=>n<3600?n/60+' min':n<86400?n/3600+' hour'+(n>3600?'s':''):n/86400+' days';
 const connectionState=s=>!s.monitoring_enabled?'paused':s.connection_status==='down'?'down':s.stale?'stale':s.connection_status;
 function serverConnection(s,withHost=false){
@@ -17,10 +17,10 @@ function serverConnection(s,withHost=false){
   return `<div class="server-connection"><span class="connection-pill ${e(status)}"><i></i>${label}</span>${withHost?`<span class="card-host mono" title="${e(s.host)}">${e(s.host)}</span><span class="connection-separator">–</span>`:''}<span class="latency" title="Authenticated SSH command round-trip; excludes connection setup. Not ICMP ping.">${s.latency_ms==null?'SSH —':`${percent(s.latency_ms)} ms${withHost?'':' SSH'}`}${status!=='up'&&s.latency_ms!=null?' · last':''}</span></div>`;
 }
 function resourceCards(s){
-  const m=s.metrics,t=s.thresholds,disk=m.disks.reduce((a,b)=>!a||b.percent>a.percent?b:a,null),temp=m.temperature||{};
-  const values={cpu:[m.cpu,`${m.cores??'—'} cores`,s.stale?'Last known usage':'Host CPU'],memory:[m.memory.percent,`${gb(m.memory.used)} / ${gb(m.memory.total)} GB`,'RAM'],disk:[disk?.percent,disk?`${gb(disk.used)} / ${gb(disk.total)} GB`:'No filesystem data',disk?`${gb(disk.free)} GB free`:''],temperature:[temp.package,temp.package==null?'No package sensor':temp.package_label,temp.package_count>1?`${temp.package_count} packages · first shown`:temp.package==null?'Unavailable':'Package reading']};
+  const m=s.metrics,t=s.thresholds,disk=cardDisk(s),temp=m.temperature||{};
+  const values={cpu:[m.cpu,`${m.cores??'—'} cores`,s.stale?'Last known usage':'Host CPU'],memory:[m.memory.percent,`${gb(m.memory.used)} / ${gb(m.memory.total)} GB`,'RAM'],disk:[disk?.percent,disk?`${disk.mount} · ${capacity(disk.used)} / ${capacity(disk.total)}`:'No volume selected',disk?`${capacity(disk.free)} free`:''],temperature:[temp.package,temp.package==null?'No CPU / SoC sensor':temp.package_label,temp.package_count>1?`${temp.package_count} packages · first shown`:temp.package==null?'Unavailable':'Selected sensor']};
   return Object.entries(values).map(([key,[value,detail,aside]])=>{
-    const meta=resourceMeta[key],warn=s.warnings.some(w=>key==='temperature'?w.kind==='cpu_package':w.id===key||w.id.startsWith(key+':'));
+    const meta=resourceMeta[key],warn=key==='disk'?!!disk?.warning:s.warnings.some(w=>key==='temperature'?w.kind==='cpu_package':w.id===key||w.id.startsWith(key+':'));
     return `<article class="metric ${warn?'warning':''}"><div class="metric-label">${icon(meta.icon)}${meta.label}<span class="tag ${warn?'red':''}">${warn?'Attention':value==null?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="metric-value">${value==null?'—':percent(value)}<span>${value==null?'':meta.unit}</span></div><div class="metric-bottom"><span>${e(detail)}</span><span>${e(aside)}</span></div><button class="card-chart" type="button" data-action="history" data-resource="${key}" aria-label="Explore ${meta.label} history"><span data-card-chart="${key}">Loading history…</span></button>${key==='temperature'&&temp.sensors?.length?`<details class="sensor-details"><summary>${count(temp.sensors.length,'sensor')}</summary>${temp.sensors.map(sensor=>`<div class="between ${sensor.kind!=='cpu_auxiliary'&&sensor.celsius>=t.temperature?'sensor-warning':''}"><span>${e(sensor.label)}${sensor.kind==='cpu_auxiliary'?' · separate reading':''}</span><b>${percent(sensor.celsius)}°C</b></div>`).join('')}</details>`:''}</article>`;
   }).join('');
 }
@@ -49,14 +49,17 @@ function chartSVG(data,keys,{mini=false}={}){
     }
     grid+=`<text x="${left}" y="15">${percents?'Utilisation (%)':''}</text>${temps?`<text x="${right}" y="15" text-anchor="end">Temperature (°C)</text>`:''}`;
   }
-  const gap=Math.max(data.resolution_seconds, (current()?.poll_seconds||60))*1.75;
+  const pollGap=(data.poll_seconds||current()?.poll_seconds||60)*3.5;
+  const legacyGap=Math.max(data.resolution_seconds*1.75,pollGap);
   const lines=keys.map(key=>{
-    let segments=[],segment=[],previous=null;
+    let segments=[],segment=[],previous=null,previousTimed=false;
     for(const p of data.points){
       const value=mini?p[key]:graphValue(p,key);
-      if(value==null||previous!=null&&p.time-previous>gap){if(segment.length)segments.push(segment);segment=[];}
-      if(value!=null)segment.push([x(p.time),y(value,key)]);
-      previous=p.time;
+      if(value==null)continue;
+      const first=p.sample_first??p.time,last=p.sample_last??p.time;
+      if(previous!=null&&first-previous>(p.sample_first!=null&&previousTimed?pollGap:legacyGap)){if(segment.length)segments.push(segment);segment=[];}
+      segment.push([x(p.time),y(value,key)]);
+      previous=last;previousTimed=p.sample_last!=null;
     }
     if(segment.length)segments.push(segment);
     return segments.map(s=>s.length===1?`<circle cx="${s[0][0]}" cy="${s[0][1]}" r="2.5" fill="${resourceMeta[key].color}"/>`:`<polyline fill="none" stroke="${resourceMeta[key].color}" stroke-width="${mini?2:2.3}" points="${s.map(p=>p.join(',')).join(' ')}"/>`).join('');
@@ -76,7 +79,7 @@ async function loadCardHistory(s,force=false){
 }
 function drawCardHistory(data){document.querySelectorAll('[data-card-chart]').forEach(el=>{el.innerHTML=chartSVG(data,[el.dataset.cardChart],{mini:true})+`<small>${data.hours}h · ${resolutionLabel(data.resolution_seconds)} averages</small>`;});}
 function openHistory(resource){
-  historyState.server=current().id;historyState.data=null;
+  historyState.server=current().id;historyState.disk='';historyState.data=null;
   if(resource){historyState.mode='tabs';historyState.resource=resource;}
   modal(`${e(current().name)} · Resource history`,`<div id="history-explorer"></div>`,true);
   $('.modal').classList.add('history-modal');renderHistory();fetchHistory();
@@ -84,22 +87,24 @@ function openHistory(resource){
 function renderHistory(){
   const root=$('#history-explorer');if(!root)return;
   const h=historyState,data=h.data,keys=[...h.selected];
-  root.innerHTML=`<div class="history-controls"><label>Time window<select id="history-hours">${hourOptions(h.hours)}</select></label><label>Display resolution<select id="history-resolution">${[0,60,300,600,900,1800,3600,10800,21600,43200,86400,604800].map(r=>`<option value="${r}" ${r===h.resolution?'selected':''}>${r?resolutionLabel(r):'Automatic'}</option>`).join('')}</select></label><label>Values<select id="history-stat"><option value="average" ${h.stat==='average'?'selected':''}>Averages</option><option value="peak" ${h.stat==='peak'?'selected':''}>Peaks</option></select></label>${button('history-refresh','Refresh','refresh','small')}</div>
+  root.innerHTML=`<div class="history-controls"><label>Time window<select id="history-hours">${hourOptions(h.hours)}</select></label><label>Display resolution<select id="history-resolution">${[0,60,300,600,900,1800,3600,10800,21600,43200,86400,604800].map(r=>`<option value="${r}" ${r===h.resolution?'selected':''}>${r?resolutionLabel(r):'Automatic'}</option>`).join('')}</select></label><label>Values<select id="history-stat"><option value="average" ${h.stat==='average'?'selected':''}>Averages</option><option value="peak" ${h.stat==='peak'?'selected':''}>Peaks</option></select></label><label>Disk volume<select id="history-disk"><option value="">Card selection</option>${[...new Set([...(current()?.metrics?.disks||[]).map(d=>d.mount),...(data?.disk_mounts||[])])].map(m=>`<option value="${e(m)}" ${m===h.disk?'selected':''}>${e(m)}</option>`).join('')}</select></label>${button('history-refresh','Refresh','refresh','small')}</div>
     <div class="history-modes segmented" aria-label="History layout">${[['tabs','Resource tabs'],['table','Table'],['side','Side by side'],['combined','Combined']].map(([mode,name])=>button('history-mode',name,'',h.mode===mode?'active':'',`data-mode="${mode}"`)).join('')}</div>
     ${h.mode==='tabs'?`<div class="resource-legend">${Object.entries(resourceMeta).map(([k,m])=>button('history-tab',m.label,m.icon,h.resource===k?'active':'ghost',`data-resource="${k}"`)).join('')}</div>`:`<div class="resource-legend">${Object.entries(resourceMeta).map(([k,m])=>`<label style="--series:${m.color}"><input type="checkbox" data-history-resource="${k}" ${h.selected.has(k)?'checked':''}><i></i>${m.label}${k==='temperature'?' (°C)':' (%)'}</label>`).join('')}</div>`}
     <p class="hint history-caption">${data?`${data.hours} hours · actual resolution <b>${resolutionLabel(data.resolution_seconds)}</b> · ${count(data.points.length,'bucket')} · times in ${e(Intl.DateTimeFormat().resolvedOptions().timeZone)}.${data.requested_resolution&&data.resolution_seconds>data.requested_resolution?' Stored resolution or the 2,000-point display limit requires coarser buckets.':''}`:'Loading stored readings…'}</p>
     <div class="history-content">${!data?'<div class="empty">Loading history…</div>':h.mode==='tabs'?`<h3>${resourceMeta[h.resource].label}</h3>${chartSVG(data,[h.resource])}`:!keys.length?'<div class="empty">Select at least one resource.</div>':h.mode==='table'?historyTable(data,keys):h.mode==='side'?`<div class="history-grid">${keys.map(k=>`<article><h3>${icon(resourceMeta[k].icon)}${resourceMeta[k].label}</h3>${chartSVG(data,[k])}</article>`).join('')}</div>`:chartSVG(data,keys)}</div>
-    <p class="hint">${data?.demo?'Synthetic demo history. ':''}Disk shows the busiest monitored filesystem; CPU temperature uses ${e(data?.temperature_source||'the package sensor')}. Missing readings leave gaps. Peaks remain available after consolidation.</p><div class="form-error" role="alert"></div>`;
+    <p class="hint">${data?.demo?'Synthetic demo history. ':''}Disk: ${e(h.disk||'highest usage among volumes selected for cards')}; CPU temperature uses ${e(data?.temperature_source||'the package sensor')}. Lines bridge up to two missed polls; longer gaps remain. Missing values are not stored or included in averages. Peaks remain available after consolidation.</p><div class="form-error" role="alert"></div>`;
 }
 function historyTable(data,keys){
   if(!data.points.length)return '<div class="empty">No readings in this window.</div>';
-  return `<div class="history-table-wrap" tabindex="0" aria-label="Scrollable resource readings"><table class="history-table"><thead><tr><th>Bucket start</th>${keys.map(k=>`<th>${resourceMeta[k].label} (${resourceMeta[k].unit})</th>`).join('')}<th>Disk used / free (GB)</th><th>SSH (ms)</th><th>Samples / checks</th></tr></thead><tbody>${[...data.points].reverse().map(p=>`<tr><td>${e(new Date(p.time*1000).toLocaleString())}</td>${keys.map(k=>`<td>${graphValue(p,k)==null?'—':percent(graphValue(p,k))}</td>`).join('')}<td>${p.disks.map(d=>`<div>${e(d.mount)}: ${percent(d.used_gb)} / ${percent(d.free_gb)}</div>`).join('')||'—'}</td><td>${p.latency_ms==null?'—':percent(p.latency_ms)}</td><td>${p.samples} / ${p.attempts}</td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="history-table-wrap" tabindex="0" aria-label="Scrollable resource readings"><table class="history-table"><thead><tr><th>Bucket start</th>${keys.map(k=>`<th>${resourceMeta[k].label} (${resourceMeta[k].unit})</th>`).join('')}<th>Disk used / free</th><th>SSH (ms)</th><th>Samples / checks</th></tr></thead><tbody>${[...data.points].reverse().map(p=>`<tr><td>${e(new Date(p.time*1000).toLocaleString())}</td>${keys.map(k=>`<td>${graphValue(p,k)==null?'—':percent(graphValue(p,k))}</td>`).join('')}<td>${p.disks.map(d=>`<div>${e(d.mount)}: ${capacity(d.used_gb*1e9)} / ${capacity(d.free_gb*1e9)}</div>`).join('')||'—'}</td><td>${p.latency_ms==null?'—':percent(p.latency_ms)}</td><td>${p.samples} / ${p.attempts}</td></tr>`).join('')}</tbody></table></div>`;
 }
 async function fetchHistory(){
-  const seq=++historyState.sequence,{server,hours,resolution}=historyState;
-  try{const data=await api(`/servers/${server}/history?hours=${hours}&resolution=${resolution}`);if(seq!==historyState.sequence||!$('#history-explorer'))return;historyState.data=data;renderHistory();}
+  const seq=++historyState.sequence,{server,hours,resolution,disk}=historyState;
+  try{const data=await api(`/servers/${server}/history?hours=${hours}&resolution=${resolution}${disk?'&disk='+encodeURIComponent(disk):''}`);if(seq!==historyState.sequence||!$('#history-explorer'))return;historyState.data=data;renderHistory();}
   catch(error){if($('#history-explorer'))formError(error.message);}
 }
+function serverTypeForm(s){return `<hr class="section-rule"><form id="server-type-form" data-id="${e(s.id)}"><h3>${fieldCaption('Server type','Plain servers collect resources only. Docker hosts also discover containers, check images and support Docker actions.')}</h3><label>Mode<select name="server_type"><option value="docker" ${s.server_type==='docker'?'selected':''}>Docker host</option><option value="plain" ${s.server_type==='plain'?'selected':''}>Plain server · resources only</option></select></label><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">Save server type</button></div></form>`;}
+function volumeSettingsForm(s){return `<hr class="section-rule"><form id="volumes-form" data-id="${e(s.id)}"><h3>${fieldCaption('Volumes','Monitor stores this volume’s history. Warn enables disk thresholds. Use in cards selects the disk shown in the resource card and sidebar; if several are selected, the highest percentage is shown. Existing history is retained when monitoring is disabled.')}</h3><div class="volume-table-wrap"><table class="volume-settings"><thead><tr><th>Volume</th><th>Monitor</th><th>Warn</th><th>Use in cards</th></tr></thead><tbody>${(s.metrics?.disks||[]).map(d=>`<tr data-volume="${e(d.mount)}"><th><span class="mono">${e(d.mount)}</span><small>${d.present?capacity(d.total)+' · '+capacity(d.free)+' free':'Not mounted'}</small></th>${['monitor','warn','card'].map(key=>`<td><input type="checkbox" data-volume-option="${key}" aria-label="${key==='card'?'Use in cards':key==='warn'?'Warn':'Monitor'} ${e(d.mount)}" ${d[key]?'checked':''} ${key!=='monitor'&&!d.monitor?'disabled':''}></td>`).join('')}</tr>`).join('')}</tbody></table></div>${!s.metrics?.disks?.length?'<p class="hint">Volumes appear after a successful check.</p>':''}<div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">Save volumes</button></div></form>`;}
 function serverMonitoringForm(s){return `<hr class="section-rule"><h3>Server checks</h3><form id="server-monitoring-form" data-id="${e(s.id)}"><label class="check-line"><input name="enabled" type="checkbox" ${s.monitoring_enabled?'checked':''}>Background monitoring enabled</label><label>${fieldCaption('Polling interval (seconds)','Leave blank to inherit. A slower host can use 300 seconds; checks never overlap on one host. Pausing keeps history and permits manual refresh.')}<input aria-label="Polling interval (seconds)" name="poll_seconds" type="number" min="15" max="3600" placeholder="Use global interval" value="${s.poll_override??''}"></label><p class="hint">Effective interval: ${s.poll_seconds}s.</p><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">Save server checks</button></div></form>`;}
 async function monitoringSettings(){
   const p=await api('/monitoring');
@@ -114,11 +119,16 @@ async function handleMonitorAction(action,el){
   if(action==='monitoring')await monitoringSettings();
 }
 async function handleMonitorForm(form,data){
-  if(form.id==='monitoring-form'){await api('/monitoring','PUT',Object.fromEntries(Object.entries(data).map(([k,v])=>[k,Number(v)])));closeOverlay();await load();toast('Monitoring and retention saved');}
-  if(form.id==='server-monitoring-form'){await api(`/servers/${form.dataset.id}/monitoring`,'PUT',{enabled:data.enabled==='on',poll_seconds:data.poll_seconds?Number(data.poll_seconds):null});closeOverlay();await load();toast('Server checks saved');}
+  if(form.id==='server-type-form'){await api(`/servers/${form.dataset.id}/type`,'PUT',{server_type:data.server_type});markFormSaved(form);state.selected.clear();await load();toast('Server type saved');}
+  if(form.id==='volumes-form'){const volumes=[...form.querySelectorAll('[data-volume]')].map(row=>({mount:row.dataset.volume,monitor:row.querySelector('[data-volume-option=monitor]').checked,warn:row.querySelector('[data-volume-option=warn]').checked,card:row.querySelector('[data-volume-option=card]').checked}));await api(`/servers/${form.dataset.id}/volumes`,'PUT',{volumes});markFormSaved(form);cardCache.clear();await load();toast('Volume settings saved');}
+
+  if(form.id==='monitoring-form'){await api('/monitoring','PUT',Object.fromEntries(Object.entries(data).map(([k,v])=>[k,Number(v)])));markFormSaved(form);await load();toast('Monitoring and retention saved');}
+  if(form.id==='server-monitoring-form'){await api(`/servers/${form.dataset.id}/monitoring`,'PUT',{enabled:data.enabled==='on',poll_seconds:data.poll_seconds?Number(data.poll_seconds):null});markFormSaved(form);await load();toast('Server checks saved');}
 }
 document.addEventListener('change',async event=>{
   const el=event.target;
+  if(el.id==='history-disk'){historyState.disk=el.value;await fetchHistory();}
+  if(el.dataset.volumeOption==='monitor'){const row=el.closest('[data-volume]');for(const key of ['warn','card']){const input=row.querySelector('[data-volume-option='+key+']');input.disabled=!el.checked;if(!el.checked)input.checked=false;}}
   if(el.id==='card-hours'){cardHours=Number(el.value);localStorage.setItem('harbour-card-hours',cardHours);await loadCardHistory(current(),true);}
   if(el.id==='history-hours'||el.id==='history-resolution'){historyState[el.id==='history-hours'?'hours':'resolution']=Number(el.value);historyState.data=null;renderHistory();await fetchHistory();}
   if(el.id==='history-stat'){historyState.stat=el.value;renderHistory();}

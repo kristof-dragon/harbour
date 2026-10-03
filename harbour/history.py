@@ -7,7 +7,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import remote_probe, store
+from . import remote_probe, store, volumes
 from .auth import admin, authenticated
 
 router = APIRouter(prefix="/api")
@@ -28,7 +28,16 @@ def empty():
 def merge(left, right):
     left, right = {**empty(), **left}, {**empty(), **right}
     value = dict(left)
+    for key in ("sample_first_min", "sample_last_max"):
+        if key in right and key not in value:
+            value[key] = right[key]
+            left[key] = right[key]
+        if key in value and key not in right:
+            right[key] = left[key]
     for key in value:
+        if key == "sample_first_min":
+            value[key] = min(left.get(key, float("inf")), right.get(key, float("inf")))
+            continue
         if key in {"disks", "sensors"}:
             continue
         value[key] = max(left[key], right[key]) if key.endswith("_max") else left[key] + right[key]
@@ -80,7 +89,13 @@ def record(server_id, metrics=None, latency_ms=None, up=False, now=None):
     bucket = int(now // resolution * resolution)
     with store.db() as con:
         con.execute("BEGIN IMMEDIATE")
-        put(con, server_id, bucket, resolution, sample_payload(metrics, latency_ms, up))
+        server = con.execute("SELECT * FROM servers WHERE id=?", (server_id,)).fetchone()
+        if metrics and server:
+            metrics = {**metrics, "disks": [d for d in metrics["disks"] if volumes.options(dict(server), d["mount"])["monitor"]]}
+        payload = sample_payload(metrics, latency_ms, up)
+        if metrics:
+            payload.update(sample_first_min=now, sample_last_max=now)
+        put(con, server_id, bucket, resolution, payload)
 
 
 def compact(now=None, limit=12000):
@@ -114,7 +129,7 @@ def compact(now=None, limit=12000):
         housekeeping_lock.release()
 
 
-def series(server_id, hours, now=None, requested_resolution=0):
+def series(server_id, hours, now=None, requested_resolution=0, disk_mount=None):
     now = time.time() if now is None else now
     p = policy()
     hours = min(hours, p["retention_days"] * 24)
@@ -133,7 +148,7 @@ def series(server_id, hours, now=None, requested_resolution=0):
     # temperature_sum/max fields mixed unrelated sensors and must not be relabelled.
     known = {key: {"id": key, **s} for data in grouped.values() for key, s in data["sensors"].items()
              if remote_probe.temperature_kind({"id": key, **s}) == "cpu_package"}
-    server = store.one("SELECT snapshot FROM servers WHERE id=?", (server_id,))
+    server = store.one("SELECT * FROM servers WHERE id=?", (server_id,))
     current = json.loads(server["snapshot"]).get("metrics", {}).get("temperature", {}) if server else {}
     selected = remote_probe.temperature_summary(current.get("sensors", []))["package_sensor_id"]
     if not selected and known:
@@ -145,9 +160,10 @@ def series(server_id, hours, now=None, requested_resolution=0):
         disks = [{"mount": mount, "percent": d["percent_sum"]/d["n"], "peak": d["percent_max"],
                   "used_gb": d["used_sum"]/d["n"]/1e9, "free_gb": d["free_sum"]/d["n"]/1e9,
                   "min_free_gb": d["free_min"]/1e9} for mount, d in data["disks"].items()]
-        points.append({"time": bucket, "cpu": data["cpu_sum"]/n if n else None, "cpu_peak": data["cpu_max"] if n else None,
+        card_disks = [d for d in disks if d["mount"] == disk_mount] if disk_mount else [d for d in disks if server and volumes.options(server, d["mount"])["monitor"] and volumes.options(server, d["mount"])["card"]]
+        points.append({"time": bucket, "sample_first": data.get("sample_first_min"), "sample_last": data.get("sample_last_max"), "cpu": data["cpu_sum"]/n if n else None, "cpu_peak": data["cpu_max"] if n else None,
                        "memory": data["memory_sum"]/n if n else None, "memory_peak": data["memory_max"] if n else None,
-                       "disk": max((d["percent"] for d in disks), default=None), "disk_peak": max((d["peak"] for d in disks), default=None),
+                       "disk": max((d["percent"] for d in card_disks), default=None), "disk_peak": max((d["peak"] for d in card_disks), default=None),
                        "disks": disks, "latency_ms": data["latency_sum"]/ln if ln else None,
                        "temperature": package["sum"]/package["n"] if package else None,
                        "temperature_peak": package["celsius_max"] if package else None,
@@ -156,7 +172,9 @@ def series(server_id, hours, now=None, requested_resolution=0):
                        "attempts": data["attempts"], "samples": n})
     return {"points": points, "resolution_seconds": resolution, "from": since, "to": now, "hours": hours,
             "retention_days": p["retention_days"], "demo": store.DEMO, "requested_resolution": requested_resolution,
-            "temperature_source": known.get(selected, {}).get("label"), "temperature_sensor_id": selected}
+            "temperature_source": known.get(selected, {}).get("label"), "temperature_sensor_id": selected,
+            "poll_seconds": (server["poll_seconds"] or p["poll_seconds"]) if server else p["poll_seconds"],
+            "disk_mount": disk_mount, "disk_mounts": sorted({mount for data in grouped.values() for mount in data["disks"]})}
 
 
 class MonitoringPolicy(BaseModel):
@@ -207,11 +225,11 @@ def save_server_monitoring(id_: str, body: ServerMonitoring, user=Depends(admin)
 
 
 @router.get("/servers/{id_}/history")
-def history(id_: str, hours: float = 6, resolution: int = 0, user=Depends(authenticated)):
+def history(id_: str, hours: float = 6, resolution: int = 0, disk: str | None = None, user=Depends(authenticated)):
     if not math.isfinite(hours) or not 1 <= hours <= 17520:
         raise HTTPException(400, "Choose between 1 and 17520 hours")
     if not store.one("SELECT 1 FROM servers WHERE id=?", (id_,)):
         raise HTTPException(404, "Server not found")
     if resolution not in {0,60,300,600,900,1800,3600,10800,21600,43200,86400,604800}:
         raise HTTPException(400, "Unsupported display resolution")
-    return series(id_, hours, requested_resolution=resolution)
+    return series(id_, hours, requested_resolution=resolution, disk_mount=disk)

@@ -17,7 +17,7 @@ The interactive setup creates `.env`, generates the application secret, and stor
 
 For Nginx Proxy Manager on a separate instance, choose setup option **2**. In NPM, forward **HTTP** to the Harbour host’s LAN IP and your selected port (for example, **8384**), and enable HTTPS for your configured hostname. The container’s internal port remains **8080**.
 
-Open your configured URL and sign in. Use **Menu → Add server** to connect a Linux host with Python 3.9+, Docker and Compose v2 installed, using an SSH account with Docker access. Fetch and accept its host fingerprint, then generate or import an SSH key and install it from the form using a one-time password, or copy it manually. Optional password login is available after acknowledging its warning. Use **Server settings → Edit SSH connection** to switch authentication methods or replace keys without deleting the server.
+Open your configured URL and sign in. Use **Menu → Add server** to connect a Linux host with Python 3.9+. Choose **Docker host** (also requires Docker, Compose v2 and an SSH account with Docker access) or **Plain server** for resource monitoring. Fetch and accept its host fingerprint, then generate or import an SSH key and install it from the form using a one-time password, or copy it manually. Optional password login is available after acknowledging its warning. Use **Server settings → Edit SSH connection** to switch authentication methods or replace keys without deleting the server.
 
 To update, keep your existing `.env` and data volume:
 

@@ -6,7 +6,7 @@ function timezoneLabel(tz) {
 
 function sidebarMetrics(server) {
   return [['cpu', 'cpu', server.metrics.cpu], ['memory', 'memory', server.metrics.memory.percent],
-    ['disk', 'disk', Math.max(0, ...server.metrics.disks.map(d => d.percent))], ['temperature', 'temperature', server.metrics.temperature?.package]].map(([key, symbol, value]) => {
+    ['disk', 'disk', cardDisk(server)?.percent], ['temperature', 'temperature', server.metrics.temperature?.package]].map(([key, symbol, value]) => {
     const warning = server.warnings.some(w => key === 'temperature' ? w.kind === 'cpu_package' : w.id === key || w.id.startsWith(key + ':'));
     return `<span class="resource-chip ${warning ? 'resource-warning' : ''}" ${warning ? `data-warning-server="${e(server.id)}" data-warning-kind="${key}"` : ''}>${icon(symbol)}${value==null?'—':Math.round(value)+(key==='temperature'?'°':'%')}</span>`;
   }).join('');
@@ -14,7 +14,7 @@ function sidebarMetrics(server) {
 
 function serverWarnings(server) {
   if (!server.warnings.length) return '';
-  return `<section class="warning-banner server-warnings" aria-label="Server warnings" role="status">${icon('warning')}<div><b>${count(server.warnings.length, 'active warning')}</b><ul>${server.warnings.map(w => `<li><strong>${e(w.title)}</strong><span>${e(w.detail)}</span></li>`).join('')}</ul>${server.error && server.checked ? `<p>Last successful reading: ${age(server.checked)}.</p>` : ''}</div></section>`;
+  return `<details class="warning-banner server-warnings" data-warning-open="${e(server.id)}" ${state.open.has('warnings:'+server.id)?'open':''}><summary>${icon('warning')}<b>${count(server.warnings.length, 'active warning')}</b><span class="warning-summary">${e(server.warnings.map(w=>w.title).join(' · '))}</span>${icon('down')}</summary><ul>${server.warnings.map(w=>`<li><strong>${e(w.title)}</strong><span>${e(w.detail)}</span></li>`).join('')}</ul>${server.error&&server.checked?`<p>Last successful reading: ${age(server.checked)}.</p>`:''}</details>`;
 }
 
 let tooltipTimer;
@@ -166,7 +166,7 @@ async function createKey(){
   output.innerHTML='<p class="hint" role="status">Preparing SSH key…</p>';
   try{
     const key=await api('/keys','POST',body);if(!form.isConnected)return;
-    state.key=key;output.innerHTML=keyOutput();
+    state.key=key;form.dataset.credential=key.id;output.innerHTML=keyOutput();
     for(const name of ['private_key','passphrase'])if($(`[name=${name}]`,form))$(`[name=${name}]`,form).value='';
   }catch(error){if(form.isConnected){output.innerHTML=state.key?keyOutput():'';throw error;}}
   finally{restore();}

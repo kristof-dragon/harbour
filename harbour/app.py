@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from . import __version__, auth, demo, history, remote_probe, ssh, store
+from . import __version__, auth, demo, history, remote_probe, ssh, store, volumes
 from .auth import authenticated, admin
 
 pool = ThreadPoolExecutor(max_workers=4)
@@ -58,7 +58,7 @@ def refresh_server(id_, updates=False):
                 for service in snapshot.get("services", []):
                     service["update"]["checked"] = time.time()
         else:
-            snapshot = ssh.request(server, {"operation": "snapshot", "updates": updates})
+            snapshot = ssh.request(server, {"operation": "snapshot", "updates": updates and server["server_type"] == "docker", "server_type": server["server_type"]})
             if not updates:
                 old = {s["id"]: s for s in previous.get("services", [])}
                 for s in snapshot["services"]:
@@ -66,6 +66,9 @@ def refresh_server(id_, updates=False):
                     if prior.get("image_id") == s["image_id"]:
                         s["update"] = prior["update"]
             snapshot["history"] = (previous.get("history", []) + [snapshot["metrics"]["cpu"]])[-48:]
+        if server["server_type"] == "plain":
+            snapshot["services"] = []
+            snapshot.get("metrics", {})["docker"] = None
         store.execute("UPDATE servers SET snapshot=?, error=NULL, checked=?, update_checked=?,latency_ms=?,connection_status='up' WHERE id=?",
                       (json.dumps(snapshot), time.time(), time.time() if updates else server["update_checked"], snapshot.get("latency_ms"), id_))
     except Exception as exc:
@@ -205,7 +208,8 @@ def public_server(server, user):
     snapshot = json.loads(server["snapshot"])
     threshold = thresholds_for(server)
     dismissed = {(d["service_id"], d["digest"]) for d in store.rows("SELECT service_id,digest FROM dismissals WHERE user_id=? AND server_id=?", (user["id"], server["id"]))}
-    services = snapshot.get("services", [])
+    services = snapshot.get("services", []) if server["server_type"] == "docker" else []
+    snapshot["services"] = services
     warnings = []
     interval = server["poll_seconds"] or history.policy()["poll_seconds"]
     stale = not server["checked"] or time.time() - server["checked"] > max(120, interval*2 + 15)
@@ -219,9 +223,10 @@ def public_server(server, user):
         for key, value in (("cpu", metrics["cpu"]), ("memory", metrics["memory"]["percent"])):
             if value >= threshold[key]:
                 warnings.append({"id": key, "title": key.capitalize() + " usage is high", "detail": f"{value:.1f}% used · threshold {threshold[key]}%"})
+        metrics["disks"] = volumes.decorate(server, metrics["disks"], threshold)
         for disk in metrics["disks"]:
-            if disk["percent"] >= threshold["disk"] or disk["free"] / 1e9 <= threshold["disk_free_gb"]:
-                warnings.append({"id": "disk:" + disk["mount"], "title": "Disk space · " + disk["mount"], "detail": f"{disk['percent']:.1f}% used · {disk['free'] / 1e9:.1f} GB free"})
+            if disk["warning"]:
+                warnings.append({"id": "disk:" + disk["mount"], "title": "Disk space · " + disk["mount"], "detail": f"{disk['percent']:.1f}% used · {volumes.capacity(disk['free'])} free"})
         for sensor in metrics.get("temperature", {}).get("sensors", []):
             if sensor["kind"] != "cpu_auxiliary" and sensor["celsius"] >= threshold["temperature"]:
                 warnings.append({"id": "temperature:" + sensor["id"], "title": "Temperature · " + sensor["label"],
@@ -240,13 +245,13 @@ def public_server(server, user):
             "updates": sum(s.get("update", {}).get("status") == "available" and not s["dismissed"] for s in services),
             **snapshot, "latency_ms": server["latency_ms"], "connection_status": server["connection_status"],
             "monitoring_enabled": bool(server["monitoring_enabled"]), "poll_seconds": interval,
-            "poll_override": server["poll_seconds"], "last_attempt": server["last_attempt"]}
+            "poll_override": server["poll_seconds"], "last_attempt": server["last_attempt"], "server_type": server["server_type"]}
 
 
 @app.get("/api/dashboard")
 def dashboard(user=Depends(authenticated)):
     jobs = store.rows("SELECT id,server_id,server_name,actor,action,status,created,finished FROM jobs ORDER BY created DESC LIMIT 50")
-    return {"servers": [public_server(s, user) for s in store.rows("SELECT * FROM servers ORDER BY rowid")],
+    return {"servers": [public_server(s, user) for s in store.rows("SELECT * FROM servers ORDER BY sort_order,rowid")],
             "thresholds": {**store.DEFAULTS, **json.loads(store.one("SELECT value FROM settings WHERE key='thresholds'")["value"])}, "jobs": jobs}
 
 
@@ -269,6 +274,71 @@ def server_thresholds(id_: str, body: Thresholds | None = None, user=Depends(adm
     get_server(id_)
     store.execute("UPDATE servers SET thresholds=? WHERE id=?", (body.model_dump_json() if body else None, id_))
     return {"ok": True}
+
+
+class VolumeOption(Input):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+    mount: str = Field(min_length=1, max_length=4096)
+    monitor: bool
+    warn: bool
+    card: bool
+
+
+class VolumeInput(Input):
+    volumes: list[VolumeOption] = Field(max_length=500)
+
+
+@app.put('/api/servers/{id_}/volumes')
+def save_volumes(id_: str, body: VolumeInput, user=Depends(admin)):
+    server = get_server(id_)
+    known = {d['mount'] for d in json.loads(server['snapshot']).get('metrics', {}).get('disks', [])} | set(volumes.preferences(server))
+    names = [v.mount for v in body.volumes]
+    if len(names) != len(set(names)) or any(name not in known for name in names):
+        raise HTTPException(400, 'Choose from the discovered volumes')
+    config = volumes.preferences(server)
+    for value in body.volumes:
+        if not value.monitor and (value.warn or value.card):
+            raise HTTPException(400, 'Enable monitoring before warnings or card display')
+        config[value.mount] = value.model_dump(exclude={'mount'})
+    store.execute('UPDATE servers SET volume_settings=? WHERE id=?', (json.dumps(config), id_))
+    return {'ok': True}
+
+
+class ServerTypeInput(Input):
+    server_type: Literal['docker', 'plain']
+
+
+@app.put('/api/servers/{id_}/type')
+def save_server_type(id_: str, body: ServerTypeInput, user=Depends(admin)):
+    lock = server_lock(id_)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, 'Wait for the current server operation to finish')
+    try:
+        server = get_server(id_)
+        if server['server_type'] != body.server_type:
+            snapshot = json.loads(server['snapshot'])
+            snapshot['services'] = []
+            snapshot.get('metrics', {})['docker'] = None
+            store.execute("UPDATE servers SET server_type=?,snapshot=?,error=NULL,checked=NULL,last_attempt=NULL,update_checked=0,connection_status='pending' WHERE id=?",
+                          (body.server_type, json.dumps(snapshot), id_))
+    finally:
+        lock.release()
+    return {'ok': True}
+
+
+class ServerOrderInput(Input):
+    ids: list[str] = Field(max_length=10000)
+
+
+@app.put('/api/server-order')
+def save_server_order(body: ServerOrderInput, user=Depends(admin)):
+    with store.db() as con:
+        con.execute('BEGIN IMMEDIATE')
+        existing = {r[0] for r in con.execute('SELECT id FROM servers')}
+        if len(body.ids) != len(set(body.ids)) or set(body.ids) != existing:
+            raise HTTPException(409, 'The server list changed. Refresh and try again.')
+        con.executemany('UPDATE servers SET sort_order=? WHERE id=?', enumerate(body.ids))
+    return {'ok': True}
 
 
 class KeyInput(Input):
@@ -398,6 +468,7 @@ class ServerInput(SSHLoginInput):
     key_id: str | None = Field(default=None, min_length=1, max_length=64)
     password: SecretStr | None = Field(default=None, min_length=1, max_length=1024)
     password_auth_confirmed: bool = False
+    server_type: Literal['docker', 'plain'] = 'docker'
 
 
 def connection_credential(body, existing=None):
@@ -423,8 +494,8 @@ def add_server(body: ServerInput, user=Depends(admin)):
         raise HTTPException(400, "Live servers cannot be connected in demo mode")
     key_id, encrypted_password = connection_credential(body)
     id_ = secrets.token_hex(12)
-    store.execute("INSERT INTO servers (id,name,host,port,username,fingerprint,key_id,auth_method,password_encrypted) VALUES (?,?,?,?,?,?,?,?,?)",
-                  (id_, body.name, body.host, body.port, body.username, body.fingerprint, key_id, body.auth_method, encrypted_password))
+    store.execute("INSERT INTO servers (id,name,host,port,username,fingerprint,key_id,auth_method,password_encrypted,server_type,sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,(SELECT COALESCE(MAX(sort_order),0)+1 FROM servers))",
+                  (id_, body.name, body.host, body.port, body.username, body.fingerprint, key_id, body.auth_method, encrypted_password, body.server_type))
     job = queue_job(id_, "refresh", [], user)
     return {"id": id_, "job": job}
 
@@ -433,7 +504,7 @@ def add_server(body: ServerInput, user=Depends(admin)):
 def read_connection(id_: str, user=Depends(admin)):
     server = get_server(id_)
     key = store.one('SELECT id,public FROM ssh_keys WHERE id=?', (server['key_id'],))
-    return {**{k: server[k] for k in ('id', 'name', 'host', 'port', 'username', 'fingerprint', 'auth_method')},
+    return {**{k: server[k] for k in ('id', 'name', 'host', 'port', 'username', 'fingerprint', 'auth_method', 'server_type')},
             'has_password': bool(server['password_encrypted']),
             'key': {'id': key['id'], 'public_key': key['public'] + ' harbour'} if key else None}
 
@@ -481,16 +552,18 @@ def delete_server(id_: str, user=Depends(admin)):
 
 
 class ActionInput(Input):
-    action: Literal["pull", "up", "restart"]
+    action: Literal["pull", "up", "restart", "pull_up"]
     targets: list[str] = Field(min_length=1, max_length=200)
 
 
 def connection_signature(server):
-    values = {k: server[k] for k in ('host', 'port', 'username', 'fingerprint', 'auth_method', 'key_id', 'password_encrypted')}
+    values = {k: server[k] for k in ('host', 'port', 'username', 'fingerprint', 'auth_method', 'key_id', 'password_encrypted', 'server_type')}
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
 def build_plan(server, body):
+    if server["server_type"] != "docker":
+        raise HTTPException(400, "Docker operations are disabled for plain servers")
     if server["error"] or not server["checked"] or time.time() - server["checked"] > 120:
         raise HTTPException(409, "Refresh this server successfully before changing its services")
     try:
@@ -539,6 +612,8 @@ def queue_job(id_, action, targets, user, commands=None, job_id=None, expected_c
     job_id = job_id or secrets.token_hex(12)
     try:
         server = get_server(id_)
+        if action != "refresh" and server["server_type"] != "docker":
+            raise HTTPException(400, "Docker operations are disabled for plain servers")
         if expected_connection and expected_connection != connection_signature(server):
             raise HTTPException(409, 'Server connection changed; create a new preview')
         store.execute("INSERT INTO jobs (id,server_id,server_name,actor,action,status,targets,created) VALUES (?,?,?,?,?,'queued',?,?)",
@@ -564,12 +639,12 @@ def work_job(server, action, targets, commands, job_id, lock):
             selected = {s["id"] for s in snapshot["services"] if s["id"] in targets or "group:" + str(s["project"]) in targets}
             for s in snapshot["services"]:
                 if s["id"] in selected:
-                    if action == "pull":
+                    if action in {"pull", "pull_up"}:
                         s["pulled"] = True
-                    if action == "up" and s.get("pulled"):
+                    if action in {"up", "pull_up"} and s.get("pulled"):
                         s["image_id"] = s["update"].get("digest", s["image_id"])
                         s["update"]["status"] = "current"
-                    if action in {"up", "restart"}:
+                    if action in {"up", "pull_up", "restart"}:
                         s["state"] = "running"
             store.execute("UPDATE servers SET snapshot=?,checked=? WHERE id=?", (json.dumps(snapshot), time.time(), server["id"]))
             output = "Simulated operation completed. No real host was contacted."
@@ -577,7 +652,7 @@ def work_job(server, action, targets, commands, job_id, lock):
             result = ssh.request(server, {"operation": "execute", "action": action, "targets": targets, "expected": commands})
             output, status = result["output"], "succeeded" if result["ok"] else "failed"
             try:
-                refresh_server(server["id"], action == "up")
+                refresh_server(server["id"], action in {"up", "pull_up"})
             except Exception as exc:
                 output += "\nFollow-up monitoring failed: " + str(exc)
         store.execute("UPDATE jobs SET status=?,output=?,finished=? WHERE id=?", (status, output[-60000:], time.time(), job_id))
