@@ -184,6 +184,13 @@ input[type=checkbox]{accent-color:var(--accent);width:15px;height:15px;cursor:po
 .disk-row .meter{margin-top:12px}
 .activity-row{padding:16px 20px;background:var(--panel);border:1px solid var(--line);border-radius:8px;margin-bottom:8px;display:flex;gap:12px;align-items:center}
 .activity-row .activity-icon{width:34px;height:34px;display:grid;place-items:center;background:var(--hover);border-radius:8px;color:var(--muted)}
+.status-icon.status-green,.status-text.status-green{color:var(--accent)}
+.status-icon.status-red,.status-text.status-red{color:var(--red)}
+.status-icon.status-yellow,.status-text.status-yellow{color:var(--amber)}
+.status-icon.status-grey,.status-text.status-grey{color:var(--muted)}
+.status-icon.status-green{background:var(--accent-bg)}
+.status-icon.status-red{background:var(--red-bg)}
+.status-icon.status-yellow{background:color-mix(in srgb,var(--amber) 15%,var(--panel))}
 .activity-row .activity-text{flex:1}
 .activity-row small{color:var(--muted);display:block;font-size:.8rem}
 .activity-row b{font-size:.9rem;font-weight:550}
@@ -221,6 +228,7 @@ textarea{min-height:110px;resize:vertical;font-family:var(--mono);font-size:.78r
 .notice{padding:17px 0;border-bottom:1px solid var(--line)}
 .notice-title{display:flex;align-items:center;gap:8px;font-weight:550;font-size:.92rem}
 .notice.warn .notice-title .icon{color:var(--red)}
+.notification-actions{display:flex;justify-content:flex-end;margin:0 0 16px}
 .notice.update .notice-title .icon{color:var(--blue)}
 .notice p{font-size:.84rem;color:var(--muted);margin:8px 0;overflow-wrap:anywhere}
 .notice-actions{display:flex;gap:10px;justify-content:space-between;align-items:center;font-size:.8rem}
@@ -346,6 +354,8 @@ to{transform:translateY(0);opacity:1}
 .group-summary{grid-template-columns:25px 1fr 65px;padding:14px 12px;gap:6px}
 .group-summary>.muted{display:none}
 .group-icon{display:none}
+.group-icon.status-icon{display:grid;width:24px;height:24px;border-radius:6px}
+.group-icon.status-icon .icon{width:16px;height:16px}
 .group-name{gap:6px}
 .group-path{max-width:180px}
 .service-summary{padding:13px 12px}

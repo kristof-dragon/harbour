@@ -100,8 +100,10 @@ def refresh_server(id_, updates=False):
         latency = getattr(exc, "latency_ms", None)
         store.execute("UPDATE servers SET error=?,connection_status=?,latency_ms=? WHERE id=?", (str(exc)[:1000], status, latency, id_))
         history.record(id_, latency_ms=latency, up=status == "up")
+        clear_resolved_warning_dismissals(id_)
         raise
     history.record(id_, snapshot.get("metrics"), snapshot.get("latency_ms"), up=True)
+    clear_resolved_warning_dismissals(id_)
 
 
 def poll_one(server, lock):
@@ -138,6 +140,7 @@ def poll_resources(server, lock):
             con.execute("UPDATE servers SET snapshot=?,checked=?,latency_ms=?,connection_status='up' WHERE id=?",
                         (json.dumps(snapshot), time.time(), result.get('latency_ms'), id_))
         history.record(id_, metrics, result.get('latency_ms'), up=True)
+        clear_resolved_warning_dismissals(id_)
     except Exception as exc:
         status, latency = getattr(exc, 'status', 'unknown'), getattr(exc, 'latency_ms', None)
         history.record(id_, latency_ms=latency, up=status == 'up')
@@ -284,12 +287,8 @@ def thresholds_for(server):
     return {**store.DEFAULTS, **global_, **(json.loads(server["thresholds"]) if server["thresholds"] else {})}
 
 
-def public_server(server, user):
-    snapshot = json.loads(server["snapshot"])
-    threshold = thresholds_for(server)
-    dismissed = {(d["service_id"], d["digest"]) for d in store.rows("SELECT service_id,digest FROM dismissals WHERE user_id=? AND server_id=?", (user["id"], server["id"]))}
+def server_warnings(server, snapshot, threshold):
     services = snapshot.get("services", []) if server["server_type"] == "docker" else []
-    snapshot["services"] = services
     warnings = []
     interval = server["poll_seconds"] or history.policy()["poll_seconds"]
     stale = not server["checked"] or time.time() - server["checked"] > max(120, interval*2 + 15)
@@ -313,14 +312,52 @@ def public_server(server, user):
                                  "kind": sensor["kind"],
                                  "detail": f"{sensor['celsius']:.1f}°C · threshold {threshold['temperature']}°C"})
     for s in services:
-        key = (s["project"] + "/" + s["name"]) if s["project"] else s["container"]
-        s["notification_key"] = key
-        s["dismissed"] = (key, s.get("update", {}).get("digest")) in dismissed
         # Docker can retain the last health result after a container stops.
         issue = s["state"] if s["state"] in {"restarting", "dead"} else (
             "unhealthy" if s["state"] == "running" and s.get("health") == "unhealthy" else None)
         if issue:
             warnings.append({"id": "service:" + s["id"], "title": s["name"] + " needs attention", "detail": issue})
+    return warnings, stale
+
+
+def warning_notification(warning):
+    # Reading values can change while the same condition remains active.
+    reason = warning['detail'] if warning['id'] == 'connection' or warning['id'].startswith('service:') else None
+    digest = hashlib.sha256(json.dumps([warning['title'], reason]).encode()).hexdigest()
+    return 'warning:' + warning['id'], digest
+
+
+def clear_resolved_warning_dismissals(server_id, warnings=None):
+    records = store.rows("SELECT user_id,service_id,digest FROM dismissals WHERE server_id=? AND service_id LIKE 'warning:%'", (server_id,))
+    if not records:
+        return
+    if warnings is None:
+        server = store.one('SELECT * FROM servers WHERE id=?', (server_id,))
+        if not server:
+            return
+        warnings, _ = server_warnings(server, json.loads(server['snapshot']), thresholds_for(server))
+    active = {warning_notification(w) for w in warnings}
+    expired = [(r['user_id'], server_id, r['service_id'], r['digest']) for r in records if (r['service_id'], r['digest']) not in active]
+    if expired:
+        with store.db() as con:
+            con.executemany('DELETE FROM dismissals WHERE user_id=? AND server_id=? AND service_id=? AND digest=?', expired)
+
+
+def public_server(server, user):
+    snapshot = json.loads(server["snapshot"])
+    threshold = thresholds_for(server)
+    dismissed = {(d["service_id"], d["digest"]) for d in store.rows("SELECT service_id,digest FROM dismissals WHERE user_id=? AND server_id=?", (user["id"], server["id"]))}
+    services = snapshot.get("services", []) if server["server_type"] == "docker" else []
+    snapshot["services"] = services
+    warnings, stale = server_warnings(server, snapshot, threshold)
+    interval = server["poll_seconds"] or history.policy()["poll_seconds"]
+    clear_resolved_warning_dismissals(server['id'], warnings)
+    for warning in warnings:
+        warning['dismissed'] = warning_notification(warning) in dismissed
+    for s in services:
+        key = (s["project"] + "/" + s["name"]) if s["project"] else s["container"]
+        s["notification_key"] = key
+        s["dismissed"] = (key, s.get("update", {}).get("digest")) in dismissed
     return {"id": server["id"], "name": server["name"], "host": server["host"], "port": server["port"],
             "username": server["username"], "fingerprint": server["fingerprint"], "checked": server["checked"],
             "update_checked": server["update_checked"], "error": server["error"], "stale": stale,
@@ -935,6 +972,24 @@ def dismiss(body: DismissInput, user=Depends(authenticated)):
 def restore_dismissals(user=Depends(authenticated)):
     store.execute("DELETE FROM dismissals WHERE user_id=?", (user["id"],))
     return {"ok": True}
+
+
+@app.post("/api/dismiss-all")
+def dismiss_all(user=Depends(authenticated)):
+    records = []
+    for row in store.rows('SELECT * FROM servers'):
+        server = public_server(row, user)
+        for warning in server['warnings']:
+            if not warning['dismissed']:
+                key, digest = warning_notification(warning)
+                records.append((user['id'], server['id'], key, digest))
+        for service in server.get('services', []):
+            update = service.get('update', {})
+            if update.get('status') == 'available' and update.get('digest') and not service['dismissed']:
+                records.append((user['id'], server['id'], service['notification_key'], update['digest']))
+    with store.db() as con:
+        con.executemany('INSERT OR IGNORE INTO dismissals VALUES (?,?,?,?)', records)
+    return {"ok": True, "dismissed": len(records)}
 
 
 @app.get("/api/users")

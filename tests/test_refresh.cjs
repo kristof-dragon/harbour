@@ -24,6 +24,11 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  else if(url.pathname==='/api/jobs/task')data=job;
  else if(url.pathname.endsWith('/history'))data=history;
  else if(url.pathname==='/api/servers/refresh-all'){refreshAll++;data={jobs:[],errors:[]};}
+ else if(url.pathname==='/api/dismiss-all'){
+  let dismissed=0;
+  for(const s of dashboard.servers){for(const w of s.warnings){if(!w.dismissed)dismissed++;w.dismissed=true;}for(const c of s.services){if(c.update?.status==='available'&&!c.dismissed){dismissed++;c.dismissed=true;}}s.updates=0;}
+  data={ok:true,dismissed};
+ }
  else throw Error('Unexpected request '+url.pathname);
  await route.fulfill({json:data});});
  await page.goto('http://127.0.0.1:'+server.address().port);await page.locator('.server-item').first().waitFor();await page.locator('[data-card-chart=cpu] svg').waitFor();
@@ -65,7 +70,57 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  await page.evaluate(()=>{const svg=document.querySelector('[data-chart-keys]'),p=new DOMPoint(450,120).matrixTransform(svg.getScreenCTM());svg.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'touch',clientX:p.x,clientY:p.y}));});assert.equal(await page.locator('.chart-tooltip').isVisible(),true);
  assert.equal(await page.evaluate(()=>{const svg=document.querySelector('[data-chart-keys]'),bounds=document.querySelector('.history-content').getBoundingClientRect();return new DOMPoint(400,301).matrixTransform(svg.getScreenCTM()).y<=bounds.bottom;}),true);
  if(process.env.HARBOUR_TEST_CAPTURE){fs.mkdirSync('test-results',{recursive:true});await page.evaluate(()=>{historyState.hours=1;renderHistory();showChartReading(document.querySelector('[data-chart-keys]'),historyState.data.points[15].time);});await page.screenshot({path:'test-results/history-tooltip-v017.png'});}
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ // Live status changes keep the icon nodes and match between container and Activity views.
+ const c=dashboard.servers[0].services[0];job.targets='["old-container-id"]';job.target_names=['stack / '+c.container];
+ for(const theme of ['light','dark']){
+  await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+  for(const [runtime,health,tone,label] of [['running','healthy','green','healthy'],['running','unhealthy','red','unhealthy'],['running','starting','yellow','Starting'],['exited','unhealthy','grey','Stopped'],['running',null,'green','no health check']]){
+   c.state=runtime;c.health=health;await page.evaluate(()=>load());
+   await page.evaluate(()=>{state.tab='containers';renderMain();});
+   const group=page.locator('details.group>summary .status-icon');
+   if(await page.locator('details.group').getAttribute('open')===null)await page.locator('details.group>summary').click();
+   const container=page.locator('.service-summary .status-icon');
+   assert.match(await group.getAttribute('class'),new RegExp('status-'+tone));assert.match(await container.getAttribute('aria-label'),new RegExp(label));
+   const colour=await container.evaluate(el=>getComputedStyle(el).color);
+   await page.evaluate(()=>{state.tab='activity';renderMain();});
+   const activity=page.locator('[data-key="job:task"] .status-icon');
+   assert.match(await activity.getAttribute('class'),new RegExp('status-'+tone));assert.equal(await activity.evaluate(el=>getComputedStyle(el).color),colour);
+   assert.equal(await page.locator('[data-key="job:task"]>.tag').textContent(),'succeeded');
+  }
+ }
+ // A mixed stack prioritises unhealthy / starting services; absent targets are never guessed healthy.
+ c.state='running';c.health='healthy';
+ dashboard.servers[0].services.push({...structuredClone(c),id:'starting',name:'starting',container:'stack-starting-1',health:'starting'});
+ await page.evaluate(()=>load());await page.evaluate(()=>{state.tab='containers';state.search='';renderMain();});
+ assert.match(await page.locator('details.group>summary .status-icon').getAttribute('class'),/status-yellow/);
+ dashboard.servers[0].services[1].health='unhealthy';await page.evaluate(()=>load());
+ assert.match(await page.locator('details.group>summary .status-icon').getAttribute('class'),/status-red/);
+ dashboard.servers[0].services.splice(1);c.project=null;job.target_names=['removed-container'];
+ await page.evaluate(()=>load());await page.evaluate(()=>{state.tab='activity';renderMain();});
+ assert.match(await page.locator('[data-key="job:task"] .status-icon').getAttribute('class'),/status-grey/);
+ // Dismiss all empties notices but leaves resource warnings and server indicators visible.
+ dashboard.servers[0].warnings=[{id:'cpu',title:'CPU usage is high',detail:'99% used',dismissed:false}];
+ await page.evaluate(()=>load());await page.getByRole('button',{name:'Open notifications',exact:true}).click();
+ assert.ok(await page.locator('.notice').count()>0);await page.getByRole('button',{name:'Dismiss all',exact:true}).click();
+ await page.getByText('Nothing new',{exact:true}).waitFor();assert.equal(await page.locator('.notice').count(),0);
+ assert.equal(await page.getByRole('button',{name:'Dismiss all',exact:true}).isDisabled(),true);
+ assert.equal(await page.locator('[data-key="server:host-0"] .count-badge.warn').textContent(),'1');
+ assert.equal(await page.locator('[data-action=warnings] b').textContent(),'0');
+ await page.getByRole('button',{name:'Close notifications',exact:true}).click();
+ await page.setViewportSize({width:390,height:844});await page.evaluate(()=>{state.tab='containers';renderMain();});
+ assert.equal(await page.locator('.standalone .status-icon').isVisible(),true);
+ assert.equal(await page.locator('.standalone .status-icon').evaluate(el=>el.getBoundingClientRect().right<=innerWidth),true);
+ if(process.env.HARBOUR_TEST_CAPTURE){
+  dashboard.servers[0].services=[['healthy','running','healthy'],['stopped','exited','unhealthy'],['unhealthy','running','unhealthy'],['starting','running','starting']].map(([id,runtime,health])=>({...structuredClone(c),id,name:id,container:id,state:runtime,health}));
+  await page.evaluate(()=>{setMobilePanel(false);document.querySelector('#toasts').style.visibility='hidden';});await page.evaluate(()=>load());
+  await page.locator('.service-table').scrollIntoViewIfNeeded();await page.screenshot({path:'test-results/container-status-mobile-v0110.png'});
+  await page.setViewportSize({width:1280,height:900});
+  for(const theme of ['dark','light']){await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await page.locator('.service-table').scrollIntoViewIfNeeded();await page.screenshot({path:`test-results/container-status-${theme}-v0110.png`});}
+  dashboard.jobs=dashboard.servers[0].services.map((c,i)=>({...job,id:'colour-'+i,targets:JSON.stringify([c.id]),target_names:[c.container]}));
+  await page.evaluate(()=>load());await page.evaluate(()=>{state.tab='activity';renderMain();});await page.locator('.activity-row').first().scrollIntoViewIfNeeded();await page.screenshot({path:'test-results/activity-status-v0110.png'});
+ }
  assert.deepEqual(errors,[]);assert.ok(requests>=4);
- console.log('PASS: changed-value rendering, desktop/mobile scroll, focus/caret, expanded panels, persistent animation, live progress/log scroll, task counts, collapsible filters, refresh-all, chart hover/touch/keyboard/missing values');
+ console.log('PASS: changed-value rendering, desktop/mobile scroll, focus/caret, expanded panels, persistent animation, live progress/log scroll, task counts, collapsible filters, refresh-all, chart hover/touch/keyboard/missing values, container and Activity status colours, bulk notification dismissal');
  }finally{await browser.close();server.close();}
 })().catch(err=>{console.error(err);server.close();process.exitCode=1;});

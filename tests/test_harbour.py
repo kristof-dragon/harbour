@@ -112,7 +112,7 @@ def test_container_health_warnings_follow_current_runtime_state(client):
         server = client.get("/api/dashboard").json()["servers"][0]
         warnings = [w for w in server["warnings"] if w["id"].startswith("service:")]
         assert warnings == ([{"id": "service:" + service["id"],
-                              "title": service["name"] + " needs attention", "detail": issue}] if issue else [])
+                              "title": service["name"] + " needs attention", "detail": issue, "dismissed": False}] if issue else [])
         # Suppressing stale health must not hide resource warnings or erase Docker's readings.
         assert any(w["id"] == "cpu" for w in server["warnings"])
         assert server["services"][0]["state"] == state
