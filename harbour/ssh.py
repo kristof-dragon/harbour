@@ -47,6 +47,10 @@ class ProbeError(RuntimeError):
         self.latency_ms = latency_ms
 
 
+class HostKeyMismatch(paramiko.SSHException):
+    pass
+
+
 class PinnedHostKey(paramiko.MissingHostKeyPolicy):
     def __init__(self, fingerprint):
         self.fingerprint = fingerprint
@@ -54,7 +58,7 @@ class PinnedHostKey(paramiko.MissingHostKeyPolicy):
     def missing_host_key(self, client, hostname, key):
         actual = host_fingerprint(key)
         if not hmac.compare_digest(actual, self.fingerprint):
-            raise paramiko.SSHException("Host fingerprint mismatch. Verify the server identity using a trusted connection.")
+            raise HostKeyMismatch("Host fingerprint mismatch. Verify the server identity using a trusted connection.")
 
 
 def parse_key(private_key, passphrase=None):
@@ -66,21 +70,98 @@ def parse_key(private_key, passphrase=None):
     raise ValueError("Cannot read the private key. Check its format and passphrase.")
 
 
-def request(server, payload):
-    if store.DEMO:
-        raise RuntimeError("SSH is disabled in demo mode")
-    key = store.one("SELECT encrypted FROM ssh_keys WHERE id=?", (server["key_id"],))
+def stored_key(key_id):
+    key = store.one("SELECT encrypted FROM ssh_keys WHERE id=?", (key_id,))
     if not key:
         raise ValueError("Server credential is missing")
     credential = json.loads(store.cipher().decrypt(key["encrypted"].encode()))
+    return parse_key(credential["private_key"], credential.get("passphrase"))
+
+
+def connect(server, **credential):
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(PinnedHostKey(server["fingerprint"]))
-    connected, latency_ms = False, None
     try:
         client.connect(server["host"], port=server["port"], username=server["username"],
-                       pkey=parse_key(credential["private_key"], credential.get("passphrase")),
                        allow_agent=False, look_for_keys=False, timeout=10, auth_timeout=15, banner_timeout=15,
-                       disabled_algorithms=DISABLED_ALGORITHMS)
+                       disabled_algorithms=DISABLED_ALGORITHMS, **credential)
+        return client
+    except Exception:
+        client.close()
+        raise
+
+
+class KeyInstallError(RuntimeError):
+    """Safe user-facing errors; never forward raw SSH output or credentials."""
+
+
+def install_key(server, key_id, password):
+    if store.DEMO:
+        raise KeyInstallError("Key installation is disabled in demo mode.")
+    key = stored_key(key_id)
+    try:
+        client = connect(server, password=password)
+    except HostKeyMismatch:
+        raise KeyInstallError("Host fingerprint mismatch. Fetch and verify the server fingerprint before retrying.") from None
+    except paramiko.AuthenticationException:
+        raise KeyInstallError("SSH password sign-in failed. Check the username and password, and that the server allows password authentication.") from None
+    except Exception:
+        raise KeyInstallError("Could not establish an SSH connection to install the key. Check the address and port.") from None
+    try:
+        source = Path(__file__).with_name('remote_install_key.py').read_text()
+        public = key.get_name() + ' ' + key.get_base64()
+        source += '\nimport json\nprint(json.dumps(install_public_key(' + repr(public) + ')))\n'
+        stdin, stdout, stderr = client.exec_command('python3 -', timeout=15)
+        stdin.write(source)
+        stdin.flush()
+        stdin.channel.shutdown_write()
+        channel, output, errors = stdout.channel, bytearray(), bytearray()
+        deadline = time.monotonic() + 20
+        while True:
+            if channel.recv_ready():
+                output.extend(channel.recv(4096))
+            if channel.recv_stderr_ready():
+                errors.extend(channel.recv_stderr(4096))
+            if len(output) + len(errors) > 8192 or time.monotonic() > deadline:
+                raise TimeoutError()
+            if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                break
+            time.sleep(.01)
+        if channel.recv_exit_status() != 0:
+            raise RuntimeError()
+        result = json.loads(output)
+        if result.get('status') not in {'installed', 'present'}:
+            raise RuntimeError()
+    except Exception:
+        raise KeyInstallError("Key installation could not be confirmed. Check Python 3 and ~/.ssh permissions on the server; retrying will not duplicate the key.") from None
+    finally:
+        client.close()
+    try:
+        # A fresh connection proves the key works without retaining or reusing the password.
+        with connect(server, pkey=key) as verification:
+            _, reply, _ = verification.exec_command('true', timeout=10)
+            deadline = time.monotonic() + 10
+            while not reply.channel.exit_status_ready():
+                if time.monotonic() > deadline:
+                    raise TimeoutError()
+                time.sleep(.01)
+            if reply.channel.recv_exit_status() != 0:
+                raise RuntimeError()
+    except Exception:
+        raise KeyInstallError("The public key is installed, but key-based command access failed. Check the server's SSH settings before saving.") from None
+    return {**result, 'verified': True}
+
+
+def request(server, payload):
+    if store.DEMO:
+        raise RuntimeError("SSH is disabled in demo mode")
+    client = None
+    credential = {}
+    connected, latency_ms = False, None
+    try:
+        credential = ({'password': store.cipher().decrypt(server['password_encrypted'].encode()).decode()}
+                      if server.get('auth_method') == 'password' else {'pkey': stored_key(server['key_id'])})
+        client = connect(server, **credential)
         transport = client.get_transport()
         transport.set_keepalive(20)
         connected = True
@@ -125,6 +206,13 @@ def request(server, payload):
         return result
     except Exception as exc:
         status = "up" if connected else "down" if isinstance(exc, (OSError, TimeoutError)) else "unknown"
-        raise ProbeError(str(exc), status, latency_ms) from exc
+        message = str(exc)
+        if server.get('auth_method') == 'password' and not connected and not isinstance(exc, HostKeyMismatch):
+            message = ('SSH password sign-in failed. Check the saved username/password and server authentication settings.'
+                       if isinstance(exc, paramiko.AuthenticationException) else 'Could not connect over SSH with the saved password. Check the connection settings.')
+        if credential.get('password'):
+            message = message.replace(credential['password'], '[redacted]')
+        raise ProbeError(message, status, latency_ms) from None
     finally:
-        client.close()
+        if client:
+            client.close()

@@ -55,6 +55,8 @@ const count = (n, singular, plural=singular+'s') => `${n} ${n === 1 ? singular :
 const actionLabel = a => ({pull:'Pull images',up:'Apply with Compose',restart:'Restart',refresh:'Refresh readings',check:'Check updates'}[a] || a);
 const button = (action,label,ico='',cls='',attrs='') => `<button type="button" data-action="${action}" class="${cls}" ${attrs}>${ico?icon(ico):''}${label}</button>`;
 const iconButton = (action,label,ico,attrs='') => button(action,'',ico,'ghost icon-button',`aria-label="${e(label)}" title="${e(label)}" ${attrs}`);
+function help(label,text){return button('help','','info','help-button',`aria-label="${e(label)} help" data-help="${e(text)}"`);}
+function fieldCaption(label,text){return `<span class="field-caption">${e(label)}${help(label,text)}</span>`;}
 function rememberFocus(){
   const el=document.activeElement;
   if(!el||el===document.body)return null;
@@ -112,7 +114,7 @@ function updateSlidingControl(group,value){
   buttons.forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.value===value)));
 }
 function filterControl(key,label,options){
-  return `<div class="server-filter"><div class="filter-label"><span>${label}</span>${button('server-filter','All','','filter-reset',`data-filter="${key}" data-value="all" aria-label="Show all servers regardless of ${label.toLowerCase()}" aria-pressed="${state.filters[key]==='all'}"`)}</div>${slidingControl('server-filter-'+key,'Filter servers by '+label.toLowerCase(),options,state.filters[key],'server-filter',`data-filter="${key}"`)}</div>`;
+  return `<div class="server-filter"><span class="filter-label">${label}</span>${slidingControl('server-filter-'+key,'Filter servers by '+label.toLowerCase(),options,state.filters[key],'server-filter',`data-filter="${key}" title="Click a selected filter again to show all."`)}</div>`;
 }
 function filteredServers(){
   const f=state.filters;
@@ -128,7 +130,6 @@ function updateServerFilters(){
   $('#server-count').textContent=(active?servers.length+' / ':'')+state.data.servers.length;
   for(const [key,value] of Object.entries(state.filters)){
     updateSlidingControl($('#server-filter-'+key),value);
-    $(`.filter-reset[data-filter="${key}"]`).setAttribute('aria-pressed',String(value==='all'));
   }
 }
 function renderSidebar(){
@@ -143,7 +144,7 @@ function renderSidebar(){
 }
 function visuals(){
   const densities=[['compact','Compact'],['normal','Normal'],['comfortable','Comfortable']];
-  modal('Visuals',`<div class="stack visuals-settings"><p class="muted">Appearance preferences are saved in this browser.</p><div class="visual-choice"><h3>Colour theme</h3>${slidingControl('visual-theme','Colour theme',[['system','System'],['light','Light'],['dark','Dark']],followSystem?'system':document.documentElement.dataset.theme,'visual-choice','data-visual="theme"')}<p class="hint">System follows your device’s light / dark setting.</p></div><div class="visual-choice"><h3>Server card density</h3>${slidingControl('card-density','Server card density',densities,document.documentElement.dataset.density,'visual-choice','data-visual="density"')}<p class="hint">Adjust spacing in the server list.</p></div><div class="visual-choice"><h3>Resource card density</h3>${slidingControl('resource-density','Resource card density',densities,document.documentElement.dataset.resourceDensity,'visual-choice','data-visual="resourceDensity"')}<p class="hint">Compact uses smaller cards and charts. Comfortable gives each resource more space.</p></div></div>`);
+  modal('Visuals',`<div class="stack visuals-settings"><div class="visual-choice"><h3>${fieldCaption('Colour theme','System follows your device’s light / dark setting. The toolbar theme button selects a manual theme.')}</h3>${slidingControl('visual-theme','Colour theme',[['system','System'],['light','Light'],['dark','Dark']],followSystem?'system':document.documentElement.dataset.theme,'visual-choice','data-visual="theme"')}</div><div class="visual-choice"><h3>${fieldCaption('Server card density','Adjust spacing in the server list.')}</h3>${slidingControl('card-density','Server card density',densities,document.documentElement.dataset.density,'visual-choice','data-visual="density"')}</div><div class="visual-choice"><h3>${fieldCaption('Resource card density','Compact uses smaller cards and charts. Comfortable gives each resource more space.')}</h3>${slidingControl('resource-density','Resource card density',densities,document.documentElement.dataset.resourceDensity,'visual-choice','data-visual="resourceDensity"')}</div><p class="hint">Appearance preferences are saved in this browser.</p></div>`);
 }
 function renderTop(){
   const warns=state.data.servers.reduce((a,s)=>a+s.warnings.length,0), updates=state.data.servers.reduce((a,s)=>a+s.updates,0);
@@ -190,12 +191,45 @@ function modal(title,content,wide=false){
   $('#overlay').innerHTML=`<div class="modal-backdrop"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><header class="modal-header"><h2 id="modal-title">${title}</h2>${iconButton('close','Close dialog','close')}</header>${content}</section></div>`;
   $('input,button,select,textarea',$('.modal'))?.focus();
 }
-function closeOverlay(){state.modal=null;state.notices=null;$('#overlay').innerHTML='';previousFocus?.focus();}
+function closeOverlay(){hideHelpTooltip();state.modal=null;state.notices=null;$('#overlay').innerHTML='';previousFocus?.focus();}
 const formError = message => {const el=$('.form-error',$('#overlay'))||$('.form-error');if(el)el.textContent=message;else toast(message,true);};
 function thresholdFields(t){return `<div class="form-grid"><label>CPU warning (%)<input name="cpu" type="number" min="1" max="100" step="0.1" value="${t.cpu}" required></label><label>Memory warning (%)<input name="memory" type="number" min="1" max="100" step="0.1" value="${t.memory}" required></label><label>Disk warning (%)<input name="disk" type="number" min="1" max="100" step="0.1" value="${t.disk}" required></label><label>Disk free-space warning (GB)<input name="disk_free_gb" type="number" min="0" max="1000000" step="0.1" value="${t.disk_free_gb}" required></label><label>Temperature warning (°C)<input name="temperature" type="number" min="1" max="180" step="0.1" value="${t.temperature??80}" required></label></div>`;}
-function settings(server=false){const s=current();modal(server?`${e(s.name)} settings`:'Global settings',`${server?`<form id="rename-form" data-id="${e(s.id)}"><label>Server name<div class="flex"><input name="name" value="${e(s.name)}" maxlength="80" required><button type="submit">Rename</button></div></label><div class="form-error" role="alert"></div></form><hr class="section-rule">`:''}<form id="threshold-form" data-server="${server?e(s.id):''}"><p>${server?'Set an override for this server, or inherit the global thresholds.':'Default warning thresholds for every server without an override.'}</p>${thresholdFields(server?s.thresholds:state.data.thresholds)}<p class="hint">Disk warnings trigger when either limit is reached, on any monitored filesystem. CPU, memory and temperature warnings use the latest sample. CPU warnings use package sensors; other device sensors warn separately; choose a limit suitable for your hardware.</p><div class="form-error" role="alert"></div><div class="form-actions">${server?button('inherit','Use global thresholds','','ghost'):''}<button class="primary" type="submit">Save thresholds</button></div></form>${server?`${serverMonitoringForm(s)}<hr class="section-rule"><div class="between"><div><h3>Remove this server</h3><p class="hint">Removes it from Harbour. Containers stay on the host.</p></div>${button('remove-server','Remove','trash','danger small')}</div>`:`<hr class="section-rule"><h3>Monitoring & history</h3><p class="hint">Polling intervals, staged resolution and data retention.</p>${button('monitoring','Configure monitoring','activity','small')}<hr class="section-rule"><h3>Update notifications</h3><p class="hint">Dismissals are personal and tied to a specific image digest. A different image will notify you again.</p>${button('restore-dismissals','Restore my dismissed updates','bell','small')}`}`);}
-function onboard(){state.key=null;state.keyMode='generate';state.hostProbe=null;state.acceptedHost=null;renderOnboard();}
-function renderOnboard(){modal('Add a server',`<p>Connect a Linux host over SSH. Docker, Compose v2 and Python 3 must already be installed.</p>${state.demo?'<div class="info-box warning"><p>This demo cannot connect to real servers or store SSH keys. Start the production container to use onboarding.</p></div>':''}<form id="onboard-form"><div class="form-grid"><label>Display name<input name="name" placeholder="Atlas" required maxlength="80"></label><label>Hostname or IP<input name="host" placeholder="192.0.2.10" required></label><label>SSH user<input name="username" placeholder="harbour" value="harbour" required></label><label>SSH port<input name="port" type="number" value="22" min="1" max="65535" required></label><label class="full">Host fingerprint<div class="fingerprint-input"><input name="fingerprint" class="mono" placeholder="Paste SHA256:… or fetch it below" required pattern="SHA256:[A-Za-z0-9+/]{43}">${button('probe-fingerprint','Get fingerprint','search','',state.demo?'disabled':'')}</div></label></div><div id="fingerprint-result" aria-live="polite"></div><p class="hint">Fetch the host key using the hostname and SSH port above, then accept it. No SSH username or private key is needed for this check.</p><details class="fingerprint-help"><summary>Verify through the server console</summary><p class="hint">Compare the fingerprint through a trusted connection or the server console. For example, for an Ed25519 host key:</p><code class="code-block">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256</code></details><hr class="section-rule"><h3>SSH key</h3><div class="segmented">${button('key-mode','Generate dedicated key','','active',`data-mode="generate"`)}${button('key-mode','Import existing key','','',`data-mode="import"`)}</div><div id="key-fields">${keyFields()}</div><div id="key-output"></div><p class="hint">Use a dedicated SSH account. Access to a standard Docker daemon gives effective root control of that host. Keep this dashboard private or behind HTTPS.</p><div class="form-error" role="alert"></div><div class="form-actions">${button('close','Cancel','','ghost')}<button type="submit" class="primary" ${state.demo?'disabled':''}>${icon('plus')} Connect server</button></div></form>`,true);}
+function settings(server=false){const s=current();modal(server?`${e(s.name)} settings`:'Global settings',`${server?`<form id="rename-form" data-id="${e(s.id)}"><label>Server name<div class="flex"><input name="name" value="${e(s.name)}" maxlength="80" required><button type="submit">Rename</button></div></label><div class="form-error" role="alert"></div></form><div class="connection-edit-action">${button('edit-connection','Edit SSH connection','key','small')}${help('SSH connection','Change the host, SSH account, authentication method or key without deleting this server or its history.')}</div><hr class="section-rule">`:''}<form id="threshold-form" data-server="${server?e(s.id):''}"><h3>${fieldCaption('Warning thresholds',server?'Set an override for this server, or inherit the global thresholds.':'Default warning thresholds for every server without an override.')}</h3>${thresholdFields(server?s.thresholds:state.data.thresholds)}<p class="hint">Disk warnings trigger when either limit is reached, on any monitored filesystem. CPU, memory and temperature warnings use the latest sample. CPU warnings use package sensors; other device sensors warn separately; choose a limit suitable for your hardware.</p><div class="form-error" role="alert"></div><div class="form-actions">${server?button('inherit','Use global thresholds','','ghost'):''}<button class="primary" type="submit">Save thresholds</button></div></form>${server?`${serverMonitoringForm(s)}<hr class="section-rule"><div class="between"><div><h3>${fieldCaption('Remove this server','Removes it from Harbour. Containers stay on the host.')}</h3></div>${button('remove-server','Remove','trash','danger small')}</div>`:`<hr class="section-rule"><h3>${fieldCaption('Monitoring & history','Polling intervals, staged resolution and data retention.')}</h3>${button('monitoring','Configure monitoring','activity','small')}<hr class="section-rule"><h3>${fieldCaption('Update notifications','Dismissals are personal and tied to a specific image digest. A different image will notify you again.')}</h3>${button('restore-dismissals','Restore my dismissed updates','bell','small')}`}`);}
+function onboard(){
+  state.connection=null;state.key=null;state.keyMode='generate';state.authMethod='key';state.hostProbe=null;state.acceptedHost=null;
+  renderOnboard();
+}
+async function editConnection(){
+  const connection=await api('/servers/'+current().id+'/connection');
+  state.connection=connection;state.key=connection.key;state.keyMode='generate';state.authMethod=connection.auth_method;
+  state.hostProbe=null;state.acceptedHost={host:connection.host,port:connection.port};renderOnboard();
+}
+function renderOnboard(){
+  const connection=state.connection,passwordMode=state.authMethod==='password';
+  modal(connection?'Edit SSH connection':'Add a server',`${state.demo?'<div class="info-box warning"><p>Live SSH connections and credentials are disabled in this demo.</p></div>':''}
+    <form id="onboard-form" ${connection?`data-server="${e(connection.id)}"`:''}>
+      <div class="form-grid">
+        <label>Display name<input name="name" placeholder="Atlas" value="${e(connection?.name||'')}" required maxlength="80"></label>
+        <label>${fieldCaption('Hostname or IP','Connect a Linux host with Docker, Compose v2 and Python 3 installed.')}<input name="host" aria-label="Hostname or IP" placeholder="192.0.2.10" value="${e(connection?.host||'')}" required></label>
+        <label>SSH user<input name="username" placeholder="harbour" value="${e(connection?.username||'harbour')}" required pattern="[a-z_][a-z0-9_-]{0,63}"></label>
+        <label>SSH port<input name="port" type="number" value="${connection?.port||22}" min="1" max="65535" required></label>
+        <label class="full">${fieldCaption('Host fingerprint','Get fingerprint reads the server’s host key without logging in. Compare it through a trusted connection, or explicitly accept it on first connection. For an Ed25519 host key, the server-console command is: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256. Later fingerprint changes are rejected.')}<div class="fingerprint-input"><input name="fingerprint" aria-label="Host fingerprint" class="mono" value="${e(connection?.fingerprint||'')}" placeholder="SHA256:…" required pattern="SHA256:[A-Za-z0-9+/]{43}">${button('probe-fingerprint','Get fingerprint','search','',state.demo?'disabled':'')}</div></label>
+      </div>
+      <div id="fingerprint-result" aria-live="polite"></div>
+      <hr class="section-rule">
+      <label class="check-line"><input id="password-auth-toggle" type="checkbox" ${passwordMode?'checked':''}>Use password login</label>
+      <div id="password-auth-warning" class="info-box warning" hidden><p>Password login requires storing your reusable server password; a dedicated SSH key is safer and easier to revoke.</p><div class="flex">${button('confirm-password-auth','Go ahead','','small')}${button('cancel-password-auth','Keep SSH key','','ghost small')}</div></div>
+      <div id="password-auth-fields" ${passwordMode?'':'hidden'}><label>${fieldCaption('SSH password','Saved encrypted on Harbour for background monitoring. It is never shown again. Leave blank to keep an existing password; enter it again if the host or SSH user changes.')}<input name="ssh_password" type="password" aria-label="SSH password" autocomplete="off" maxlength="1024" placeholder="${connection?.has_password?'Leave blank to keep the saved password':'Server account password'}" ${passwordMode?'':'disabled'}></label></div>
+      <div id="ssh-key-section" ${passwordMode?'hidden':''}>
+        <h3>${fieldCaption('SSH key','Generate a dedicated key or import one. Private keys stay encrypted on Harbour. Generate a replacement to rotate this server’s key.')}</h3>
+        <div class="segmented">${button('key-mode','Generate dedicated key','','active',`data-mode="generate"`)}${button('key-mode','Import existing key','','',`data-mode="import"`)}</div>
+        <div id="key-fields">${keyFields()}</div><div id="key-output">${state.key?keyOutput():''}</div>
+      </div>
+      <p class="hint onboarding-footnote">Use a dedicated SSH account. Standard Docker access gives effective root control of the host. Keep Harbour private and use HTTPS.${connection?' Replacing a key here does not remove old public keys from the server.':''}</p>
+      <div class="form-error" role="alert"></div><div class="form-actions">${button('close','Cancel','','ghost')}<button type="submit" class="primary" ${state.demo?'disabled':''}>${icon(connection?'check':'plus')}${connection?'Save connection':'Connect server'}</button></div>
+    </form>`,true);
+  updatePasswordRequirement();
+}
 async function preview(action,targets){
   const s=current();const plan=await api(`/servers/${s.id}/plan`,'POST',{action,targets});
   const description={pull:'Download images for the selected targets. Running containers keep their existing images until you apply them.',up:'Run docker compose up -d. Containers may be recreated and briefly unavailable. Compose dependencies are skipped for individual services.',restart:'Restart the selected containers. Services will be briefly unavailable. Restarting does not apply newly pulled images.'}[action];
@@ -215,6 +249,7 @@ document.addEventListener('click',async event=>{
   const el=event.target.closest('[data-action]');if(!el)return;
   const a=el.dataset.action;if(el.disabled)return;
   try {
+    if(a==='help')return showHelpTooltip(el);
     if(a==='close')return closeOverlay();
     if(a==='theme'){followSystem=false;localStorage.setItem('harbour-theme-mode','manual');localStorage.setItem('harbour-theme',document.documentElement.dataset.theme==='dark'?'light':'dark');return applyTheme();}
     if(a==='visuals')return visuals();
@@ -232,6 +267,9 @@ document.addEventListener('click',async event=>{
     if(['warnings','updates','notifications','notice-tab'].includes(a)){if(!state.notices)previousFocus=document.activeElement;state.modal=null;state.notices=a==='notifications'?'all':a==='notice-tab'?el.dataset.kind:a;renderNotices();$('.drawer button')?.focus();return;}
     if(a==='global-settings'||a==='server-settings')return settings(a==='server-settings');
     if(a==='onboard')return onboard();
+    if(a==='edit-connection')return await editConnection();
+    if(a==='confirm-password-auth')return confirmPasswordAuth();
+    if(a==='cancel-password-auth')return setPasswordChoice(false);
     if(a==='accept-fingerprint')return acceptFingerprint();
     if(a==='account')return await account();
     if(a==='key-mode'){state.keyMode=el.dataset.mode;for(const b of document.querySelectorAll('[data-action=key-mode]'))b.classList.toggle('active',b.dataset.mode===state.keyMode);$('#key-fields').innerHTML=keyFields();return;}
@@ -247,6 +285,7 @@ document.addEventListener('click',async event=>{
     else if(a==='inherit'){await api(`/servers/${current().id}/thresholds`,'PUT',null);closeOverlay();await load();toast('Global thresholds restored');}
     else if(a==='probe-fingerprint')await probeFingerprint();
     else if(a==='create-key')await createKey();
+    else if(a==='install-key')await installOnboardKey();
     else if(a==='bulk')await preview(el.dataset.kind,[...state.selected]);
     else if(a==='service-action')await preview(el.dataset.kind,[el.dataset.service]);
     else if(a==='execute'){const r=await api(`/servers/${el.dataset.server}/execute`,'POST',{token:state.plan.token});state.lastJobs.set(r.id,'queued');closeOverlay();state.tab='activity';await load();toast('Operation queued. Results will appear in Activity.');}
@@ -260,14 +299,22 @@ document.addEventListener('click',async event=>{
   finally{if(el.isConnected)el.disabled=false;}
 });
 document.addEventListener('submit',async event=>{
-  event.preventDefault();const form=event.target;const data=Object.fromEntries(new FormData(form));const submit=$('[type=submit]',form);submit.disabled=true;$('.form-error',form).textContent='';
+  event.preventDefault();const form=event.target;if(form.dataset.busy)return;const data=Object.fromEntries(new FormData(form));const submit=$('[type=submit]',form);submit.disabled=true;$('.form-error',form).textContent='';
   try{
     if(monitorForms.has(form.id)){await handleMonitorForm(form,data);return;}
     if(securityForms.has(form.id)){await handleSecurityForm(form,data);return;}
     if(form.id==='login-form'){state.user=await api('/login','POST',data);state.authMessage='';await load(true);}
     else if(form.id==='rename-form'){await api('/servers/'+form.dataset.id,'PATCH',data);await load();settings(true);toast('Server renamed');}
     else if(form.id==='threshold-form'){const values=Object.fromEntries(Object.entries(data).map(([k,v])=>[k,Number(v)]));await api(form.dataset.server?`/servers/${form.dataset.server}/thresholds`:'/thresholds','PUT',values);closeOverlay();await load();toast('Thresholds saved');}
-    else if(form.id==='onboard-form'){if(!state.key)throw new Error('Generate or import an SSH key first.');const r=await api('/servers','POST',{name:data.name,host:data.host,port:Number(data.port),username:data.username,fingerprint:data.fingerprint,key_id:state.key.id});state.server=r.id;state.lastJobs.set(r.job.id,'queued');closeOverlay();await load();toast('Server added. Testing the SSH connection…');}
+    else if(form.id==='onboard-form'){
+      if($('#password-auth-toggle').checked&&state.authMethod!=='password')throw new Error('Acknowledge the password-login warning, or keep SSH key authentication.');
+      if(state.authMethod==='key'&&!state.key)throw new Error('Generate or import an SSH key first.');
+      const body={name:data.name,host:data.host.trim(),port:Number(data.port),username:data.username.trim(),fingerprint:data.fingerprint.trim(),auth_method:state.authMethod};
+      if(state.authMethod==='password'){body.password_auth_confirmed=true;if(data.ssh_password)body.password=data.ssh_password;}
+      else body.key_id=state.key.id;
+      const saved=await api(form.dataset.server?'/servers/'+form.dataset.server+'/connection':'/servers',form.dataset.server?'PUT':'POST',body);
+      state.server=saved.id;if(saved.job)state.lastJobs.set(saved.job.id,'queued');closeOverlay();await load();toast('Connection saved. Checking SSH access…');
+    }
     else if(form.id==='user-form'){await api('/users','POST',data);await userManagement();toast('User created');}
     else if(form.id==='password-form'){state.user=await api('/password','PUT',data);state.authMessage='';closeOverlay();toast('Password changed; other sessions signed out');}
   }catch(err){const output=$('.form-error',form);if(output)output.textContent=err.message;else formError(err.message);}
@@ -275,6 +322,7 @@ document.addEventListener('submit',async event=>{
 });
 document.addEventListener('change',event=>{
   const input=event.target;
+  if(input.id==='password-auth-toggle')setPasswordChoice(input.checked);
   if(input.name==='key_algorithm')updateKeyTiers();
   if(input.dataset.select){input.checked?state.selected.add(input.dataset.select):state.selected.delete(input.dataset.select);renderMain();}
   if(input.id==='select-all'){const services=(current().services||[]).filter(c=>[c.name,c.project,c.image].some(v=>String(v||'').toLowerCase().includes(state.search.toLowerCase())));for(const c of services){const key=c.project?'group:'+c.project:c.id;input.checked?state.selected.add(key):state.selected.delete(key);}renderMain();}
@@ -289,6 +337,7 @@ document.addEventListener('keydown',event=>{
     const next=event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length;
     buttons[next].focus();if(buttons[next].getAttribute('aria-pressed')!=='true')buttons[next].click();return;
   }
+  if(event.key==='Escape'&&$('#help-tooltip')){hideHelpTooltip();return;}
   if(event.key==='Escape'){closeOverlay();if(state.mobile)setMobilePanel(false);}
   const dialog=$('[role=dialog]')||(state.mobile?$('#sidebar'):null);
   if(event.key==='Tab'&&dialog){const items=[...dialog.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea,summary,[tabindex="0"]')].filter(el=>el.getClientRects().length&&!el.closest('details:not([open]) nav'));const first=items[0],last=items.at(-1);if(event.shiftKey&&(document.activeElement===first||!dialog.contains(document.activeElement))){event.preventDefault();last?.focus();}else if(!event.shiftKey&&(document.activeElement===last||!dialog.contains(document.activeElement))){event.preventDefault();first?.focus();}}

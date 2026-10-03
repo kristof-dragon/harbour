@@ -43,20 +43,77 @@ document.addEventListener('focusout', event => { if (event.target.matches('.serv
 document.addEventListener('keydown', event => { if (event.key === 'Escape') hideWarningTooltip(); });
 document.addEventListener('click', hideWarningTooltip);
 
+let helpTarget=null,helpTimer;
+function hideHelpTooltip(){
+  clearTimeout(helpTimer);$('#help-tooltip')?.remove();helpTarget?.removeAttribute('aria-describedby');helpTarget=null;
+}
+function showHelpTooltip(target){
+  hideHelpTooltip();
+  const tip=document.createElement('div');tip.id='help-tooltip';tip.className='warning-tooltip help-tooltip';tip.setAttribute('role','tooltip');tip.textContent=target.dataset.help;
+  document.body.append(tip);helpTarget=target;target.setAttribute('aria-describedby','help-tooltip');
+  const rect=target.getBoundingClientRect(),bounds=tip.getBoundingClientRect();
+  tip.style.left=Math.max(12,Math.min(innerWidth-bounds.width-12,rect.left))+'px';
+  tip.style.top=Math.max(12,Math.min(innerHeight-bounds.height-12,rect.bottom+bounds.height+8<innerHeight?rect.bottom+8:rect.top-bounds.height-8))+'px';
+  tip.addEventListener('pointerenter',()=>clearTimeout(helpTimer));tip.addEventListener('pointerleave',hideHelpTooltip);
+}
+document.addEventListener('pointerover',event=>{const target=event.target.closest('[data-help]');if(target&&!target.contains(event.relatedTarget))showHelpTooltip(target);});
+document.addEventListener('pointerout',event=>{const target=event.target.closest('[data-help]');if(target&&!target.contains(event.relatedTarget))helpTimer=setTimeout(hideHelpTooltip,160);});
+document.addEventListener('focusin',event=>{if(event.target.matches('[data-help]'))showHelpTooltip(event.target);});
+document.addEventListener('focusout',event=>{if(event.target.matches('[data-help]'))hideHelpTooltip();});
+document.addEventListener('click',event=>{if(!event.target.closest('[data-help],#help-tooltip'))hideHelpTooltip();});
+
 const keySizes = {ed25519: {normal: 256}, ecdsa: {normal: 256, high: 384, xhigh: 521}, rsa: {normal: 3072, high: 4096, xhigh: 6144, excessive: 8192}};
+const keyNotes = {ed25519:'Ed25519 has a fixed 256-bit key size. Its strength is not directly comparable with RSA bit lengths.',ecdsa:'ECDSA supports 256, 384 and 521-bit curves. There is no larger Excessive tier.',rsa:'Normal 3072 · High 4096 · Xhigh 6144 · Excessive 8192 bits. Larger RSA keys take longer to generate and use. SHA-1 RSA authentication is disabled.'};
 function keyTierOptions(algorithm) {
   return ['normal', 'high', 'xhigh', 'excessive'].map(t => `<option value="${t}" ${!keySizes[algorithm][t] ? 'disabled' : ''}>${{normal: 'Normal', high: 'High', xhigh: 'Xhigh', excessive: 'Excessive'}[t]} · ${keySizes[algorithm][t] ? keySizes[algorithm][t] + ' bits' : 'not supported'}</option>`).join('');
 }
 function keyFields() {
-  if (state.keyMode === 'import') return `<label>Private key<textarea name="private_key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autocomplete="off"></textarea></label><label style="margin-top:10px">Passphrase (if encrypted)<input name="passphrase" type="password" autocomplete="off"></label><div style="margin-top:12px">${button('create-key', 'Import key', 'key', '', state.demo ? 'disabled' : '')}</div>`;
-  return `<div class="form-grid"><label>Algorithm<select name="key_algorithm"><option value="ed25519">Ed25519 · recommended</option><option value="ecdsa">ECDSA · NIST curves</option><option value="rsa">RSA · SHA-2 signatures</option></select></label><label>Key-size tier<select name="key_tier" disabled>${keyTierOptions('ed25519')}</select></label></div><p class="hint" id="key-size-note">Ed25519 has a fixed 256-bit key size. Its strength is not directly comparable with RSA bit lengths.</p>${button('create-key', 'Generate key', 'key', '', state.demo ? 'disabled' : '')}<p class="hint">Three supported choices for unattended SSH. Only the public key is shown; the private key stays encrypted on Harbour. Larger RSA keys take longer to generate and use.</p>`;
+  if(state.keyMode==='import')return `<label>Private key<textarea name="private_key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autocomplete="off"></textarea></label><label style="margin-top:10px">Passphrase (if encrypted)<input name="passphrase" type="password" autocomplete="off"></label><div class="key-create-action">${button('create-key','Import key','key','',state.demo?'disabled':'')}</div>`;
+  return `<div class="form-grid"><label>${fieldCaption('Algorithm','Ed25519 is recommended for unattended SSH. ECDSA and RSA are available for host compatibility.')}<select name="key_algorithm" aria-label="Algorithm"><option value="ed25519">Ed25519 · recommended</option><option value="ecdsa">ECDSA · NIST curves</option><option value="rsa">RSA · SHA-2 signatures</option></select></label><label>${fieldCaption('Key-size tier',keyNotes.ed25519)}<select name="key_tier" aria-label="Key-size tier" disabled>${keyTierOptions('ed25519')}</select></label></div><div class="key-create-action">${button('create-key',state.connection?'Generate replacement key':'Generate key','key','',state.demo?'disabled':'')}</div>`;
 }
-function updateKeyTiers() {
-  const algorithm = $('[name=key_algorithm]').value, select = $('[name=key_tier]');
-  select.innerHTML = keyTierOptions(algorithm); select.disabled = algorithm === 'ed25519';
-  $('#key-size-note').textContent = {ed25519: 'Ed25519 has a fixed 256-bit key size. Its strength is not directly comparable with RSA bit lengths.',
-    ecdsa: 'ECDSA supports 256, 384 and 521-bit curves. There is no larger “Excessive” tier.',
-    rsa: 'Normal 3072 · High 4096 · Xhigh 6144 · Excessive 8192 bits. SHA-1 RSA authentication is disabled.'}[algorithm];
+function updateKeyTiers(){
+  const algorithm=$('[name=key_algorithm]').value,select=$('[name=key_tier]');
+  select.innerHTML=keyTierOptions(algorithm);select.disabled=algorithm==='ed25519';
+  $('[aria-label="Key-size tier help"]').dataset.help=keyNotes[algorithm];hideHelpTooltip();
+}
+function keyOutput(){
+  const existing=state.connection?.key?.id===state.key.id;
+  return `<div class="key-output"><div class="between"><span class="tag green">${icon('check')}${existing?'Current SSH key':'Key ready'}</span>${help('Key installation','Install this public key in the selected SSH account’s ~/.ssh/authorized_keys using its password. Existing keys are preserved; duplicates are skipped. The host fingerprint is checked before password authentication. A fresh key-only connection verifies installation.')}</div><div class="key-install-row"><label>${fieldCaption('One-time SSH password','Used only for this installation, never saved. The server must allow password authentication.')}<input name="install_password" aria-label="One-time SSH password" type="password" autocomplete="off" maxlength="1024"></label>${button('install-key','Install key on server','key','small',state.demo?'disabled':'')}</div><div id="key-install-result" aria-live="polite"></div><details class="manual-key"><summary>Manual installation</summary><code class="code-block">restrict ${e(state.key.public_key)}</code><div class="flex">${button('copy-key','Copy public key','copy','small')}${help('Manual installation','Add this line to ~/.ssh/authorized_keys for the selected account. The restrict option disables forwarding and interactive terminals while allowing Harbour’s commands.')}</div></details></div>`;
+}
+function updatePasswordRequirement(){
+  const form=$('#onboard-form');if(!form)return;
+  const password=$('[name=ssh_password]',form),connection=state.connection;
+  password.disabled=state.authMethod!=='password';
+  password.required=state.authMethod==='password'&&(!connection?.has_password||!sameHost(connection,onboardTarget(form))||connection.username!==$('[name=username]',form).value.trim());
+}
+function setPasswordChoice(checked){
+  $('#password-auth-toggle').checked=checked;
+  state.authMethod='key';$('#password-auth-warning').hidden=!checked;$('#password-auth-fields').hidden=true;$('#ssh-key-section').hidden=checked;
+  $('[name=ssh_password]').value='';updatePasswordRequirement();
+}
+function confirmPasswordAuth(){
+  state.authMethod='password';$('#password-auth-warning').hidden=true;$('#password-auth-fields').hidden=false;$('#ssh-key-section').hidden=true;
+  if($('[name=install_password]'))$('[name=install_password]').value='';
+  updatePasswordRequirement();$('[name=ssh_password]').focus();
+}
+function busyOnboarding(form){
+  form.dataset.busy='true';
+  const controls=[...form.querySelectorAll('input,select,textarea,button')].filter(el=>el.dataset.action!=='close').map(el=>[el,el.disabled]);
+  controls.forEach(([el])=>el.disabled=true);
+  return ()=>{delete form.dataset.busy;controls.forEach(([el,disabled])=>el.disabled=disabled);};
+}
+async function installOnboardKey(){
+  const form=$('#onboard-form'),password=$('[name=install_password]',form),output=$('#key-install-result');
+  for(const name of ['host','port','username','fingerprint'])if(!$(`[name=${name}]`,form).reportValidity())return;
+  if(!password.value)throw new Error('Enter the SSH account password to install the key.');
+  const body={...onboardTarget(form),username:$('[name=username]',form).value.trim(),fingerprint:$('[name=fingerprint]',form).value.trim(),key_id:state.key.id,password:password.value};
+  password.value='';const restore=busyOnboarding(form);
+  output.innerHTML='<p class="hint" role="status">Installing key and verifying SSH access…</p>';
+  try{
+    const result=await api('/ssh/install-key','POST',body);
+    if(form.isConnected)output.innerHTML=`<p class="fingerprint-accepted" role="status">${icon('check')}${result.status==='present'?'Key already installed':'Key installed'} · key-only login verified</p>`;
+  }catch(error){if(form.isConnected)output.innerHTML=`<p class="form-error" role="alert">${e(error.message)}</p>`;}
+  finally{body.password='';restore();}
 }
 
 function onboardTarget(form) {
@@ -64,8 +121,10 @@ function onboardTarget(form) {
 }
 function sameHost(a,b) {return a?.host===b?.host&&a?.port===b?.port;}
 function onboardIdentityChanged(input) {
-  if(!['host','port','fingerprint'].includes(input.name))return;
-  const form=input.closest('form');
+  if(!['host','port','username','fingerprint'].includes(input.name))return;
+  const form=input.closest('form');updatePasswordRequirement();
+  if($('#key-install-result'))$('#key-install-result').innerHTML='';
+  if(input.name==='username')return;
   state.hostProbe=null;
   if(state.acceptedHost&&['host','port'].includes(input.name)&&!sameHost(state.acceptedHost,onboardTarget(form))){
     $('[name=fingerprint]',form).value='';
@@ -86,7 +145,7 @@ async function probeFingerprint() {
     const result=await api('/ssh/fingerprint','POST',target);
     if(!form.isConnected||state.hostProbe!==request||!sameHost(target,onboardTarget(form)))return;
     state.hostProbe=result;
-    output.innerHTML=`<div class="fingerprint-preview"><div class="between"><b>Host key received</b><span class="tag">${e(result.key_type)}</span></div><p class="hint">${e(result.host)}:${result.port} · reached ${e(result.address)}</p><code class="code-block">${e(result.fingerprint)}</code><p class="hint">Fetching a key does not independently verify the server’s identity. Compare it through a trusted source, or accept it as trust on first connection. Harbour will reject later connections if the pinned key changes.</p>${button('accept-fingerprint','Accept fingerprint','shield','small')}</div>`;
+    output.innerHTML=`<div class="fingerprint-preview"><div class="between"><b>Host key received</b><span class="tag">${e(result.key_type)}</span></div><p class="hint">${e(result.host)}:${result.port} · reached ${e(result.address)}</p><code class="code-block">${e(result.fingerprint)}</code><div class="flex">${button('accept-fingerprint','Accept fingerprint','shield','small')}${help('Accept fingerprint','Fetching a key does not independently verify identity. Compare it through a trusted source, or accept it as trust on first connection. Later changes to the pinned key are rejected.')}</div></div>`;
   }catch(error){
     if(form.isConnected&&state.hostProbe===request){state.hostProbe=null;output.innerHTML=`<p class="form-error" role="alert">${e(error.message)}</p>`;}
   }
@@ -96,17 +155,21 @@ function acceptFingerprint() {
   if(!form||!probe?.fingerprint||!sameHost(probe,onboardTarget(form)))return;
   $('[name=fingerprint]',form).value=probe.fingerprint;
   state.acceptedHost={host:probe.host,port:probe.port};state.hostProbe=null;
-  $('#fingerprint-result').innerHTML=`<p class="fingerprint-accepted" role="status">${icon('check')}Fingerprint accepted for ${e(probe.host)}:${probe.port}. It will be saved when you connect this server.</p>`;
+  $('#fingerprint-result').innerHTML=`<p class="fingerprint-accepted" role="status">${icon('check')}Fingerprint accepted for ${e(probe.host)}:${probe.port}.</p>`;
 }
 
-async function createKey() {
-  const form = $('#onboard-form'), private_key = $('[name=private_key]', form)?.value, passphrase = $('[name=passphrase]', form)?.value;
-  if (state.keyMode === 'import' && !private_key?.trim()) throw new Error('Paste an existing private key before importing.');
-  const body = state.keyMode === 'import' ? {private_key, passphrase: passphrase || null} : {algorithm: $('[name=key_algorithm]', form).value, tier: $('[name=key_tier]', form).value};
-  $('#key-output').innerHTML = '<p class="hint" role="status">Generating key… larger RSA sizes can take a little while.</p>';
-  state.key = await api('/keys', 'POST', body);
-  $('#key-output').innerHTML = `<div class="key-output"><span class="tag green">${icon('check')} Key ready</span><p class="hint">Add this public key to the account’s <code>~/.ssh/authorized_keys</code> on the host. The restriction blocks forwarding and interactive terminals.</p><code class="code-block">restrict ${e(state.key.public_key)}</code>${button('copy-key', 'Copy public key', 'copy', 'small', 'style="margin-top:10px"')}</div>`;
-  for (const name of ['private_key', 'passphrase']) if ($(`[name=${name}]`, form)) $(`[name=${name}]`, form).value = '';
+async function createKey(){
+  const form=$('#onboard-form'),private_key=$('[name=private_key]',form)?.value,passphrase=$('[name=passphrase]',form)?.value;
+  if(state.keyMode==='import'&&!private_key?.trim())throw new Error('Paste an existing private key before importing.');
+  const body=state.keyMode==='import'?{private_key,passphrase:passphrase||null}:{algorithm:$('[name=key_algorithm]',form).value,tier:$('[name=key_tier]',form).value};
+  const output=$('#key-output'),restore=busyOnboarding(form);
+  output.innerHTML='<p class="hint" role="status">Preparing SSH key…</p>';
+  try{
+    const key=await api('/keys','POST',body);if(!form.isConnected)return;
+    state.key=key;output.innerHTML=keyOutput();
+    for(const name of ['private_key','passphrase'])if($(`[name=${name}]`,form))$(`[name=${name}]`,form).value='';
+  }catch(error){if(form.isConnected){output.innerHTML=state.key?keyOutput():'';throw error;}}
+  finally{restore();}
 }
 
 function reauthFields() {

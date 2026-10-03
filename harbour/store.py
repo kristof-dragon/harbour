@@ -114,7 +114,8 @@ def initialize():
             return existing
         add_columns("users", {"totp_secret": "TEXT", "totp_last": "INTEGER NOT NULL DEFAULT -1"})
         add_columns("servers", {"poll_seconds": "INTEGER", "monitoring_enabled": "INTEGER NOT NULL DEFAULT 1",
-            "last_attempt": "REAL", "latency_ms": "REAL", "connection_status": "TEXT NOT NULL DEFAULT 'pending'"})
+            "last_attempt": "REAL", "latency_ms": "REAL", "connection_status": "TEXT NOT NULL DEFAULT 'pending'",
+            "auth_method": "TEXT NOT NULL DEFAULT 'key'", "password_encrypted": "TEXT"})
         old_sessions = add_columns("sessions", {"created": "REAL NOT NULL DEFAULT 0",
             "last_activity": "REAL NOT NULL DEFAULT 0", "address": "TEXT NOT NULL DEFAULT ''",
             "browser": "TEXT NOT NULL DEFAULT ''"})

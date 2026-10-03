@@ -17,9 +17,10 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from . import __version__, auth, demo, history, remote_probe, ssh, store
 from .auth import authenticated, admin
@@ -141,6 +142,12 @@ async def lifespan(app):
 app = FastAPI(title="Harbour", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(auth.router)
 app.include_router(history.router)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request, exc):
+    # Do not echo submitted passwords/private keys in validation responses.
+    return JSONResponse({'detail': [{k: error[k] for k in ('loc', 'msg', 'type')} for error in exc.errors()]}, status_code=422)
 
 
 @app.middleware("http")
@@ -343,24 +350,119 @@ def probe_fingerprint(body: SSHHostInput, user=Depends(admin)):
         fingerprint_probes.release()
 
 
-class ServerInput(SSHHostInput):
-    name: str = Field(min_length=1, max_length=80)
+class SSHLoginInput(SSHHostInput):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=False)
     username: str = Field(pattern=r"^[a-z_][a-z0-9_-]{0,63}$")
     fingerprint: str = Field(pattern=r"^SHA256:[A-Za-z0-9+/]{43}$")
+
+    @field_validator('host', 'username', 'fingerprint', 'name', 'key_id', mode='before', check_fields=False)
+    @classmethod
+    def trim_labels(cls, value):
+        # Passwords must retain significant leading/trailing whitespace.
+        return value.strip() if isinstance(value, str) else value
+
+
+class InstallKeyInput(SSHLoginInput):
     key_id: str = Field(min_length=1, max_length=64)
+    password: SecretStr = Field(min_length=1, max_length=1024)
+
+
+key_installations = threading.BoundedSemaphore(4)
+
+
+@app.post('/api/ssh/install-key')
+def install_ssh_key(body: InstallKeyInput, request: Request, user=Depends(admin)):
+    if store.DEMO:
+        raise HTTPException(400, 'Key installation is disabled in demo mode')
+    if not store.one('SELECT 1 FROM ssh_keys WHERE id=?', (body.key_id,)):
+        raise HTTPException(400, 'Generate or import a key first')
+    if not key_installations.acquire(blocking=False):
+        raise HTTPException(429, 'Key installations are busy. Please try again shortly.')
+    target = f'{body.username}@{body.host}:{body.port}'
+    try:
+        result = ssh.install_key(body.model_dump(exclude={'password', 'key_id'}), body.key_id, body.password.get_secret_value())
+        auth.log(user['name'], auth.client_ip(request), 'ssh_key_installed', target)
+        return result
+    except ssh.KeyInstallError as exc:
+        auth.log(user['name'], auth.client_ip(request), 'ssh_key_install_failed', target)
+        raise HTTPException(400, str(exc)) from None
+    except Exception:
+        raise HTTPException(400, 'Key installation failed. Check the SSH connection and try again.') from None
+    finally:
+        key_installations.release()
+
+
+class ServerInput(SSHLoginInput):
+    name: str = Field(min_length=1, max_length=80)
+    auth_method: Literal['key', 'password'] = 'key'
+    key_id: str | None = Field(default=None, min_length=1, max_length=64)
+    password: SecretStr | None = Field(default=None, min_length=1, max_length=1024)
+    password_auth_confirmed: bool = False
+
+
+def connection_credential(body, existing=None):
+    if body.auth_method == 'key':
+        if body.password is not None:
+            raise HTTPException(400, 'Use the separate key-installation button for a one-time password')
+        if not body.key_id or not store.one('SELECT 1 FROM ssh_keys WHERE id=?', (body.key_id,)):
+            raise HTTPException(400, 'Generate or import a key first')
+        return body.key_id, None
+    if not body.password_auth_confirmed:
+        raise HTTPException(400, 'Acknowledge the password-login warning first')
+    if body.password is not None:
+        return None, store.cipher().encrypt(body.password.get_secret_value().encode()).decode()
+    if (existing and existing['auth_method'] == 'password' and existing['password_encrypted']
+            and all(existing[k] == getattr(body, k) for k in ('host', 'port', 'username'))):
+        return None, existing['password_encrypted']
+    raise HTTPException(400, 'Enter the SSH password for password login')
 
 
 @app.post("/api/servers")
 def add_server(body: ServerInput, user=Depends(admin)):
     if store.DEMO:
         raise HTTPException(400, "Live servers cannot be connected in demo mode")
-    if not store.one("SELECT 1 FROM ssh_keys WHERE id=?", (body.key_id,)):
-        raise HTTPException(400, "Generate or import a key first")
+    key_id, encrypted_password = connection_credential(body)
     id_ = secrets.token_hex(12)
-    store.execute("INSERT INTO servers (id,name,host,port,username,fingerprint,key_id) VALUES (?,?,?,?,?,?,?)",
-                  (id_, body.name, body.host, body.port, body.username, body.fingerprint, body.key_id))
+    store.execute("INSERT INTO servers (id,name,host,port,username,fingerprint,key_id,auth_method,password_encrypted) VALUES (?,?,?,?,?,?,?,?,?)",
+                  (id_, body.name, body.host, body.port, body.username, body.fingerprint, key_id, body.auth_method, encrypted_password))
     job = queue_job(id_, "refresh", [], user)
     return {"id": id_, "job": job}
+
+
+@app.get('/api/servers/{id_}/connection')
+def read_connection(id_: str, user=Depends(admin)):
+    server = get_server(id_)
+    key = store.one('SELECT id,public FROM ssh_keys WHERE id=?', (server['key_id'],))
+    return {**{k: server[k] for k in ('id', 'name', 'host', 'port', 'username', 'fingerprint', 'auth_method')},
+            'has_password': bool(server['password_encrypted']),
+            'key': {'id': key['id'], 'public_key': key['public'] + ' harbour'} if key else None}
+
+
+@app.put('/api/servers/{id_}/connection')
+def update_connection(id_: str, body: ServerInput, request: Request, user=Depends(admin)):
+    if store.DEMO:
+        raise HTTPException(400, 'Live SSH connection changes are disabled in demo mode')
+    lock = server_lock(id_)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, 'Wait for the current server operation to finish before changing its connection')
+    try:
+        server = get_server(id_)
+        key_id, encrypted_password = connection_credential(body, server)
+        with store.db() as con:
+            con.execute("UPDATE servers SET name=?,host=?,port=?,username=?,fingerprint=?,key_id=?,auth_method=?,password_encrypted=?,error=NULL,checked=NULL,connection_status='pending',last_attempt=NULL,latency_ms=NULL,update_checked=0 WHERE id=?",
+                        (body.name, body.host, body.port, body.username, body.fingerprint, key_id, body.auth_method, encrypted_password, id_))
+            if server['key_id'] and server['key_id'] != key_id:
+                con.execute('DELETE FROM ssh_keys WHERE id=? AND NOT EXISTS (SELECT 1 FROM servers WHERE key_id=?)', (server['key_id'], server['key_id']))
+        auth.log(user['name'], auth.client_ip(request), 'ssh_connection_changed', f'{body.username}@{body.host}:{body.port} · {body.auth_method}')
+    finally:
+        lock.release()
+    try:
+        job = queue_job(id_, 'refresh', [], user)
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+        job = None  # Background monitoring may already be checking the saved connection.
+    return {'id': id_, 'job': job}
 
 
 @app.delete("/api/servers/{id_}")
@@ -383,6 +485,11 @@ class ActionInput(Input):
     targets: list[str] = Field(min_length=1, max_length=200)
 
 
+def connection_signature(server):
+    values = {k: server[k] for k in ('host', 'port', 'username', 'fingerprint', 'auth_method', 'key_id', 'password_encrypted')}
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
+
+
 def build_plan(server, body):
     if server["error"] or not server["checked"] or time.time() - server["checked"] > 120:
         raise HTTPException(409, "Refresh this server successfully before changing its services")
@@ -394,9 +501,10 @@ def build_plan(server, body):
 
 @app.post("/api/servers/{id_}/plan")
 def action_plan(id_: str, body: ActionInput, user=Depends(admin)):
-    commands = build_plan(get_server(id_), body)
+    server = get_server(id_)
+    commands = build_plan(server, body)
     payload = {"server_id": id_, "actor": user["id"], "action": body.action, "targets": body.targets,
-               "commands": commands, "expires": time.time() + 300, "nonce": secrets.token_hex(12)}
+               "commands": commands, "connection": connection_signature(server), "expires": time.time() + 300, "nonce": secrets.token_hex(12)}
     token = store.cipher().encrypt(json.dumps(payload).encode()).decode()
     return {"token": token, "commands": [{"command": shlex.join(c["argv"]), "directory": c["cwd"], "label": c["label"]} for c in commands]}
 
@@ -415,19 +523,24 @@ def execute_action(id_: str, body: ExecuteInput, user=Depends(admin)):
         raise HTTPException(403, "This preview is not valid for this account or server")
     if store.one("SELECT 1 FROM jobs WHERE id=?", (payload["nonce"],)):
         raise HTTPException(409, "This operation has already been submitted")
-    commands = build_plan(get_server(id_), ActionInput(action=payload["action"], targets=payload["targets"]))
+    server = get_server(id_)
+    if payload.get('connection') != connection_signature(server):
+        raise HTTPException(409, 'Server connection changed; create a new preview')
+    commands = build_plan(server, ActionInput(action=payload["action"], targets=payload["targets"]))
     if commands != payload["commands"]:
         raise HTTPException(409, "Server details changed; create a new preview")
-    return queue_job(id_, payload["action"], payload["targets"], user, commands, payload["nonce"])
+    return queue_job(id_, payload["action"], payload["targets"], user, commands, payload["nonce"], payload['connection'])
 
 
-def queue_job(id_, action, targets, user, commands=None, job_id=None):
-    server = get_server(id_)
+def queue_job(id_, action, targets, user, commands=None, job_id=None, expected_connection=None):
     lock = server_lock(id_)
     if not lock.acquire(blocking=False):
         raise HTTPException(409, "This server already has an operation in progress")
     job_id = job_id or secrets.token_hex(12)
     try:
+        server = get_server(id_)
+        if expected_connection and expected_connection != connection_signature(server):
+            raise HTTPException(409, 'Server connection changed; create a new preview')
         store.execute("INSERT INTO jobs (id,server_id,server_name,actor,action,status,targets,created) VALUES (?,?,?,?,?,'queued',?,?)",
                       (job_id, id_, server["name"], user["name"], action, json.dumps(targets), time.time()))
         pool.submit(work_job, server, action, targets, commands, job_id, lock)
