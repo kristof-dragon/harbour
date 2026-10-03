@@ -33,13 +33,14 @@ const paths = {
 const icon = (name, cls='') => `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[name] || paths.box}"/></svg>`;
 const state = {user:null, data:null, server:localStorage.getItem('harbour-server'), tab:'containers', open:new Set(), selected:new Set(), search:'', notices:null, modal:null, mobile:false, lastJobs:new Map(), key:null, keyMode:'generate', demo:false, version:'', menuOpen:localStorage.getItem('harbour-menu-open')==='true', filters:{warnings:'all',status:'all',updates:'all'}, authMessage:'', securityTab:'policy', logOffset:0, totpSetup:null};
 document.documentElement.dataset.density = ['compact','normal','comfortable'].includes(localStorage.getItem('harbour-density')) ? localStorage.getItem('harbour-density') : 'normal';
+document.documentElement.dataset.resourceDensity = ['compact','normal','comfortable'].includes(localStorage.getItem('harbour-resource-density')) ? localStorage.getItem('harbour-resource-density') : 'normal';
 const storedTheme = localStorage.getItem('harbour-theme');
 const systemTheme=matchMedia('(prefers-color-scheme:dark)');
 let followSystem=localStorage.getItem('harbour-theme-mode')==='system'||(!localStorage.getItem('harbour-theme-mode')&&!storedTheme);
 function applyTheme(){
   document.documentElement.dataset.theme=followSystem?(systemTheme.matches?'dark':'light'):(localStorage.getItem('harbour-theme')==='light'?'light':'dark');
   if($('#topbar')&&state.data)renderTop();
-  if($('#visual-theme'))$('#visual-theme').value=document.documentElement.dataset.theme;
+  updateSlidingControl($('#visual-theme'),followSystem?'system':document.documentElement.dataset.theme);
 }
 applyTheme();
 systemTheme.addEventListener('change',()=>{if(followSystem)applyTheme();});
@@ -99,23 +100,50 @@ function renderShell(){
   $('#app').innerHTML=`<div class="app-shell" id="shell"><aside class="sidebar ${state.mobile?'mobile-open':''}" id="sidebar"></aside><button type="button" class="mobile-sidebar-backdrop" id="mobile-sidebar-backdrop" data-action="close-mobile" aria-label="Dismiss server list" ${state.mobile?'':'hidden'}></button><section class="workspace"><header class="topbar" id="topbar"></header><main class="main" id="main"></main></section></div>`;
   renderSidebar();renderTop();renderMain();syncMobilePanel();
 }
-function filterSelect(key,label,options){
-  return `<label>${label}<select id="server-filter-${key}" data-server-filter="${key}" aria-label="Filter servers by ${label.toLowerCase()}">${options.map(([v,n])=>`<option value="${v}" ${state.filters[key]===v?'selected':''}>${n}</option>`).join('')}</select></label>`;
+function slidingControl(id,label,options,value,action,attrs=''){
+  const index=options.findIndex(([v])=>v===value);
+  return `<div id="${id}" class="sliding-control" role="group" aria-label="${e(label)}" data-selected="${index>=0}" style="--segments:${options.length};--selected:${Math.max(0,index)}"><span class="sliding-thumb" aria-hidden="true"></span>${options.map(([v,n])=>button(action,e(n),'','',`data-value="${v}" aria-pressed="${v===value}" ${attrs}`)).join('')}</div>`;
+}
+function updateSlidingControl(group,value){
+  if(!group)return;
+  const buttons=[...group.querySelectorAll('button')],index=buttons.findIndex(b=>b.dataset.value===value);
+  group.dataset.selected=String(index>=0);
+  if(index>=0)group.style.setProperty('--selected',index);
+  buttons.forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.value===value)));
+}
+function filterControl(key,label,options){
+  return `<div class="server-filter"><div class="filter-label"><span>${label}</span>${button('server-filter','All','','filter-reset',`data-filter="${key}" data-value="all" aria-label="Show all servers regardless of ${label.toLowerCase()}" aria-pressed="${state.filters[key]==='all'}"`)}</div>${slidingControl('server-filter-'+key,'Filter servers by '+label.toLowerCase(),options,state.filters[key],'server-filter',`data-filter="${key}"`)}</div>`;
+}
+function filteredServers(){
+  const f=state.filters;
+  return state.data.servers.filter(s=>(f.warnings==='all'||Boolean(s.warnings.length)===(f.warnings==='with'))&&(f.updates==='all'||Boolean(s.updates)===(f.updates==='with'))&&(f.status==='all'||connectionState(s)===f.status));
+}
+function serverCards(servers){
+  return servers.map(s=>`<button type="button" class="server-item ${s.id===state.server?'selected':''} ${s.warnings.length?'has-warning':''}" data-action="select-server" data-id="${e(s.id)}" aria-current="${s.id===state.server?'page':'false'}"><div class="flex server-title">${icon('server')}<span class="server-name">${e(s.name)}</span><span class="server-badges">${s.warnings.length?`<span class="count-badge warn" data-warning-server="${e(s.id)}" aria-label="${s.warnings.length} warnings">${icon('warning')}${s.warnings.length}</span>`:''}${s.updates?`<span class="count-badge update" title="${s.updates} updates">${icon('download')}${s.updates}</span>`:''}</span></div>${serverConnection(s,true)}<div class="server-mini">${s.metrics?sidebarMetrics(s):`<span>${s.error?'Connection failed':'Connecting…'}</span>`}</div></button>`).join('')||`<div class="server-filter-empty">${state.data.servers.length?'No servers match these filters.':'No servers yet.'}</div>`;
+}
+function updateServerFilters(){
+  hideWarningTooltip();
+  const servers=filteredServers(),active=Object.values(state.filters).some(v=>v!=='all');
+  $('.server-list').innerHTML=serverCards(servers);
+  $('#server-count').textContent=(active?servers.length+' / ':'')+state.data.servers.length;
+  for(const [key,value] of Object.entries(state.filters)){
+    updateSlidingControl($('#server-filter-'+key),value);
+    $(`.filter-reset[data-filter="${key}"]`).setAttribute('aria-pressed',String(value==='all'));
+  }
 }
 function renderSidebar(){
   hideWarningTooltip();
-  const f=state.filters,active=Object.values(f).some(v=>v!=='all');
-  const servers=state.data.servers.filter(s=>(f.warnings==='all'||Boolean(s.warnings.length)===(f.warnings==='with'))&&(f.updates==='all'||Boolean(s.updates)===(f.updates==='with'))&&(f.status==='all'||(f.status==='other'?!['up','down'].includes(connectionState(s)):connectionState(s)===f.status)));
+  const active=Object.values(state.filters).some(v=>v!=='all'),servers=filteredServers();
   $('#sidebar').innerHTML=`<div class="brand"><img src="/static/favicon.svg" alt="">Harbour <span>SELF HOSTED</span>${button('close-mobile','','close','ghost icon-button mobile-sidebar-close','aria-label="Close server list"')}</div>
-    <div class="sidebar-heading between"><span class="eyebrow">Your servers</span><span class="count" aria-live="polite">${active?servers.length+' / ':''}${state.data.servers.length}</span></div>
-    <div class="server-filters">${filterSelect('warnings','Warnings',[['all','All'],['with','With warnings'],['without','No warnings']])}${filterSelect('status','Status',[['all','All'],['up','Up'],['down','Down'],['other','Other / paused']])}${filterSelect('updates','Updates',[['all','All'],['with','Available'],['without','None']])}</div>
-    ${active?`<div class="filter-summary">${button('clear-server-filters','Clear filters','','text-button')}</div>`:''}
-    <nav class="server-list" aria-label="Servers">${servers.map(s=>`<button type="button" class="server-item ${s.id===state.server?'selected':''} ${s.warnings.length?'has-warning':''}" data-action="select-server" data-id="${e(s.id)}" aria-current="${s.id===state.server?'page':'false'}"><div class="flex server-title">${icon('server')}<span class="server-name">${e(s.name)}</span><span class="server-badges">${s.warnings.length?`<span class="count-badge warn" data-warning-server="${e(s.id)}" aria-label="${s.warnings.length} warnings">${icon('warning')}${s.warnings.length}</span>`:''}${s.updates?`<span class="count-badge update" title="${s.updates} updates">${icon('download')}${s.updates}</span>`:''}</span></div>${serverConnection(s,true)}<div class="server-mini">${s.metrics?sidebarMetrics(s):`<span>${s.error?'Connection failed':'Connecting…'}</span>`}</div></button>`).join('')||`<div class="server-filter-empty">${state.data.servers.length?'No servers match these filters.':'No servers yet.'}</div>`}</nav>
+    <div class="sidebar-heading between"><span class="eyebrow">Your servers</span><span class="count" id="server-count" aria-live="polite">${active?servers.length+' / ':''}${state.data.servers.length}</span></div>
+    <div class="server-filters">${filterControl('warnings','Warnings',[['with','With warnings'],['without','No warnings']])}${filterControl('status','Status',[['up','Up'],['down','Down'],['paused','Paused']])}${filterControl('updates','Updates',[['with','Available'],['without','None']])}</div>
+    <nav class="server-list" aria-label="Servers">${serverCards(servers)}</nav>
     <div class="sidebar-bottom"><details class="sidebar-menu" id="sidebar-menu" ${state.menuOpen?'open':''}><summary>${icon('menu')}<span>Menu</span>${icon('down','menu-chevron')}</summary><nav aria-label="Workspace menu">${admin()?button('onboard','Add server','plus','ghost sidebar-link'):''}${button('visuals','Visuals','sun','ghost sidebar-link')}${admin()?button('global-settings','Global settings','settings','ghost sidebar-link')+button('users','Manage users','users','ghost sidebar-link')+button('security','Security & sign-ins','shield','ghost sidebar-link'):''}${button('account','My account','users','ghost sidebar-link')}<div class="connection-note"><span class="dot"></span><span id="connection-status">${state.demo?'Demo workspace':'Background monitoring active'}</span></div></nav></details>
     <div class="sidebar-footer"><span class="app-version">Harbour v${e(state.version)}</span><span class="footer-account" title="${e(state.user.name)} · ${admin()?'Administrator':'Read-only user'}">${e(state.user.name)}</span>${iconButton('logout','Sign out','logout')}</div></div><div class="resize-handle" role="separator" aria-label="Resize server pane" aria-orientation="vertical" aria-valuemin="18" aria-valuemax="40" aria-valuenow="${Math.round(parseFloat(document.documentElement.style.getPropertyValue('--sidebar'))||23)}" tabindex="0"></div>`;
 }
 function visuals(){
-  modal('Visuals',`<div class="stack visuals-settings"><p class="muted">Appearance preferences are saved in this browser.</p><label class="check-line"><input id="follow-system-theme" type="checkbox" ${followSystem?'checked':''}>Follow system light / dark theme</label><label>Colour theme<select id="visual-theme" ${followSystem?'disabled':''}><option value="dark" ${document.documentElement.dataset.theme==='dark'?'selected':''}>Dark</option><option value="light" ${document.documentElement.dataset.theme==='light'?'selected':''}>Light</option></select></label><p class="hint">The toolbar theme button switches to a manual theme.</p><label>Server card density<select id="card-density" aria-label="Server card density">${['compact','normal','comfortable'].map(d=>`<option value="${d}" ${document.documentElement.dataset.density===d?'selected':''}>${d[0].toUpperCase()+d.slice(1)}</option>`).join('')}</select></label><p class="hint">Compact fits more servers. Normal balances space and readability. Comfortable adds breathing room.</p></div>`);
+  const densities=[['compact','Compact'],['normal','Normal'],['comfortable','Comfortable']];
+  modal('Visuals',`<div class="stack visuals-settings"><p class="muted">Appearance preferences are saved in this browser.</p><div class="visual-choice"><h3>Colour theme</h3>${slidingControl('visual-theme','Colour theme',[['system','System'],['light','Light'],['dark','Dark']],followSystem?'system':document.documentElement.dataset.theme,'visual-choice','data-visual="theme"')}<p class="hint">System follows your device’s light / dark setting.</p></div><div class="visual-choice"><h3>Server card density</h3>${slidingControl('card-density','Server card density',densities,document.documentElement.dataset.density,'visual-choice','data-visual="density"')}<p class="hint">Adjust spacing in the server list.</p></div><div class="visual-choice"><h3>Resource card density</h3>${slidingControl('resource-density','Resource card density',densities,document.documentElement.dataset.resourceDensity,'visual-choice','data-visual="resourceDensity"')}<p class="hint">Compact uses smaller cards and charts. Comfortable gives each resource more space.</p></div></div>`);
 }
 function renderTop(){
   const warns=state.data.servers.reduce((a,s)=>a+s.warnings.length,0), updates=state.data.servers.reduce((a,s)=>a+s.updates,0);
@@ -166,8 +194,8 @@ function closeOverlay(){state.modal=null;state.notices=null;$('#overlay').innerH
 const formError = message => {const el=$('.form-error',$('#overlay'))||$('.form-error');if(el)el.textContent=message;else toast(message,true);};
 function thresholdFields(t){return `<div class="form-grid"><label>CPU warning (%)<input name="cpu" type="number" min="1" max="100" step="0.1" value="${t.cpu}" required></label><label>Memory warning (%)<input name="memory" type="number" min="1" max="100" step="0.1" value="${t.memory}" required></label><label>Disk warning (%)<input name="disk" type="number" min="1" max="100" step="0.1" value="${t.disk}" required></label><label>Disk free-space warning (GB)<input name="disk_free_gb" type="number" min="0" max="1000000" step="0.1" value="${t.disk_free_gb}" required></label><label>Temperature warning (°C)<input name="temperature" type="number" min="1" max="180" step="0.1" value="${t.temperature??80}" required></label></div>`;}
 function settings(server=false){const s=current();modal(server?`${e(s.name)} settings`:'Global settings',`${server?`<form id="rename-form" data-id="${e(s.id)}"><label>Server name<div class="flex"><input name="name" value="${e(s.name)}" maxlength="80" required><button type="submit">Rename</button></div></label><div class="form-error" role="alert"></div></form><hr class="section-rule">`:''}<form id="threshold-form" data-server="${server?e(s.id):''}"><p>${server?'Set an override for this server, or inherit the global thresholds.':'Default warning thresholds for every server without an override.'}</p>${thresholdFields(server?s.thresholds:state.data.thresholds)}<p class="hint">Disk warnings trigger when either limit is reached, on any monitored filesystem. CPU, memory and temperature warnings use the latest sample. CPU warnings use package sensors; other device sensors warn separately; choose a limit suitable for your hardware.</p><div class="form-error" role="alert"></div><div class="form-actions">${server?button('inherit','Use global thresholds','','ghost'):''}<button class="primary" type="submit">Save thresholds</button></div></form>${server?`${serverMonitoringForm(s)}<hr class="section-rule"><div class="between"><div><h3>Remove this server</h3><p class="hint">Removes it from Harbour. Containers stay on the host.</p></div>${button('remove-server','Remove','trash','danger small')}</div>`:`<hr class="section-rule"><h3>Monitoring & history</h3><p class="hint">Polling intervals, staged resolution and data retention.</p>${button('monitoring','Configure monitoring','activity','small')}<hr class="section-rule"><h3>Update notifications</h3><p class="hint">Dismissals are personal and tied to a specific image digest. A different image will notify you again.</p>${button('restore-dismissals','Restore my dismissed updates','bell','small')}`}`);}
-function onboard(){state.key=null;state.keyMode='generate';renderOnboard();}
-function renderOnboard(){modal('Add a server',`<p>Connect a Linux host over SSH. Docker, Compose v2 and Python 3 must already be installed.</p>${state.demo?'<div class="info-box warning"><p>This demo cannot connect to real servers or store SSH keys. Start the production container to use onboarding.</p></div>':''}<form id="onboard-form"><div class="form-grid"><label>Display name<input name="name" placeholder="Atlas" required maxlength="80"></label><label>Hostname or IP<input name="host" placeholder="192.0.2.10" required></label><label>SSH user<input name="username" placeholder="harbour" value="harbour" required></label><label>SSH port<input name="port" type="number" value="22" min="1" max="65535" required></label><label class="full">Verified host fingerprint<input name="fingerprint" class="mono" placeholder="SHA256:…" required pattern="SHA256:[A-Za-z0-9+/]{43}"></label></div><p class="hint">Get the fingerprint through the host’s console or a trusted connection:</p><code class="code-block">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256</code><hr class="section-rule"><h3>SSH key</h3><div class="segmented">${button('key-mode','Generate dedicated key','','active',`data-mode="generate"`)}${button('key-mode','Import existing key','','',`data-mode="import"`)}</div><div id="key-fields">${keyFields()}</div><div id="key-output"></div><p class="hint">Use a dedicated SSH account. Access to a standard Docker daemon gives effective root control of that host. Keep this dashboard private or behind HTTPS.</p><div class="form-error" role="alert"></div><div class="form-actions">${button('close','Cancel','','ghost')}<button type="submit" class="primary" ${state.demo?'disabled':''}>${icon('plus')} Connect server</button></div></form>`,true);}
+function onboard(){state.key=null;state.keyMode='generate';state.hostProbe=null;state.acceptedHost=null;renderOnboard();}
+function renderOnboard(){modal('Add a server',`<p>Connect a Linux host over SSH. Docker, Compose v2 and Python 3 must already be installed.</p>${state.demo?'<div class="info-box warning"><p>This demo cannot connect to real servers or store SSH keys. Start the production container to use onboarding.</p></div>':''}<form id="onboard-form"><div class="form-grid"><label>Display name<input name="name" placeholder="Atlas" required maxlength="80"></label><label>Hostname or IP<input name="host" placeholder="192.0.2.10" required></label><label>SSH user<input name="username" placeholder="harbour" value="harbour" required></label><label>SSH port<input name="port" type="number" value="22" min="1" max="65535" required></label><label class="full">Host fingerprint<div class="fingerprint-input"><input name="fingerprint" class="mono" placeholder="Paste SHA256:… or fetch it below" required pattern="SHA256:[A-Za-z0-9+/]{43}">${button('probe-fingerprint','Get fingerprint','search','',state.demo?'disabled':'')}</div></label></div><div id="fingerprint-result" aria-live="polite"></div><p class="hint">Fetch the host key using the hostname and SSH port above, then accept it. No SSH username or private key is needed for this check.</p><details class="fingerprint-help"><summary>Verify through the server console</summary><p class="hint">Compare the fingerprint through a trusted connection or the server console. For example, for an Ed25519 host key:</p><code class="code-block">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256</code></details><hr class="section-rule"><h3>SSH key</h3><div class="segmented">${button('key-mode','Generate dedicated key','','active',`data-mode="generate"`)}${button('key-mode','Import existing key','','',`data-mode="import"`)}</div><div id="key-fields">${keyFields()}</div><div id="key-output"></div><p class="hint">Use a dedicated SSH account. Access to a standard Docker daemon gives effective root control of that host. Keep this dashboard private or behind HTTPS.</p><div class="form-error" role="alert"></div><div class="form-actions">${button('close','Cancel','','ghost')}<button type="submit" class="primary" ${state.demo?'disabled':''}>${icon('plus')} Connect server</button></div></form>`,true);}
 async function preview(action,targets){
   const s=current();const plan=await api(`/servers/${s.id}/plan`,'POST',{action,targets});
   const description={pull:'Download images for the selected targets. Running containers keep their existing images until you apply them.',up:'Run docker compose up -d. Containers may be recreated and briefly unavailable. Compose dependencies are skipped for individual services.',restart:'Restart the selected containers. Services will be briefly unavailable. Restarting does not apply newly pulled images.'}[action];
@@ -190,7 +218,13 @@ document.addEventListener('click',async event=>{
     if(a==='close')return closeOverlay();
     if(a==='theme'){followSystem=false;localStorage.setItem('harbour-theme-mode','manual');localStorage.setItem('harbour-theme',document.documentElement.dataset.theme==='dark'?'light':'dark');return applyTheme();}
     if(a==='visuals')return visuals();
-    if(a==='clear-server-filters'){state.filters={warnings:'all',status:'all',updates:'all'};renderSidebar();$('#server-filter-warnings')?.focus();return;}
+    if(a==='server-filter'){const key=el.dataset.filter;state.filters[key]=state.filters[key]===el.dataset.value?'all':el.dataset.value;updateServerFilters();return;}
+    if(a==='visual-choice'){
+      const key=el.dataset.visual,value=el.dataset.value;
+      if(key==='theme'){followSystem=value==='system';localStorage.setItem('harbour-theme-mode',followSystem?'system':'manual');if(!followSystem)localStorage.setItem('harbour-theme',value);applyTheme();}
+      else{document.documentElement.dataset[key]=value;localStorage.setItem(key==='density'?'harbour-density':'harbour-resource-density',value);updateSlidingControl(el.closest('.sliding-control'),value);}
+      return;
+    }
     if(a==='mobile')return setMobilePanel(!state.mobile);
     if(a==='close-mobile')return setMobilePanel(false);
     if(a==='select-server'||a==='notice-server'){state.server=el.dataset.id||el.dataset.server;localStorage.setItem('harbour-server',state.server);state.selected.clear();state.search='';state.mobile=false;closeOverlay();renderShell();return;}
@@ -198,6 +232,7 @@ document.addEventListener('click',async event=>{
     if(['warnings','updates','notifications','notice-tab'].includes(a)){if(!state.notices)previousFocus=document.activeElement;state.modal=null;state.notices=a==='notifications'?'all':a==='notice-tab'?el.dataset.kind:a;renderNotices();$('.drawer button')?.focus();return;}
     if(a==='global-settings'||a==='server-settings')return settings(a==='server-settings');
     if(a==='onboard')return onboard();
+    if(a==='accept-fingerprint')return acceptFingerprint();
     if(a==='account')return await account();
     if(a==='key-mode'){state.keyMode=el.dataset.mode;for(const b of document.querySelectorAll('[data-action=key-mode]'))b.classList.toggle('active',b.dataset.mode===state.keyMode);$('#key-fields').innerHTML=keyFields();return;}
     if(a==='copy-key'){await navigator.clipboard.writeText('restrict '+state.key.public_key);toast('Public key copied');return;}
@@ -210,6 +245,7 @@ document.addEventListener('click',async event=>{
     else if(a==='dismiss'){await api('/dismiss','POST',{server_id:el.dataset.server,service_id:el.dataset.service});await load();toast('Update dismissed for your account');}
     else if(a==='restore-dismissals'){await api('/dismissals','DELETE');await load();toast('Dismissed updates restored');}
     else if(a==='inherit'){await api(`/servers/${current().id}/thresholds`,'PUT',null);closeOverlay();await load();toast('Global thresholds restored');}
+    else if(a==='probe-fingerprint')await probeFingerprint();
     else if(a==='create-key')await createKey();
     else if(a==='bulk')await preview(el.dataset.kind,[...state.selected]);
     else if(a==='service-action')await preview(el.dataset.kind,[el.dataset.service]);
@@ -239,17 +275,20 @@ document.addEventListener('submit',async event=>{
 });
 document.addEventListener('change',event=>{
   const input=event.target;
-  if(input.dataset.serverFilter){state.filters[input.dataset.serverFilter]=input.value;const id=input.id;renderSidebar();$('#'+id)?.focus();}
-  if(input.id==='follow-system-theme'){followSystem=input.checked;localStorage.setItem('harbour-theme-mode',followSystem?'system':'manual');if(!followSystem)localStorage.setItem('harbour-theme',document.documentElement.dataset.theme);applyTheme();$('#visual-theme').disabled=followSystem;$('#visual-theme').value=document.documentElement.dataset.theme;}
-  if(input.id==='visual-theme'){localStorage.setItem('harbour-theme',input.value);applyTheme();}
-  if(input.id==='card-density'){document.documentElement.dataset.density=input.value;localStorage.setItem('harbour-density',input.value);}
   if(input.name==='key_algorithm')updateKeyTiers();
   if(input.dataset.select){input.checked?state.selected.add(input.dataset.select):state.selected.delete(input.dataset.select);renderMain();}
   if(input.id==='select-all'){const services=(current().services||[]).filter(c=>[c.name,c.project,c.image].some(v=>String(v||'').toLowerCase().includes(state.search.toLowerCase())));for(const c of services){const key=c.project?'group:'+c.project:c.id;input.checked?state.selected.add(key):state.selected.delete(key);}renderMain();}
 });
-document.addEventListener('input',event=>{if(event.target.id==='service-search'){state.search=event.target.value;renderMain();}});
+document.addEventListener('input',event=>{if(event.target.closest('#onboard-form'))onboardIdentityChanged(event.target);if(event.target.id==='service-search'){state.search=event.target.value;renderMain();}});
 document.addEventListener('toggle',event=>{if(event.target.id==='sidebar-menu'&&event.target.isConnected){state.menuOpen=event.target.open;localStorage.setItem('harbour-menu-open',String(state.menuOpen));}if(event.target.dataset.open){event.target.open?state.open.add(event.target.dataset.open):state.open.delete(event.target.dataset.open);}},true);
 document.addEventListener('keydown',event=>{
+  const slider=event.target.closest('.sliding-control');
+  if(slider&&['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){
+    event.preventDefault();
+    const buttons=[...slider.querySelectorAll('button')],index=buttons.indexOf(event.target);
+    const next=event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length;
+    buttons[next].focus();if(buttons[next].getAttribute('aria-pressed')!=='true')buttons[next].click();return;
+  }
   if(event.key==='Escape'){closeOverlay();if(state.mobile)setMobilePanel(false);}
   const dialog=$('[role=dialog]')||(state.mobile?$('#sidebar'):null);
   if(event.key==='Tab'&&dialog){const items=[...dialog.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea,summary,[tabindex="0"]')].filter(el=>el.getClientRects().length&&!el.closest('details:not([open]) nav'));const first=items[0],last=items.at(-1);if(event.shiftKey&&(document.activeElement===first||!dialog.contains(document.activeElement))){event.preventDefault();last?.focus();}else if(!event.shiftKey&&(document.activeElement===last||!dialog.contains(document.activeElement))){event.preventDefault();first?.focus();}}

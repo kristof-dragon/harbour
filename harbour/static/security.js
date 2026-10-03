@@ -58,6 +58,47 @@ function updateKeyTiers() {
     ecdsa: 'ECDSA supports 256, 384 and 521-bit curves. There is no larger “Excessive” tier.',
     rsa: 'Normal 3072 · High 4096 · Xhigh 6144 · Excessive 8192 bits. SHA-1 RSA authentication is disabled.'}[algorithm];
 }
+
+function onboardTarget(form) {
+  return {host:$('[name=host]',form).value.trim(),port:Number($('[name=port]',form).value)};
+}
+function sameHost(a,b) {return a?.host===b?.host&&a?.port===b?.port;}
+function onboardIdentityChanged(input) {
+  if(!['host','port','fingerprint'].includes(input.name))return;
+  const form=input.closest('form');
+  state.hostProbe=null;
+  if(state.acceptedHost&&['host','port'].includes(input.name)&&!sameHost(state.acceptedHost,onboardTarget(form))){
+    $('[name=fingerprint]',form).value='';
+    state.acceptedHost=null;
+    $('#fingerprint-result').innerHTML='<p class="hint" role="status">Server address changed. Fetch or paste its fingerprint again.</p>';
+  }else{
+    if(input.name==='fingerprint')state.acceptedHost=null;
+    $('#fingerprint-result').innerHTML='';
+  }
+}
+async function probeFingerprint() {
+  const form=$('#onboard-form'),target=onboardTarget(form),output=$('#fingerprint-result');
+  if(!target.host){$('[name=host]',form).reportValidity();return;}
+  if(!$('[name=port]',form).reportValidity())return;
+  const request={...target};state.hostProbe=request;
+  output.innerHTML='<p class="hint" role="status">Reading the server’s SSH host key…</p>';
+  try{
+    const result=await api('/ssh/fingerprint','POST',target);
+    if(!form.isConnected||state.hostProbe!==request||!sameHost(target,onboardTarget(form)))return;
+    state.hostProbe=result;
+    output.innerHTML=`<div class="fingerprint-preview"><div class="between"><b>Host key received</b><span class="tag">${e(result.key_type)}</span></div><p class="hint">${e(result.host)}:${result.port} · reached ${e(result.address)}</p><code class="code-block">${e(result.fingerprint)}</code><p class="hint">Fetching a key does not independently verify the server’s identity. Compare it through a trusted source, or accept it as trust on first connection. Harbour will reject later connections if the pinned key changes.</p>${button('accept-fingerprint','Accept fingerprint','shield','small')}</div>`;
+  }catch(error){
+    if(form.isConnected&&state.hostProbe===request){state.hostProbe=null;output.innerHTML=`<p class="form-error" role="alert">${e(error.message)}</p>`;}
+  }
+}
+function acceptFingerprint() {
+  const form=$('#onboard-form'),probe=state.hostProbe;
+  if(!form||!probe?.fingerprint||!sameHost(probe,onboardTarget(form)))return;
+  $('[name=fingerprint]',form).value=probe.fingerprint;
+  state.acceptedHost={host:probe.host,port:probe.port};state.hostProbe=null;
+  $('#fingerprint-result').innerHTML=`<p class="fingerprint-accepted" role="status">${icon('check')}Fingerprint accepted for ${e(probe.host)}:${probe.port}. It will be saved when you connect this server.</p>`;
+}
+
 async function createKey() {
   const form = $('#onboard-form'), private_key = $('[name=private_key]', form)?.value, passphrase = $('[name=passphrase]', form)?.value;
   if (state.keyMode === 'import' && !private_key?.trim()) throw new Error('Paste an existing private key before importing.');

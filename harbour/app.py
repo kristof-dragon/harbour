@@ -321,10 +321,30 @@ def rename_server(id_: str, body: RenameInput, user=Depends(admin)):
     return {"ok": True, "name": body.name}
 
 
-class ServerInput(Input):
-    name: str = Field(min_length=1, max_length=80)
+class SSHHostInput(Input):
     host: str = Field(pattern=r"^[a-zA-Z0-9][a-zA-Z0-9.:%_-]{0,252}$")
     port: int = Field(default=22, ge=1, le=65535)
+
+
+fingerprint_probes = threading.BoundedSemaphore(4)
+
+
+@app.post("/api/ssh/fingerprint")
+def probe_fingerprint(body: SSHHostInput, user=Depends(admin)):
+    if store.DEMO:
+        raise HTTPException(400, "Live SSH fingerprint discovery is disabled in demo mode")
+    if not fingerprint_probes.acquire(blocking=False):
+        raise HTTPException(429, "Fingerprint checks are busy. Please try again shortly.")
+    try:
+        return ssh.probe_host_key(body.host, body.port)
+    except Exception as exc:
+        raise HTTPException(502, "Could not retrieve the SSH host fingerprint: " + str(exc)[:300]) from exc
+    finally:
+        fingerprint_probes.release()
+
+
+class ServerInput(SSHHostInput):
+    name: str = Field(min_length=1, max_length=80)
     username: str = Field(pattern=r"^[a-z_][a-z0-9_-]{0,63}$")
     fingerprint: str = Field(pattern=r"^SHA256:[A-Za-z0-9+/]{43}$")
     key_id: str = Field(min_length=1, max_length=64)

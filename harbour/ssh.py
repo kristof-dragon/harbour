@@ -3,12 +3,41 @@ import hashlib
 import hmac
 import io
 import json
+import socket
 import time
 from pathlib import Path
 
 import paramiko
 
 from . import store
+
+DISABLED_ALGORITHMS = {"pubkeys": ["ssh-rsa"], "keys": ["ssh-rsa"]}
+
+
+def host_fingerprint(key):
+    return "SHA256:" + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
+
+
+def probe_host_key(host, port=22):
+    """Read the negotiated host key without authenticating or opening a channel.
+
+    This is discovery, not independent identity verification. The administrator
+    explicitly accepts the result before it is pinned during server onboarding.
+    """
+    if store.DEMO:
+        raise RuntimeError("SSH is disabled in demo mode")
+    with socket.create_connection((host, port), timeout=10) as connection:
+        peer = connection.getpeername()[0]
+        transport = paramiko.Transport(connection, disabled_algorithms=DISABLED_ALGORITHMS)
+        try:
+            transport.banner_timeout = 10
+            transport.handshake_timeout = 10
+            transport.start_client(timeout=12)
+            key = transport.get_remote_server_key()
+            return {"host": host, "port": port, "address": peer, "key_type": key.get_name(),
+                    "fingerprint": host_fingerprint(key)}
+        finally:
+            transport.close()
 
 
 class ProbeError(RuntimeError):
@@ -23,7 +52,7 @@ class PinnedHostKey(paramiko.MissingHostKeyPolicy):
         self.fingerprint = fingerprint
 
     def missing_host_key(self, client, hostname, key):
-        actual = "SHA256:" + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
+        actual = host_fingerprint(key)
         if not hmac.compare_digest(actual, self.fingerprint):
             raise paramiko.SSHException("Host fingerprint mismatch. Verify the server identity using a trusted connection.")
 
@@ -51,7 +80,7 @@ def request(server, payload):
         client.connect(server["host"], port=server["port"], username=server["username"],
                        pkey=parse_key(credential["private_key"], credential.get("passphrase")),
                        allow_agent=False, look_for_keys=False, timeout=10, auth_timeout=15, banner_timeout=15,
-                       disabled_algorithms={"pubkeys": ["ssh-rsa"], "keys": ["ssh-rsa"]})
+                       disabled_algorithms=DISABLED_ALGORITHMS)
         transport = client.get_transport()
         transport.set_keepalive(20)
         connected = True
