@@ -8,6 +8,7 @@ import secrets
 import shlex
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,9 +27,13 @@ from . import __version__, auth, demo, history, remote_probe, ssh, store, volume
 from .auth import authenticated, admin
 
 pool = ThreadPoolExecutor(max_workers=4)
+resource_pool = ThreadPoolExecutor(max_workers=4)
 stop = threading.Event()
 locks = {}
 locks_guard = threading.Lock()
+queue_guard = threading.RLock()
+job_queues = {}
+resource_locks = {}
 STATIC = Path(__file__).with_name("static")
 
 
@@ -87,9 +92,45 @@ def poll_one(server, lock):
         pass  # Persisted on the server and surfaced in the dashboard.
     finally:
         lock.release()
+        dispatch_queued(server['id'])
+
+
+def poll_resources(server, lock):
+    """Continue lightweight readings while Docker holds the operation lock."""
+    id_ = server['id']
+    try:
+        store.execute('UPDATE servers SET last_attempt=? WHERE id=?', (time.time(), id_))
+        if store.DEMO:
+            result = json.loads(get_server(id_)['snapshot'])
+            result['latency_ms'] = server['latency_ms']
+        else:
+            result = ssh.request(server, {'operation': 'resources'})
+        with store.db() as con:
+            con.execute('BEGIN IMMEDIATE')
+            row = con.execute('SELECT * FROM servers WHERE id=?', (id_,)).fetchone()
+            if not row or connection_signature(dict(row)) != connection_signature(server):
+                return
+            snapshot = json.loads(row['snapshot'])
+            metrics = result['metrics']
+            metrics['docker'] = snapshot.get('metrics', {}).get('docker')
+            snapshot['metrics'] = metrics
+            snapshot['latency_ms'] = result.get('latency_ms')
+            snapshot['history'] = (snapshot.get('history', []) + [metrics['cpu']])[-48:]
+            con.execute("UPDATE servers SET snapshot=?,checked=?,latency_ms=?,connection_status='up' WHERE id=?",
+                        (json.dumps(snapshot), time.time(), result.get('latency_ms'), id_))
+        history.record(id_, metrics, result.get('latency_ms'), up=True)
+    except Exception as exc:
+        status, latency = getattr(exc, 'status', 'unknown'), getattr(exc, 'latency_ms', None)
+        history.record(id_, latency_ms=latency, up=status == 'up')
+        store.execute('UPDATE servers SET error=?,connection_status=?,latency_ms=? WHERE id=?', (str(exc)[:1000], status, latency, id_))
+    finally:
+        lock.release()
 
 
 def poll_due():
+    with queue_guard:
+        for id_ in list(job_queues):
+            dispatch_queued(id_)
     interval = history.policy()["poll_seconds"]
     for server in store.rows("SELECT * FROM servers WHERE monitoring_enabled=1"):
         if time.time() - (server["last_attempt"] or 0) >= (server["poll_seconds"] or interval):
@@ -101,6 +142,15 @@ def poll_due():
                 except Exception:
                     lock.release()
                     raise
+            else:
+                with locks_guard:
+                    resource_lock = resource_locks.setdefault(server['id'], threading.Lock())
+                if resource_lock.acquire(blocking=False):
+                    try:
+                        resource_pool.submit(poll_resources, server, resource_lock)
+                    except Exception:
+                        resource_lock.release()
+                        raise
 
 
 def poll_loop():
@@ -250,10 +300,15 @@ def public_server(server, user):
 
 @app.get("/api/dashboard")
 def dashboard(user=Depends(authenticated)):
-    jobs = store.rows("SELECT id,server_id,server_name,actor,action,status,created,finished,progress,target_names,targets FROM jobs ORDER BY created DESC LIMIT 50")
+    jobs = store.rows("SELECT id,server_id,server_name,actor,action,status,created,finished,progress,target_names,targets FROM jobs WHERE status IN ('queued','running') OR id IN (SELECT id FROM jobs ORDER BY created DESC,rowid DESC LIMIT 50) ORDER BY created DESC,rowid DESC")
+    pending = {}
+    for job in reversed(jobs):
+        if job['status'] in {'queued', 'running'}:
+            pending.setdefault(job['server_id'], []).append(job)
     for job in jobs:
         job['progress'] = json.loads(job['progress'])
         job['target_names'] = stored_target_names(job)
+        queue_details(job, pending.get(job['server_id'], []))
     return {"servers": [public_server(s, user) for s in store.rows("SELECT * FROM servers ORDER BY sort_order,rowid")],
             "thresholds": {**store.DEFAULTS, **json.loads(store.one("SELECT value FROM settings WHERE key='thresholds'")["value"])}, "jobs": jobs}
 
@@ -603,7 +658,10 @@ def connection_signature(server):
 def build_plan(server, body):
     if server["server_type"] != "docker":
         raise HTTPException(400, "Docker operations are disabled for plain servers")
-    if server["error"] or not server["checked"] or time.time() - server["checked"] > 120:
+    # An operation can legitimately keep the latest snapshot older than two minutes.
+    # Remote execution still rechecks the exact confirmed commands against live inventory.
+    pending = store.one("SELECT 1 FROM jobs WHERE server_id=? AND status IN ('queued','running')", (server['id'],))
+    if server["error"] or not server["checked"] or (time.time() - server["checked"] > 120 and not pending):
         raise HTTPException(409, "Refresh this server successfully before changing its services")
     try:
         return remote_probe.plan(json.loads(server["snapshot"]).get("services", []), body.action, body.targets)
@@ -666,49 +724,89 @@ def stored_target_names(job):
 
 
 def queue_job(id_, action, targets, user, commands=None, job_id=None, expected_connection=None):
-    lock = server_lock(id_)
-    if not lock.acquire(blocking=False):
-        raise HTTPException(409, "This server already has an operation in progress")
     job_id = job_id or secrets.token_hex(12)
-    try:
+    with queue_guard:
         server = get_server(id_)
         if action != "refresh" and server["server_type"] != "docker":
             raise HTTPException(400, "Docker operations are disabled for plain servers")
         if expected_connection and expected_connection != connection_signature(server):
             raise HTTPException(409, 'Server connection changed; create a new preview')
+        if store.one('SELECT 1 FROM jobs WHERE id=?', (job_id,)):
+            raise HTTPException(409, 'This operation has already been submitted')
+        if store.one("SELECT COUNT(*) AS n FROM jobs WHERE server_id=? AND status IN ('queued','running')", (id_,))['n'] >= 100:
+            raise HTTPException(429, 'This server already has 100 pending tasks')
         store.execute("INSERT INTO jobs (id,server_id,server_name,actor,action,status,targets,created,target_names) VALUES (?,?,?,?,?,'queued',?,?,?)",
                       (job_id, id_, server["name"], user["name"], action, json.dumps(targets), time.time(), json.dumps(target_names(server, action, targets))))
-        pool.submit(work_job, server, action, targets, commands, job_id, lock)
-    except Exception:
-        lock.release()
-        raise
+        job_queues.setdefault(id_, deque()).append((server, action, targets, commands, job_id))
+        dispatch_queued(id_)
     return {"id": job_id}
 
 
+def dispatch_queued(id_):
+    """Reserve one host per worker; waiting tasks never consume worker threads."""
+    with queue_guard:
+        pending = job_queues.get(id_)
+        if not pending:
+            return
+        lock = server_lock(id_)
+        if not lock.acquire(blocking=False):
+            return
+        task = pending.popleft()
+        if not pending:
+            job_queues.pop(id_, None)
+        try:
+            pool.submit(work_job, *task, lock)
+        except Exception:
+            lock.release()
+            store.execute("UPDATE jobs SET status='failed',finished=?,output='Unable to start task worker' WHERE id=?", (time.time(), task[4]))
+            raise
+
+
+def queue_details(job, pending=None):
+    if job['status'] == 'queued':
+        if pending is None:
+            pending = store.rows("SELECT id,action,status FROM jobs WHERE server_id=? AND status IN ('queued','running') ORDER BY created,rowid", (job['server_id'],))
+        waiting = [item for item in pending if item['status'] == 'queued']
+        job['queue_position'] = next((i+1 for i,item in enumerate(waiting) if item['id'] == job['id']), 1)
+        running = next((item for item in pending if item['status'] == 'running'), None)
+        job['waiting_for'] = running['action'] if running else 'server availability'
+    return job
+
+
 def work_job(server, action, targets, commands, job_id, lock):
-    progress = {'completed': 0, 'total': len(commands or []), 'label': 'Connecting to server'}
+    progress = {'completed': 0, 'total': len(commands or []), 'label': 'Connecting to server', 'started': time.time(), 'phase': 'connecting', 'phase_started': time.time()}
     live_output, last_saved = '', 0
 
     def event_update(event):
         nonlocal live_output, last_saved
         kind = event.get('kind')
-        if kind == 'step':
+        if kind == 'phase':
+            progress.update(phase=event['phase'], label=event['label'], phase_started=time.time())
+        elif kind == 'step':
             progress.update({key: event[key] for key in ('completed', 'total', 'label')})
+            progress.update(phase='executing', phase_started=time.time())
             live_output = (live_output + '\n' + event['label'] + '\n')[-60000:]
         elif kind == 'completed':
             progress.update(completed=event['completed'], total=event['total'])
         elif kind == 'output':
+            progress['last_output'] = time.time()
             text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', str(event.get('text', ''))).replace('\r', '\n')
             live_output = (live_output + text)[-60000:]
         elif kind != 'heartbeat':
             return
+        progress['heartbeat'] = time.time()
         now = time.monotonic()
-        if kind in {'step', 'completed'} or now-last_saved >= .5:
+        if kind in {'phase', 'step', 'completed'} or now-last_saved >= .5:
             store.execute('UPDATE jobs SET progress=?,output=? WHERE id=?', (json.dumps(progress), live_output, job_id))
             last_saved = now
 
     try:
+        target_refs = {s['id']: {'project': s['project'], 'name': s['name']} for s in json.loads(server['snapshot']).get('services', []) if s['id'] in targets and s.get('project')}
         store.execute("UPDATE jobs SET status='running',progress=? WHERE id=?", (json.dumps(progress), job_id))
+        latest = get_server(server['id'])
+        if connection_signature(latest) != connection_signature(server):
+            raise RuntimeError('Server connection or type changed while queued; create a new preview')
+        server = latest
         output = ""
         status = "succeeded"
         if action in {"refresh", "check"}:
@@ -737,9 +835,9 @@ def work_job(server, action, targets, commands, job_id, lock):
             store.execute("UPDATE servers SET snapshot=?,checked=? WHERE id=?", (json.dumps(snapshot), time.time(), server["id"]))
             output = live_output + "\nSimulated operation completed. No real host was contacted."
         else:
-            result = ssh.request(server, {"operation": "execute", "action": action, "targets": targets, "expected": commands}, on_event=event_update)
+            result = ssh.request(server, {"operation": "execute", "action": action, "targets": targets, "target_refs": target_refs, "expected": commands}, on_event=event_update)
             output, status = result["output"], "succeeded" if result["ok"] else "failed"
-            progress['label'] = 'Refreshing server readings'
+            progress.update(label='Refreshing resources and checking image versions' if action in {'up', 'pull_up'} else 'Refreshing server readings', phase='refreshing', phase_started=time.time())
             store.execute('UPDATE jobs SET progress=?,output=? WHERE id=?', (json.dumps(progress), output, job_id))
             try:
                 refresh_server(server["id"], action in {"up", "pull_up"})
@@ -752,11 +850,23 @@ def work_job(server, action, targets, commands, job_id, lock):
         store.execute("UPDATE jobs SET status='failed',output=?,finished=?,progress=? WHERE id=?", ((live_output+'\n'+str(exc))[-60000:], time.time(), json.dumps(progress), job_id))
     finally:
         lock.release()
+        dispatch_queued(server['id'])
 
 
 @app.post("/api/servers/{id_}/refresh")
 def refresh(id_: str, user=Depends(admin)):
     return queue_job(id_, "refresh", [], user)
+
+
+@app.post('/api/servers/refresh-all')
+def refresh_all(user=Depends(admin)):
+    jobs, errors = [], []
+    for server in store.rows('SELECT id,name FROM servers ORDER BY sort_order,rowid'):
+        try:
+            jobs.append({**queue_job(server['id'], 'refresh', [], user), 'server_id': server['id']})
+        except HTTPException as exc:
+            errors.append({'id': server['id'], 'name': server['name'], 'detail': exc.detail})
+    return {'jobs': jobs, 'errors': errors}
 
 
 @app.post("/api/servers/{id_}/check-updates")
@@ -771,7 +881,7 @@ def job_detail(id_: str, user=Depends(admin)):
         raise HTTPException(404)
     job['progress'] = json.loads(job['progress'])
     job['target_names'] = stored_target_names(job)
-    return job
+    return queue_details(job)
 
 
 class DismissInput(Input):

@@ -21,7 +21,7 @@ function resourceCards(s){
   const values={cpu:[m.cpu,`${m.cores??'—'} cores`,s.stale?'Last known usage':'Host CPU'],memory:[m.memory.percent,`${gb(m.memory.used)} / ${gb(m.memory.total)} GB`,'RAM'],disk:[disk?.percent,disk?`${disk.mount} · ${capacity(disk.used)} / ${capacity(disk.total)}`:'No volume selected',disk?`${capacity(disk.free)} free`:''],temperature:[temp.package,temp.package==null?'No CPU / SoC sensor':temp.package_label,temp.package_count>1?`${temp.package_count} packages · first shown`:temp.package==null?'Unavailable':'Selected sensor']};
   return Object.entries(values).map(([key,[value,detail,aside]])=>{
     const meta=resourceMeta[key],warn=key==='disk'?!!disk?.warning:s.warnings.some(w=>key==='temperature'?w.kind==='cpu_package':w.id===key||w.id.startsWith(key+':'));
-    return `<article class="metric ${warn?'warning':''}"><div class="metric-label">${icon(meta.icon)}${meta.label}<span class="tag ${warn?'red':''}">${warn?'Attention':value==null?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="metric-value">${value==null?'—':percent(value)}<span>${value==null?'':meta.unit}</span></div><div class="metric-bottom"><span>${e(detail)}</span><span>${e(aside)}</span></div><button class="card-chart" type="button" data-action="history" data-resource="${key}" aria-label="Explore ${meta.label} history"><span data-card-chart="${key}">Loading history…</span></button>${key==='temperature'&&temp.sensors?.length?`<details class="sensor-details"><summary>${count(temp.sensors.length,'sensor')}</summary>${temp.sensors.map(sensor=>`<div class="between ${sensor.kind!=='cpu_auxiliary'&&sensor.celsius>=t.temperature?'sensor-warning':''}"><span>${e(sensor.label)}${sensor.kind==='cpu_auxiliary'?' · separate reading':''}</span><b>${percent(sensor.celsius)}°C</b></div>`).join('')}</details>`:''}</article>`;
+    return `<article data-key="metric:${key}" class="metric ${warn?'warning':''}"><div class="metric-label">${icon(meta.icon)}${meta.label}<span class="tag ${warn?'red':''}">${warn?'Attention':value==null?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="metric-value">${value==null?'—':percent(value)}<span>${value==null?'':meta.unit}</span></div><div class="metric-bottom"><span>${e(detail)}</span><span>${e(aside)}</span></div><button class="card-chart" type="button" data-action="history" data-resource="${key}" aria-label="Explore ${meta.label} history"><span data-card-chart="${key}" data-preserve-children>Loading history…</span></button>${key==='temperature'&&temp.sensors?.length?`<details class="sensor-details"><summary>${count(temp.sensors.length,'sensor')}</summary>${temp.sensors.map(sensor=>`<div class="between ${sensor.kind!=='cpu_auxiliary'&&sensor.celsius>=t.temperature?'sensor-warning':''}"><span>${e(sensor.label)}${sensor.kind==='cpu_auxiliary'?' · separate reading':''}</span><b>${percent(sensor.celsius)}°C</b></div>`).join('')}</details>`:''}</article>`;
   }).join('');
 }
 function graphValue(point,key){return point[historyState.stat==='peak'?key+'_peak':key];}
@@ -64,8 +64,42 @@ function chartSVG(data,keys,{mini=false}={}){
     if(segment.length)segments.push(segment);
     return segments.map(s=>s.length===1?`<circle cx="${s[0][0]}" cy="${s[0][1]}" r="2.5" fill="${resourceMeta[key].color}"/>`:`<polyline fill="none" stroke="${resourceMeta[key].color}" stroke-width="${mini?2:2.3}" points="${s.map(p=>p.join(',')).join(' ')}"/>`).join('');
   }).join('');
-  return `<svg class="history-chart ${mini?'mini-chart':''}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${e(keys.map(k=>resourceMeta[k].label).join(', '))} history, ${data.hours} hours, ${resolutionLabel(data.resolution_seconds)} buckets">${grid}${lines}</svg>`;
+  const svg=`<svg class="history-chart ${mini?'mini-chart':''}" ${mini?'':`data-chart-keys="${keys.join(',')}" tabindex="0"`} viewBox="0 0 ${width} ${height}" role="img" aria-label="${e(keys.map(k=>resourceMeta[k].label).join(', '))} history, ${data.hours} hours, ${resolutionLabel(data.resolution_seconds)} buckets${mini?'':'. Hover, tap or use left and right arrows to inspect readings.'}">${grid}${lines}${mini?'':'<line class="chart-cursor" x1="55" x2="55" y1="30" y2="260" visibility="hidden"/>'}</svg>`;
+  return mini?svg:`<div class="history-plot">${svg}<div class="chart-tooltip" role="status" hidden></div></div>`;
 }
+function showChartReading(svg,time){
+  const data=historyState.data;if(!data?.points.length)return;
+  const keys=svg.dataset.chartKeys.split(','),nearest=data.points.reduce((a,b)=>Math.abs(b.time-time)<Math.abs(a.time-time)?b:a);
+  const point=Math.abs(nearest.time-time)<=data.resolution_seconds/2?nearest:{time:Math.round(time/data.resolution_seconds)*data.resolution_seconds};
+  svg.dataset.inspectTime=point.time;
+  const x=55+Math.max(0,Math.min(1,(point.time-data.from)/(data.to-data.from)))*785;
+  const line=$('.chart-cursor',svg);line.setAttribute('x1',x);line.setAttribute('x2',x);line.setAttribute('visibility','visible');
+  const bubble=$('.chart-tooltip',svg.parentElement);bubble.hidden=false;
+  updateHTML(bubble,`<b>${e(new Date(point.time*1000).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}))}</b><small>${resolutionLabel(data.resolution_seconds)} · ${historyState.stat==='peak'?'Peaks':'Averages'}</small>${keys.map(key=>`<div><span style="color:${resourceMeta[key].color}">${resourceMeta[key].label}</span><strong>${graphValue(point,key)==null?'No sample':percent(graphValue(point,key))+resourceMeta[key].unit}</strong></div>`).join('')}`);
+  const rect=svg.getBoundingClientRect(),plot=svg.parentElement.getBoundingClientRect();
+  const location=new DOMPoint(x,30).matrixTransform(svg.getScreenCTM());
+  bubble.style.left=Math.max(4,Math.min(location.x-plot.left+12,plot.width-bubble.offsetWidth-4))+'px';
+  bubble.style.top=Math.max(0,rect.top-plot.top)+'px';
+}
+function hideChartReading(svg){$('.chart-cursor',svg)?.setAttribute('visibility','hidden');const bubble=$('.chart-tooltip',svg.parentElement);if(bubble)bubble.hidden=true;}
+function inspectChart(event){
+  const svg=event.target.closest('[data-chart-keys]');if(!svg)return;
+  const point=new DOMPoint(event.clientX,event.clientY).matrixTransform(svg.getScreenCTM().inverse());
+  if(point.x<55||point.x>840||point.y<30||point.y>260){hideChartReading(svg);return;}
+  const data=historyState.data;if(data)showChartReading(svg,data.from+(point.x-55)/785*(data.to-data.from));
+}
+document.addEventListener('pointermove',inspectChart);
+document.addEventListener('pointerdown',inspectChart);
+document.addEventListener('pointerout',event=>{const svg=event.target.closest('[data-chart-keys]');if(svg&&!svg.contains(event.relatedTarget)&&event.pointerType!=='touch')hideChartReading(svg);});
+document.addEventListener('focusout',event=>{if(event.target.matches('[data-chart-keys]'))hideChartReading(event.target);});
+document.addEventListener('keydown',event=>{
+  const svg=event.target.closest('[data-chart-keys]'),data=historyState.data;if(!svg||!data?.points.length)return;
+  if(event.key==='Escape'){event.stopImmediatePropagation();hideChartReading(svg);return;}
+  if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+  event.preventDefault();const points=data.points,index=points.findIndex(p=>p.time===Number(svg.dataset.inspectTime));
+  const next=event.key==='Home'?0:event.key==='End'?points.length-1:Math.max(0,Math.min(points.length-1,index+(event.key==='ArrowRight'?1:-1)));
+  showChartReading(svg,points[next].time);
+},true);
 async function loadCardHistory(s,force=false){
   const key=s.id+':'+cardHours,cached=cardCache.get(key);
   if(!force&&cached&&Date.now()-cached.loaded<30000){drawCardHistory(cached.data);return;}
@@ -77,7 +111,7 @@ async function loadCardHistory(s,force=false){
     if(current()?.id===s.id&&key===s.id+':'+cardHours)drawCardHistory(data);
   }catch(error){cardCache.delete(key);if(current()?.id===s.id)document.querySelectorAll('[data-card-chart]').forEach(el=>{el.textContent='History unavailable';});}
 }
-function drawCardHistory(data){document.querySelectorAll('[data-card-chart]').forEach(el=>{el.innerHTML=chartSVG(data,[el.dataset.cardChart],{mini:true})+`<small>${data.hours}h · ${resolutionLabel(data.resolution_seconds)} averages</small>`;});}
+function drawCardHistory(data){document.querySelectorAll('[data-card-chart]').forEach(el=>{updateHTML(el,chartSVG(data,[el.dataset.cardChart],{mini:true})+`<small>${data.hours}h · ${resolutionLabel(data.resolution_seconds)} averages</small>`);});}
 function openHistory(resource){
   historyState.server=current().id;historyState.disk='';historyState.data=null;
   if(resource){historyState.mode='tabs';historyState.resource=resource;}

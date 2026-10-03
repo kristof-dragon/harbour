@@ -25,7 +25,7 @@ def client(tmp_path, monkeypatch):
         yield client
     # Jobs use real threads; don't let a test change the database beneath them.
     deadline = time.monotonic() + 5
-    while any(lock.locked() for lock in module.locks.values()) and time.monotonic() < deadline:
+    while (any(lock.locked() for lock in [*module.locks.values(), *module.resource_locks.values()]) or module.job_queues) and time.monotonic() < deadline:
         time.sleep(.02)
 
 

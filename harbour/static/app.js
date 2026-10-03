@@ -33,7 +33,7 @@ const paths = {
  terminal:'m4 5 6 6-6 6M12 19h8', globe:'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20M2 12h20M12 2a20 20 0 0 1 0 20 20 20 0 0 1 0-20'
 };
 const icon = (name, cls='') => `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[name] || paths.box}"/></svg>`;
-const state = {user:null, data:null, server:localStorage.getItem('harbour-server'), tab:'containers', open:new Set(), selected:new Set(), search:'', notices:null, modal:null, mobile:false, lastJobs:new Map(), key:null, keyMode:'generate', demo:false, version:'', menuOpen:localStorage.getItem('harbour-menu-open')==='true', filters:{warnings:'all',status:'all',updates:'all'}, authMessage:'', securityTab:'policy', logOffset:0, totpSetup:null};
+const state = {user:null, data:null, server:localStorage.getItem('harbour-server'), tab:'containers', open:new Set(), selected:new Set(), search:'', notices:null, modal:null, mobile:false, lastJobs:new Map(), key:null, keyMode:'generate', demo:false, version:'', menuOpen:localStorage.getItem('harbour-menu-open')==='true', filtersOpen:localStorage.getItem('harbour-filters-open')!=='false', filters:{warnings:'all',status:'all',updates:'all'}, authMessage:'', securityTab:'policy', logOffset:0, totpSetup:null};
 document.documentElement.dataset.density = ['compact','normal','comfortable'].includes(localStorage.getItem('harbour-density')) ? localStorage.getItem('harbour-density') : 'normal';
 document.documentElement.dataset.resourceDensity = ['compact','normal','comfortable'].includes(localStorage.getItem('harbour-resource-density')) ? localStorage.getItem('harbour-resource-density') : 'normal';
 const storedTheme = localStorage.getItem('harbour-theme');
@@ -62,15 +62,6 @@ const button = (action,label,ico='',cls='',attrs='') => `<button type="button" d
 const iconButton = (action,label,ico,attrs='') => button(action,'',ico,'ghost icon-button',`aria-label="${e(label)}" title="${e(label)}" ${attrs}`);
 function help(label,text){return button('help','','info','help-button',`aria-label="${e(label)} help" data-help="${e(text)}"`);}
 function fieldCaption(label,text){return `<span class="field-caption">${e(label)}${help(label,text)}</span>`;}
-function rememberFocus(){
-  const el=document.activeElement;
-  if(!el||el===document.body)return null;
-  if(el.id)return '#'+CSS.escape(el.id);
-  if(el.getAttribute('aria-label'))return `${el.tagName.toLowerCase()}[aria-label="${CSS.escape(el.getAttribute('aria-label'))}"]`;
-  if(el.dataset.action)return '[data-action="'+CSS.escape(el.dataset.action)+'"]'+Object.entries(el.dataset).filter(([k])=>k!=='action').map(([k,v])=>'[data-'+k.replace(/[A-Z]/g,c=>'-'+c.toLowerCase())+'="'+CSS.escape(v)+'"]').join('');
-  if(el.tagName==='SUMMARY')return 'details[data-open="'+CSS.escape(el.parentElement.dataset.open)+'"] > summary';
-  return null;
-}
 
 async function api(path, method='GET', body) {
   const res = await fetch('/api'+path,{method,headers:{'Content-Type':'application/json',...(state.user?{'X-CSRF-Token':state.user.csrf}:{})},...(body!==undefined?{body:JSON.stringify(body)}:{})});
@@ -79,12 +70,15 @@ async function api(path, method='GET', body) {
   return value;
 }
 function toast(message,error=false){const el=document.createElement('div');el.className='toast'+(error?' error':'');el.textContent=message;$('#toasts').append(el);setTimeout(()=>el.remove(),6500);}
+let dashboardSequence=0;
 async function load(initial=false){
   if(!state.user||state.dragging)return;
+  const sequence=++dashboardSequence,user=state.user;
   try {
     const next=await api('/dashboard');
+    if(sequence!==dashboardSequence||state.user!==user||state.dragging)return;
+    updateText($('#connection-status'),state.demo?'Demo workspace':'Background monitoring active');
     if(!initial&&JSON.stringify(next)===JSON.stringify(state.data))return;
-    const focus=rememberFocus();
     state.data=next;
     if(!current()){state.server=state.data.servers[0]?.id;state.selected.clear();}
     for(const job of state.data.jobs){
@@ -94,7 +88,6 @@ async function load(initial=false){
     }
     if(initial || !$('#shell'))renderShell(); else {renderSidebar();renderTop();renderMain();}
     if(state.notices)renderNotices();
-    if(focus)$(focus)?.focus({preventScroll:true});
   } catch(err){if(initial)toast(err.message,true);else if($('#connection-status'))$('#connection-status').textContent='Dashboard connection lost · retrying';}
 }
 
@@ -125,27 +118,32 @@ function filteredServers(){
   const f=state.filters;
   return state.data.servers.filter(s=>(f.warnings==='all'||Boolean(s.warnings.length)===(f.warnings==='with'))&&(f.updates==='all'||Boolean(s.updates)===(f.updates==='with'))&&(f.status==='all'||connectionState(s)===f.status));
 }
+function serverTaskBadge(server){
+  const jobs=state.data.jobs.filter(j=>j.server_id===server.id),running=jobs.find(j=>j.status==='running'),queued=jobs.filter(j=>j.status==='queued').length;
+  if(!running&&!queued)return '';
+  const label=(running?actionLabel(running.action)+' running':'Waiting to start')+' · '+queued+' queued';
+  return `<span data-key="tasks" class="count-badge task-badge ${running?'task-running':''}" title="${e(label)}" aria-label="${e(label)}">${icon(running?'refresh':'clock')}<b>${queued}</b></span>`;
+}
 function serverCards(servers){
-  return servers.map(s=>`<button type="button" draggable="${admin()}" title="${admin()?'Drag to reorder · Alt + Arrow keys to move':''}" class="server-item ${s.id===state.server?'selected':''} ${s.warnings.length?'has-warning':''}" data-action="select-server" data-id="${e(s.id)}" aria-current="${s.id===state.server?'page':'false'}"><div class="flex server-title">${admin()?'<span class="server-drag" aria-hidden="true">⠿</span>':''}${icon('server')}<span class="server-name">${e(s.name)}</span><span class="server-badges">${s.warnings.length?`<span class="count-badge warn" data-warning-server="${e(s.id)}" aria-label="${s.warnings.length} warnings">${icon('warning')}${s.warnings.length}</span>`:''}${s.updates?`<span class="count-badge update" title="${s.updates} updates">${icon('download')}${s.updates}</span>`:''}</span></div>${serverConnection(s,true)}<div class="server-mini">${s.metrics?sidebarMetrics(s):`<span>${s.error?'Connection failed':'Connecting…'}</span>`}</div></button>`).join('')||`<div class="server-filter-empty">${state.data.servers.length?'No servers match these filters.':'No servers yet.'}</div>`;
+  return servers.map(s=>`<button data-key="server:${e(s.id)}" type="button" draggable="${admin()}" title="${admin()?'Drag to reorder · Alt + Arrow keys to move':''}" class="server-item ${s.id===state.server?'selected':''} ${s.warnings.length?'has-warning':''}" data-action="select-server" data-id="${e(s.id)}" aria-current="${s.id===state.server?'page':'false'}"><div class="flex server-title">${admin()?'<span class="server-drag" aria-hidden="true">⠿</span>':''}${icon('server')}<span class="server-name">${e(s.name)}</span><span class="server-badges">${serverTaskBadge(s)}${s.warnings.length?`<span data-key="warnings" class="count-badge warn" data-warning-server="${e(s.id)}" aria-label="${s.warnings.length} warnings">${icon('warning')}${s.warnings.length}</span>`:''}${s.updates?`<span data-key="updates" class="count-badge update" title="${s.updates} updates">${icon('download')}${s.updates}</span>`:''}</span></div>${serverConnection(s,true)}<div class="server-mini">${s.metrics?sidebarMetrics(s):`<span>${s.error?'Connection failed':'Connecting…'}</span>`}</div></button>`).join('')||`<div class="server-filter-empty">${state.data.servers.length?'No servers match these filters.':'No servers yet.'}</div>`;
 }
 function updateServerFilters(){
   hideWarningTooltip();
   const servers=filteredServers(),active=Object.values(state.filters).some(v=>v!=='all');
-  $('.server-list').innerHTML=serverCards(servers);
+  updateHTML($('.server-list'),serverCards(servers));
   $('#server-count').textContent=(active?servers.length+' / ':'')+state.data.servers.length;
   for(const [key,value] of Object.entries(state.filters)){
     updateSlidingControl($('#server-filter-'+key),value);
   }
 }
 function renderSidebar(){
-  hideWarningTooltip();
   const active=Object.values(state.filters).some(v=>v!=='all'),servers=filteredServers();
-  $('#sidebar').innerHTML=`<div class="brand"><img src="/static/favicon.svg" alt="">Harbour <span>SELF HOSTED</span>${button('close-mobile','','close','ghost icon-button mobile-sidebar-close','aria-label="Close server list"')}</div>
-    <div class="sidebar-heading between"><span class="eyebrow">Your servers</span><span class="count" id="server-count" aria-live="polite">${active?servers.length+' / ':''}${state.data.servers.length}</span></div>
-    <div class="server-filters">${filterControl('warnings','Warnings',[['with','With warnings'],['without','No warnings']])}${filterControl('status','Status',[['up','Up'],['down','Down'],['paused','Paused']])}${filterControl('updates','Updates',[['with','Available'],['without','None']])}</div>
+  updateHTML($('#sidebar'),`<div class="brand"><img src="/static/favicon.svg" alt="">Harbour <span>SELF HOSTED</span>${button('close-mobile','','close','ghost icon-button mobile-sidebar-close','aria-label="Close server list"')}</div>
+    <details id="server-filters-panel" class="server-filters-panel" ${state.filtersOpen?'open':''}><summary class="sidebar-heading between" title="Show or hide server filters"><span class="eyebrow">Your servers</span><span class="count" id="server-count" aria-live="polite">${active?servers.length+' / ':''}${state.data.servers.length}</span>${icon('down','filter-chevron')}</summary>
+    <div class="server-filters">${filterControl('warnings','Warnings',[['with','With warnings'],['without','No warnings']])}${filterControl('status','Status',[['up','Up'],['down','Down'],['paused','Paused']])}${filterControl('updates','Updates',[['with','Available'],['without','None']])}</div></details>
     <nav class="server-list" aria-label="Servers">${serverCards(servers)}</nav>
     <div class="sidebar-bottom"><details class="sidebar-menu" id="sidebar-menu" ${state.menuOpen?'open':''}><summary>${icon('menu')}<span>Menu</span>${icon('down','menu-chevron')}</summary><nav aria-label="Workspace menu">${admin()?button('onboard','Add server','plus','ghost sidebar-link'):''}${button('visuals','Visuals','sun','ghost sidebar-link')}${admin()?button('global-settings','Global settings','settings','ghost sidebar-link')+button('users','Manage users','users','ghost sidebar-link')+button('security','Security & sign-ins','shield','ghost sidebar-link'):''}${button('account','My account','users','ghost sidebar-link')}<div class="connection-note"><span class="dot"></span><span id="connection-status">${state.demo?'Demo workspace':'Background monitoring active'}</span></div></nav></details>
-    <div class="sidebar-footer"><span class="app-version">Harbour v${e(state.version)}</span><span class="footer-account" title="${e(state.user.name)} · ${admin()?'Administrator':'Read-only user'}">${e(state.user.name)}</span>${iconButton('logout','Sign out','logout')}</div></div><div class="resize-handle" role="separator" aria-label="Resize server pane" aria-orientation="vertical" aria-valuemin="18" aria-valuemax="40" aria-valuenow="${Math.round(parseFloat(document.documentElement.style.getPropertyValue('--sidebar'))||23)}" tabindex="0"></div>`;
+    <div class="sidebar-footer"><span class="app-version">Harbour v${e(state.version)}</span><span class="footer-account" title="${e(state.user.name)} · ${admin()?'Administrator':'Read-only user'}">${e(state.user.name)}</span>${iconButton('logout','Sign out','logout')}</div></div><div class="resize-handle" role="separator" aria-label="Resize server pane" aria-orientation="vertical" aria-valuemin="18" aria-valuemax="40" aria-valuenow="${Math.round(parseFloat(document.documentElement.style.getPropertyValue('--sidebar'))||23)}" tabindex="0"></div>`);
 }
 function visuals(){
   const densities=[['compact','Compact'],['normal','Normal'],['comfortable','Comfortable']];
@@ -153,7 +151,7 @@ function visuals(){
 }
 function renderTop(){
   const warns=state.data.servers.reduce((a,s)=>a+s.warnings.length,0), updates=state.data.servers.reduce((a,s)=>a+s.updates,0);
-  $('#topbar').innerHTML=`<div class="breadcrumbs">${button('mobile','','menu','ghost icon-button mobile-menu',`aria-label="Toggle server list" aria-controls="sidebar" aria-expanded="${state.mobile}"`)}<span>Workspace</span><span class="subtle-divider">/</span><span class="current">${e(current()?.name||'Servers')}</span></div><div class="top-actions">${button('warnings',`<span class="chip-label">Warnings</span><b>${warns}</b>`,'warning','notification-chip warn')}${button('updates',`<span class="chip-label">Updates</span><b>${updates}</b>`,'download','notification-chip update')}<span class="divider"></span>${iconButton('theme','Switch colour theme',document.documentElement.dataset.theme==='dark'?'sun':'moon')}${iconButton('notifications','Open notifications','bell')}</div>`;
+  updateHTML($('#topbar'),`<div class="breadcrumbs">${button('mobile','','menu','ghost icon-button mobile-menu',`aria-label="Toggle server list" aria-controls="sidebar" aria-expanded="${state.mobile}"`)}<span>Workspace</span><span class="subtle-divider">/</span><span class="current">${e(current()?.name||'Servers')}</span></div><div class="top-actions">${admin()?iconButton('refresh-all','Refresh all servers','refresh'):''}${button('warnings',`<span class="chip-label">Warnings</span><b>${warns}</b>`,'warning','notification-chip warn')}${button('updates',`<span class="chip-label">Updates</span><b>${updates}</b>`,'download','notification-chip update')}<span class="divider"></span>${iconButton('theme','Switch colour theme',document.documentElement.dataset.theme==='dark'?'sun':'moon')}${iconButton('notifications','Open notifications','bell')}</div>`);
 }
 function metricCard(label,ico,value,unit,detail,aside,pct,warning=false,extra=''){
   return `<article class="metric ${warning?'warning':''}"><div class="metric-label">${icon(ico)}${label}<span class="tag ${warning?'red':''}">${warning?'Attention':ico==='cpu'?'Live':ico==='memory'?'RAM':'Storage'}</span></div><div class="metric-number-row"><div class="metric-value">${value}<span>${unit}</span></div>${extra}</div><div class="meter ${warning?'warn':ico==='memory'?'memory':''}"><span style="width:${Math.max(0,Math.min(100,pct))}%"></span></div><div class="metric-bottom"><span>${detail}</span><span>${aside}</span></div></article>`;
@@ -161,18 +159,16 @@ function metricCard(label,ico,value,unit,detail,aside,pct,warning=false,extra=''
 function renderMain(){
   if(!$('#main'))return;
   const s=current();
-  if(!s){$('#main').innerHTML=`<div class="no-servers empty">${icon('server')}<h1>Your fleet starts here</h1><p>Add your first Linux server to see its resources and Docker services.</p>${admin()?button('onboard','Add your first server','plus','primary'):''}</div>`;return;}
+  if(!s){updateHTML($('#main'),`<div class="no-servers empty">${icon('server')}<h1>Your fleet starts here</h1><p>Add your first Linux server to see its resources and Docker services.</p>${admin()?button('onboard','Add your first server','plus','primary'):''}</div>`);return;}
   const m=s.metrics,isDocker=s.server_type!=='plain';
   const view=!isDocker&&state.tab==='containers'?'storage':state.tab;
-  const focused=$('#service-search')===document.activeElement;const cursor=focused?$('#service-search').selectionStart:null;
-  $('#main').innerHTML=`${serverWarnings(s)}${state.demo?`<div class="demo-banner">${icon('info')}<span>Demo workspace · sample servers, simulated actions.</span><span>No live connections</span></div>`:''}
-    <section class="server-header"><div class="server-heading"><div class="server-emblem">${icon('server')}</div><div><h1>${e(s.name)}</h1><div class="server-meta">${serverConnection(s,true)}</div></div></div>${m?`<div class="host-facts"><span title="Operating system"><small>OS</small><b>${e(m.os||'Unavailable')}</b></span><span title="Kernel"><small>Kernel</small><b class="mono">${e(m.kernel||'Pending')}</b></span><span title="Uptime at last check"><small>Uptime</small><b>${uptime(m.uptime)}</b></span><span title="Server timezone"><small>Timezone</small><b>${timezoneLabel(m.timezone)}</b></span></div>`:''}<div class="header-actions">${admin()?button('refresh','','refresh','small',`aria-label="Refresh server" title="Refresh server"`)+button('server-settings','','settings','small',`aria-label="Server settings" title="Server settings"`):''}</div></section>
-    ${m?`<div class="overview-connection">${isDocker?`<span>${icon('box')}Docker ${e(m.docker||'Pending')}</span>`:'<span>Resource monitoring</span>'}<span>${icon('shield')}${state.demo?'Simulated SSH':'Pinned SSH'} · port ${s.port}</span><span>Poll every ${s.poll_seconds}s${!s.monitoring_enabled?' · paused':''}</span><span>${s.override?'Custom':'Global'} thresholds</span></div>`:''}
-    ${m?`    <div class="resource-heading"><h2>Resources</h2><div class="flex"><label>Recent history <select id="card-hours" aria-label="Resource card history hours">${hourOptions(cardHours)}</select></label>${button('history','Explore history','activity','small')}</div></div><section class="metrics" aria-label="Server resource usage">${resourceCards(s)}</section>`:''}
-    <nav class="tabs" aria-label="Server views">${(isDocker?['containers','storage','activity']:['storage','activity']).map(tab=>button('tab',tab[0].toUpperCase()+tab.slice(1)+(tab==='containers'?` <span class="tag">${s.services?.length||0}</span>`:''),'',view===tab?'active':'',`data-tab="${tab}"`)).join('')}<span class="tab-meta">Updated ${age(s.checked)}</span></nav><div id="server-view">${view==='containers'?renderContainers(s):view==='storage'?renderStorage(s):renderActivity(s)}</div>
-`;
+  updateHTML($('#main'),`${serverWarnings(s)}${state.demo?`<div data-key="demo-banner" class="demo-banner">${icon('info')}<span>Demo workspace · sample servers, simulated actions.</span><span>No live connections</span></div>`:''}
+    <section data-key="server-header" class="server-header"><div class="server-heading"><div class="server-emblem">${icon('server')}</div><div><h1>${e(s.name)}</h1><div class="server-meta">${serverConnection(s,true)}</div></div></div>${m?`<div class="host-facts"><span title="Operating system"><small>OS</small><b>${e(m.os||'Unavailable')}</b></span><span title="Kernel"><small>Kernel</small><b class="mono">${e(m.kernel||'Pending')}</b></span><span title="Uptime at last check"><small>Uptime</small><b>${uptime(m.uptime)}</b></span><span title="Server timezone"><small>Timezone</small><b>${timezoneLabel(m.timezone)}</b></span></div>`:''}<div class="header-actions">${admin()?button('refresh','','refresh','small',`aria-label="Refresh server" title="Refresh server"`)+button('server-settings','','settings','small',`aria-label="Server settings" title="Server settings"`):''}</div></section>
+    ${m?`<div data-key="overview-connection" class="overview-connection">${isDocker?`<span>${icon('box')}Docker ${e(m.docker||'Pending')}</span>`:'<span>Resource monitoring</span>'}<span>${icon('shield')}${state.demo?'Simulated SSH':'Pinned SSH'} · port ${s.port}</span><span>Poll every ${s.poll_seconds}s${!s.monitoring_enabled?' · paused':''}</span><span>${s.override?'Custom':'Global'} thresholds</span></div>`:''}
+    ${m?`    <div data-key="resource-heading" class="resource-heading"><h2>Resources</h2><div class="flex"><label>Recent history <select id="card-hours" aria-label="Resource card history hours">${hourOptions(cardHours)}</select></label>${button('history','Explore history','activity','small')}</div></div><section data-key="metrics:${e(s.id)}" class="metrics" aria-label="Server resource usage">${resourceCards(s)}</section>`:''}
+    <nav data-key="server-tabs" class="tabs" aria-label="Server views">${(isDocker?['containers','storage','activity']:['storage','activity']).map(tab=>button('tab',tab[0].toUpperCase()+tab.slice(1)+(tab==='containers'?` <span class="tag">${s.services?.length||0}</span>`:''),'',view===tab?'active':'',`data-tab="${tab}"`)).join('')}<span class="tab-meta">Updated ${age(s.checked)}</span></nav><div id="server-view">${view==='containers'?renderContainers(s):view==='storage'?renderStorage(s):renderActivity(s)}</div>
+`);
   if(m)loadCardHistory(s);
-  if(focused){$('#service-search')?.focus();$('#service-search')?.setSelectionRange(cursor,cursor);}
 }
 function updateTag(s){const u=s.update||{};return u.status==='available'?`<span class="tag ${s.dismissed?'':'blue'}">${s.dismissed?'Dismissed':icon('download')+' Update'}</span>`:u.status==='current'?'<span class="tag green">Current</span>':`<span class="tag" title="${e(u.error||'Checks the configured image tag, not newer version tags')}">${u.status==='pinned'?'Pinned':u.status==='unknown'?'Check failed':'Not checked'}</span>`;}
 function renderContainers(s){
@@ -194,16 +190,20 @@ function renderService(c,standalone=false){
   const active=c.state==='running';const key='service:'+c.id;
   return `<details class="service ${standalone?'standalone':''}" data-open="${e(key)}" ${state.open.has(key)?'open':''}><summary class="service-summary"><span class="flex">${admin()?`<input type="checkbox" data-select="${e(c.id)}" aria-label="Select ${e(c.name)} service" ${state.selected.has(c.id)?'checked':''}>`:''}${icon('chevron','chevron')}</span>${standalone?`<div class="group-icon">${icon('box')}</div>`:''}<div class="service-title"><b>${e(c.name)}</b><small>${e(c.image)}</small><span class="service-versions">${serviceVersions(c)}</span></div><span class="state ${active?'':'stopped'}"><span class="dot"></span>${e(c.state)}</span>${updateTag(c)}</summary><div class="service-detail">${c.update?.status==='available'?`<div class="update-note">${icon('download')}<span>Available: ${imageIdentity(c,true)}.${c.dismissed?' Notification dismissed.':''}</span>${!c.dismissed?button('dismiss','Dismiss','','ghost small',`data-service="${e(c.id)}" data-server="${e(current().id)}"`):''}</div>`:''}${c.update?.error?`<div class="info-box"><p>Update check failed: ${e(c.update.error)}</p></div>`:''}<div class="details-grid"><div><div class="detail-label">Running version</div><div class="detail-value">${imageIdentity(c)} <span class="muted">${c.version?'(image label)':'(tag · image ID)'}</span></div></div><div><div class="detail-label">Container</div><div class="detail-value mono">${e(c.container)}</div></div><div><div class="detail-label">Running image ID</div><div class="detail-value mono">${e(c.image_id)}</div></div><div><div class="detail-label">Health / restart policy</div><div class="detail-value">${e(c.health||'No health check')} · ${e(c.restart_policy||'none')}</div></div><div><div class="detail-label">Published ports</div><div class="detail-value mono">${c.ports.length?c.ports.map(e).join('<br>'):'None'}</div></div><div><div class="detail-label">Mounts</div><div class="detail-value mono">${c.mounts.length?c.mounts.map(m=>`${e(m.destination)} · ${e(m.type)} · ${m.rw?'read/write':'read-only'}`).join('<br>'):'None'}</div></div></div>${admin()?`<div class="detail-actions">${button('service-action','Pull image','download','small',`data-kind="pull" data-service="${e(c.id)}"`)}${c.project?button('service-action','Apply','play','small',`data-kind="up" data-service="${e(c.id)}"`)+button('service-action','Pull & Apply','download','small',`data-kind="pull_up" data-service="${e(c.id)}"`):''}${button('service-action','Start','play','small',`data-kind="start" data-service="${e(c.id)}" ${active?'disabled':''}`)}${button('service-action','Stop','stop','small',`data-kind="stop" data-service="${e(c.id)}" ${active?'':'disabled'}`)}${button('service-action','Restart','refresh','small',`data-kind="restart" data-service="${e(c.id)}"`)}</div>`:''}</div></details>`;
 }
-function renderStorage(s){return `<div class="disk-list">${s.metrics?.disks.map(d=>`<article class="disk-row"><div class="between"><div class="flex">${icon('disk')}<b class="mono">${e(d.mount)}</b><span class="tag ${d.warning?'red':d.monitor&&d.present?'green':''}">${!d.present?'Not mounted':!d.monitor?'Not monitored':d.warning?'Low space':'OK'}</span>${d.card?'<span class="tag">In cards</span>':''}${d.monitor&&!d.warn?'<span class="tag">Warnings off</span>':''}</div><b>${d.present?percent(d.percent)+'%':'—'}</b></div>${d.present?`<div class="meter ${d.warning?'warn':''}"><span style="width:${Math.min(100,d.percent)}%"></span></div><div class="metric-bottom"><span>${capacity(d.used)} used of ${capacity(d.total)}</span><span><b>${capacity(d.free)} free</b></span></div>`:''}</article>`).join('')||'<div class="empty">No filesystem data yet.</div>'}</div>`;}
+function renderStorage(s){return `<div class="disk-list">${s.metrics?.disks.map(d=>`<article data-key="disk:${e(d.mount)}" class="disk-row"><div class="between"><div class="flex">${icon('disk')}<b class="mono">${e(d.mount)}</b><span class="tag ${d.warning?'red':d.monitor&&d.present?'green':''}">${!d.present?'Not mounted':!d.monitor?'Not monitored':d.warning?'Low space':'OK'}</span>${d.card?'<span class="tag">In cards</span>':''}${d.monitor&&!d.warn?'<span class="tag">Warnings off</span>':''}</div><b>${d.present?percent(d.percent)+'%':'—'}</b></div>${d.present?`<div class="meter ${d.warning?'warn':''}"><span style="width:${Math.min(100,d.percent)}%"></span></div><div class="metric-bottom"><span>${capacity(d.used)} used of ${capacity(d.total)}</span><span><b>${capacity(d.free)} free</b></span></div>`:''}</article>`).join('')||'<div class="empty">No filesystem data yet.</div>'}</div>`;}
 
-function renderActivity(s){const jobs=state.data.jobs.filter(j=>j.server_id===s.id);return jobs.length?jobs.map(j=>`<article class="activity-row"><div class="activity-icon">${icon(j.action==='pull'?'download':'activity')}</div><div class="activity-text"><b>${e(actionLabel(j.action))}</b><small>${e(j.actor)} · ${age(j.created)}</small><small class="activity-targets" title="${e((j.target_names||[]).join(' · '))}">${e((j.target_names||[]).join(' · '))}</small>${['queued','running'].includes(j.status)?jobProgress(j):''}</div><span class="tag ${j.status==='succeeded'?'green':j.status==='failed'?'red':''}">${e(j.status)}</span>${admin()?button('job','Details','','ghost small',`data-id="${e(j.id)}"`):''}</article>`).join(''):`<div class="empty">${icon('activity')}<h3>Nothing to report yet</h3><p>Server refreshes and Docker actions will appear here.</p></div>`;}
+function renderActivity(s){const jobs=state.data.jobs.filter(j=>j.server_id===s.id);return jobs.length?jobs.map(j=>`<article data-key="job:${e(j.id)}" class="activity-row"><div class="activity-icon">${icon(j.action==='pull'?'download':'activity')}</div><div class="activity-text"><b>${e(actionLabel(j.action))}</b><small>${e(j.actor)} · ${age(j.created)}</small><small class="activity-targets" title="${e((j.target_names||[]).join(' · '))}">${e((j.target_names||[]).join(' · '))}</small>${['queued','running'].includes(j.status)?jobProgress(j):''}</div><span class="tag ${j.status==='succeeded'?'green':j.status==='failed'?'red':''}">${e(j.status)}</span>${admin()?button('job','Details','','ghost small',`data-id="${e(j.id)}"`):''}</article>`).join(''):`<div class="empty">${icon('activity')}<h3>Nothing to report yet</h3><p>Server refreshes and Docker actions will appear here.</p></div>`;}
 
 function jobProgress(job){
   const p=job.progress||{},active=['queued','running'].includes(job.status),total=p.total||0,completed=p.completed||0;
+  const queued=job.status==='queued',elapsed=duration((job.finished||Date.now()/1000)-(p.started||job.created));
+  const label=queued?`Queue position ${job.queue_position||1} · waiting for ${actionLabel(job.waiting_for||'server availability')}`:p.label||job.status;
+  const quiet=p.phase==='executing'?p.last_output?`Last output ${duration(Date.now()/1000-p.last_output)} ago`:'Waiting for Docker output':p.phase==='refreshing'?'Docker commands finished; refreshing server data':p.phase==='connecting'?'Establishing SSH connection':'';
   const value=total&&(!active||completed>0)?`value="${completed}"`:active?'':'value="1"';
-  const bar=active&&!completed?'<div class="job-indeterminate" role="progressbar" aria-label="Operation in progress"><i></i></div>':`<progress aria-label="Completed operation steps" max="${total||1}" ${value}></progress>`;
-  return `<div class="job-progress ${active?'is-running':''} ${['failed','interrupted'].includes(job.status)?'job-failed':''}">${bar}<span>${e(p.label||job.status)}${total?' · '+completed+' / '+total+' steps':''}</span></div>`;
+  const bar=queued?'<progress aria-label="Waiting in queue" max="1" value="0"></progress>':active&&!completed?'<div class="job-indeterminate" role="progressbar" aria-label="Operation in progress"><i></i></div>':`<progress aria-label="Completed operation steps" max="${total||1}" ${value}></progress>`;
+  return `<div class="job-progress ${active?'is-running':''} ${['failed','interrupted'].includes(job.status)?'job-failed':''}">${bar}<span>${e(label)}${total?' · '+completed+' / '+total+' steps':''}</span><span>${queued?'Queued for':'Elapsed'} ${elapsed}${active&&!queued&&quiet?' · '+e(quiet):''}</span></div>`;
 }
+function duration(seconds){const s=Math.max(0,Math.floor(seconds||0));return s<60?s+'s':s<3600?Math.floor(s/60)+'m '+s%60+'s':Math.floor(s/3600)+'h '+Math.floor(s%3600/60)+'m';}
 async function openJob(id){
   modal('Operation progress',`<div id="job-live" data-id="${e(id)}"><div id="job-heading"></div><div id="job-targets"></div><div id="job-progress"></div><pre id="job-output" class="code-block" tabindex="0" aria-label="Live Docker output">Connecting…</pre><p id="job-poll-error" class="form-error" role="status"></p></div>`,true);
   $('.modal').classList.add('job-modal');await refreshJob(id);
@@ -213,12 +213,13 @@ async function refreshJob(id){
   let again=true;
   try{
     const job=await api('/jobs/'+id);if($('#job-live')!==root)return;
-    $('#job-heading',root).innerHTML=`<h3>${e(actionLabel(job.action))} · ${e(job.server_name)}</h3><span class="tag ${job.status==='succeeded'?'green':['failed','interrupted'].includes(job.status)?'red':''}">${e(job.status)}</span>`;
-    $('#job-targets',root).textContent=(job.target_names||[]).join(' · ');
-    $('#job-progress',root).innerHTML=jobProgress(job);
+    updateHTML($('#job-heading',root),`<h3>${e(actionLabel(job.action))} · ${e(job.server_name)}</h3><span class="tag ${job.status==='succeeded'?'green':['failed','interrupted'].includes(job.status)?'red':''}">${e(job.status)}</span>`);
+    updateText($('#job-targets',root),(job.target_names||[]).join(' · '));
+    updateHTML($('#job-progress',root),jobProgress(job));
     const output=$('#job-output',root),atEnd=output.scrollHeight-output.scrollTop-output.clientHeight<40;
-    if(output.textContent!==(job.output||'Waiting for Docker output…')){output.textContent=job.output||'Waiting for Docker output…';if(atEnd)output.scrollTop=output.scrollHeight;}
-    $('#job-poll-error',root).textContent='';again=['queued','running'].includes(job.status);
+    const log=job.output||(job.status==='queued'?'Queued. Output will appear when this task starts.':'Waiting for Docker output…');
+    if(output.textContent!==log){output.textContent=log;if(atEnd)output.scrollTop=output.scrollHeight;}
+    updateText($('#job-poll-error',root),'');again=['queued','running'].includes(job.status);
   }catch(error){if($('#job-live')===root)$('#job-poll-error',root).textContent='Progress connection lost. Retrying… '+error.message;}
   if(again&&state.user&&$('#job-live')===root)setTimeout(()=>refreshJob(id),1000);
 }
@@ -308,8 +309,8 @@ async function preview(action,targets){
 async function userManagement(){const users=await api('/users');modal('Manage users',`<p>Administrators manage hosts and Docker. Users can view every server and dismiss their own update notices.</p><div>${users.map(u=>`<div class="user-row"><div class="avatar">${e(u.name.slice(0,2).toUpperCase())}</div><b>${e(u.name)}</b><span class="tag ${u.mfa_enabled?'green':''}">2FA ${u.mfa_enabled?'on':'off'}</span><span class="tag ${u.role==='admin'?'green':''}">${e(u.role)}</span>${u.id!==state.user.id?iconButton('remove-user','Remove '+u.name,'trash',`data-id="${e(u.id)}" data-name="${e(u.name)}"`):'<span class="tag">You</span>'}</div>`).join('')}</div><hr class="section-rule"><h3>Add a user</h3><form id="user-form"><div class="form-grid"><label>Username<input name="name" required maxlength="80" autocomplete="off"></label><label>Access level<select name="role"><option value="user">User · read only</option><option value="admin">Administrator</option></select></label><label class="full">Password<input name="password" type="password" minlength="12" required autocomplete="new-password" placeholder="At least 12 characters"></label></div><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">Add user</button></div></form>`);}
 function renderNotices(){
   const kind=state.notices;const notices=[];
-  for(const s of state.data.servers){if(kind==='warnings'||kind==='all')for(const w of s.warnings)notices.push({kind:'warn',server:s,title:w.title,detail:w.detail});if(kind==='updates'||kind==='all')for(const c of s.services||[])if(c.update?.status==='available'&&!c.dismissed)notices.push({kind:'update',server:s,service:c,title:c.name+' · image update',detail:c.image});}
-  $('#overlay').innerHTML=`<div class="drawer-backdrop"><section class="drawer" role="dialog" aria-modal="true" aria-labelledby="notice-title"><header class="modal-header"><h2 id="notice-title">Notifications</h2>${iconButton('close','Close notifications','close')}</header><div class="tabs">${['all','warnings','updates'].map(k=>button('notice-tab',k[0].toUpperCase()+k.slice(1),'',kind===k?'active':'',`data-kind="${k}"`)).join('')}</div>${notices.map(n=>`<article class="notice ${n.kind}"><div class="notice-title">${icon(n.kind==='warn'?'warning':'download')}${e(n.title)}</div><p>${e(n.detail)}</p><div class="notice-actions">${button('notice-server',e(n.server.name),'server','text-button',`data-server="${e(n.server.id)}"`)}${n.service?button('dismiss','Dismiss','','ghost small',`data-server="${e(n.server.id)}" data-service="${e(n.service.id)}"`):'<span class="muted">Active warning</span>'}</div></article>`).join('')||`<div class="empty">${icon('check')}<h3>All clear</h3><p>No ${kind==='all'?'notifications':kind} to show.</p></div>`}<p class="hint" style="margin-top:20px">Dismissed updates stay hidden for you until a different image is available. Active warnings clear when the issue resolves.</p>${button('restore-dismissals','Restore dismissed updates','','text-button')}</section></div>`;
+  for(const s of state.data.servers){if(kind==='warnings'||kind==='all')for(const w of s.warnings)notices.push({id:w.id,kind:'warn',server:s,title:w.title,detail:w.detail});if(kind==='updates'||kind==='all')for(const c of s.services||[])if(c.update?.status==='available'&&!c.dismissed)notices.push({kind:'update',server:s,service:c,title:c.name+' · image update',detail:c.image});}
+  updateHTML($('#overlay'),`<div class="drawer-backdrop"><section class="drawer" role="dialog" aria-modal="true" aria-labelledby="notice-title"><header class="modal-header"><h2 id="notice-title">Notifications</h2>${iconButton('close','Close notifications','close')}</header><div class="tabs">${['all','warnings','updates'].map(k=>button('notice-tab',k[0].toUpperCase()+k.slice(1),'',kind===k?'active':'',`data-kind="${k}"`)).join('')}</div>${notices.map(n=>`<article data-key="notice:${e(n.server.id)}:${e(n.service?.id||n.id)}" class="notice ${n.kind}"><div class="notice-title">${icon(n.kind==='warn'?'warning':'download')}${e(n.title)}</div><p>${e(n.detail)}</p><div class="notice-actions">${button('notice-server',e(n.server.name),'server','text-button',`data-server="${e(n.server.id)}"`)}${n.service?button('dismiss','Dismiss','','ghost small',`data-server="${e(n.server.id)}" data-service="${e(n.service.id)}"`):'<span class="muted">Active warning</span>'}</div></article>`).join('')||`<div class="empty">${icon('check')}<h3>All clear</h3><p>No ${kind==='all'?'notifications':kind} to show.</p></div>`}<p class="hint" style="margin-top:20px">Dismissed updates stay hidden for you until a different image is available. Active warnings clear when the issue resolves.</p>${button('restore-dismissals','Restore dismissed updates','','text-button')}</section></div>`);
 }
 
 document.addEventListener('click',async event=>{
@@ -335,7 +336,7 @@ document.addEventListener('click',async event=>{
     }
     if(a==='mobile')return setMobilePanel(!state.mobile);
     if(a==='close-mobile')return setMobilePanel(false);
-    if(a==='select-server'||a==='notice-server'){state.server=el.dataset.id||el.dataset.server;localStorage.setItem('harbour-server',state.server);state.selected.clear();state.search='';state.mobile=false;closeOverlay(true);renderShell();return;}
+    if(a==='select-server'||a==='notice-server'){state.server=el.dataset.id||el.dataset.server;localStorage.setItem('harbour-server',state.server);state.selected.clear();state.search='';state.mobile=false;closeOverlay(true);renderSidebar();renderTop();renderMain();syncMobilePanel();return;}
     if(a==='tab'){state.tab=el.dataset.tab;renderMain();return;}
     if(['warnings','updates','notifications','notice-tab'].includes(a)){if(!state.notices)previousFocus=document.activeElement;state.modal=null;state.notices=a==='notifications'?'all':a==='notice-tab'?el.dataset.kind:a;renderNotices();$('.drawer button')?.focus();return;}
     if(a==='global-settings'||a==='server-settings')return settings(a==='server-settings');
@@ -347,11 +348,12 @@ document.addEventListener('click',async event=>{
     if(a==='account')return await account();
     if(a==='key-mode'){state.keyMode=el.dataset.mode;for(const b of document.querySelectorAll('[data-action=key-mode]'))b.classList.toggle('active',b.dataset.mode===state.keyMode);$('#key-fields').innerHTML=keyFields();return;}
     if(a==='copy-key'){await navigator.clipboard.writeText('restrict '+state.key.public_key);toast('Public key copied');return;}
-    el.disabled=true;
+    busyViewNodes.add(el);el.disabled=true;
     if(monitorActions.has(a)){await handleMonitorAction(a,el);return;}
     if(securityActions.has(a)){await handleSecurityAction(a,el);return;}
     if(a==='demo-login'){state.user=await api('/demo-login','POST');await load(true);}
     else if(a==='logout'){await api('/logout','POST');state.user=null;renderLogin();}
+    else if(a==='refresh-all'){const result=await api('/servers/refresh-all','POST');for(const job of result.jobs)state.lastJobs.set(job.id,'queued');await load();toast(count(result.jobs.length,'server')+' queued for refresh'+(result.errors.length?' · '+result.errors.map(err=>err.name+': '+err.detail).join('; '):''),Boolean(result.errors.length));}
     else if(a==='refresh'||a==='check-updates'){const r=await api(`/servers/${current().id}/${a==='refresh'?'refresh':'check-updates'}`,'POST');state.lastJobs.set(r.id,'queued');toast(a==='refresh'?'Refreshing server readings…':'Checking configured image tags…');await load();}
     else if(a==='dismiss'){await api('/dismiss','POST',{server_id:el.dataset.server,service_id:el.dataset.service});await load();toast('Update dismissed for your account');}
     else if(a==='restore-dismissals'){await api('/dismissals','DELETE');await load();toast('Dismissed updates restored');}
@@ -370,7 +372,7 @@ document.addEventListener('click',async event=>{
     else if(a==='confirm-remove-server'){await api('/servers/'+el.dataset.id,'DELETE');closeOverlay();await load();toast('Server removed from Harbour');}
     else if(a==='job')await openJob(el.dataset.id);
   } catch(err){if(state.modal)formError(err.message);else toast(err.message,true);}
-  finally{if(el.isConnected)el.disabled=false;}
+  finally{busyViewNodes.delete(el);if(el.isConnected)el.disabled=false;}
 });
 document.addEventListener('submit',async event=>{
   event.preventDefault();const form=event.target;if(form.dataset.busy)return;const data=Object.fromEntries(new FormData(form));const submit=$('[type=submit]',form);const restoreForm=busyOnboarding(form);$('.form-error',form).textContent='';
@@ -402,7 +404,7 @@ document.addEventListener('change',event=>{
   if(input.id==='select-all'){const services=(current().services||[]).filter(c=>[c.name,c.project,c.image].some(v=>String(v||'').toLowerCase().includes(state.search.toLowerCase())));for(const c of services){const key=c.project?'group:'+c.project:c.id;input.checked?state.selected.add(key):state.selected.delete(key);}renderMain();}
 });
 document.addEventListener('input',event=>{if(event.target.closest('#onboard-form'))onboardIdentityChanged(event.target);if(event.target.id==='service-search'){state.search=event.target.value;renderMain();}});
-document.addEventListener('toggle',event=>{if(event.target.id==='sidebar-menu'&&event.target.isConnected){state.menuOpen=event.target.open;localStorage.setItem('harbour-menu-open',String(state.menuOpen));}if(event.target.dataset.warningOpen){event.target.open?state.open.add('warnings:'+event.target.dataset.warningOpen):state.open.delete('warnings:'+event.target.dataset.warningOpen);}if(event.target.dataset.open){event.target.open?state.open.add(event.target.dataset.open):state.open.delete(event.target.dataset.open);}},true);
+document.addEventListener('toggle',event=>{if(!event.target.isConnected)return;if(event.target.id==='server-filters-panel'){state.filtersOpen=event.target.open;localStorage.setItem('harbour-filters-open',String(state.filtersOpen));}if(event.target.id==='sidebar-menu'&&event.target.isConnected){state.menuOpen=event.target.open;localStorage.setItem('harbour-menu-open',String(state.menuOpen));}if(event.target.dataset.warningOpen){event.target.open?state.open.add('warnings:'+event.target.dataset.warningOpen):state.open.delete('warnings:'+event.target.dataset.warningOpen);}if(event.target.dataset.open){event.target.open?state.open.add(event.target.dataset.open):state.open.delete(event.target.dataset.open);}},true);
 document.addEventListener('keydown',event=>{
   const slider=event.target.closest('.sliding-control');
   if(slider&&['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){

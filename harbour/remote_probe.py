@@ -383,16 +383,31 @@ def plan(services, action, targets):
 
 def handle(request, emit=None):
     operation = request["operation"]
+    if operation == 'resources':
+        # No Docker commands: resource polling must also work during daemon operations.
+        return {'metrics': metrics(docker=False)}
     docker = request.get("server_type", "docker") == "docker"
     if not docker and operation != "snapshot":
         raise ValueError("Docker operations are disabled for plain servers")
+    if operation == 'execute' and emit:
+        emit({'kind': 'phase', 'phase': 'inventory', 'label': 'Reading Docker container inventory'})
     services = inventory() if docker else []
     if operation == "snapshot":
         if request.get("updates"):
             services = check_updates(services)
         return {"metrics": metrics(docker=docker), "services": services}
     if operation == "execute":
-        commands = plan(services, request["action"], request["targets"])
+        targets = list(request['targets'])
+        # Compose may recreate a queued target. Its project/service identity and
+        # exact command must still match the preview before anything is run.
+        for index, target in enumerate(targets):
+            ref = request.get('target_refs', {}).get(target)
+            if ref and not any(s['id'] == target for s in services):
+                matches = [s for s in services if s.get('project') == ref['project'] and s['name'] == ref['name']]
+                if len(matches) != 1:
+                    raise ValueError('Queued Compose service changed; refresh and confirm a new plan')
+                targets[index] = matches[0]['id']
+        commands = plan(services, request["action"], targets)
         if commands != request["expected"]:
             raise ValueError("Server state changed after the preview. Refresh and confirm a new plan.")
         completed = []
