@@ -1,0 +1,6 @@
+fastapi==0.135.2
+uvicorn==0.42.0
+paramiko==4.0.0
+cryptography==46.0.5
+pyotp==2.9.0
+qrcode==8.2

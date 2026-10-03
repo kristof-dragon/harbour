@@ -1,0 +1,32 @@
+services:
+  harbour:
+    build: .
+    ports:
+      - "${HARBOUR_BIND_ADDRESS:-127.0.0.1}:${HARBOUR_PORT:-8080}:8080"
+    environment:
+      FIRST_RUN: ${FIRST_RUN:-False}
+      HARBOUR_ADMIN: ${HARBOUR_ADMIN:-}
+      HARBOUR_ADMIN_PASSWORD_HASH: ${HARBOUR_ADMIN_PASSWORD_HASH:-}
+      HARBOUR_BOOTSTRAP_ID: ${HARBOUR_BOOTSTRAP_ID:-}
+      HARBOUR_SECRET: ${HARBOUR_SECRET:?Set HARBOUR_SECRET in .env}
+      HARBOUR_SECURE_COOKIE: ${HARBOUR_SECURE_COOKIE:-false}
+      HARBOUR_ORIGIN: ${HARBOUR_ORIGIN:-http://localhost:8080}
+      HARBOUR_TRUSTED_PROXIES: ${HARBOUR_TRUSTED_PROXIES:-}
+      HARBOUR_DATA: /data
+    volumes:
+      - harbour-data:/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+volumes:
+  harbour-data:

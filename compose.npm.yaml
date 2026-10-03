@@ -1,0 +1,10 @@
+# Optional: share an existing, dedicated network with Nginx Proxy Manager.
+# The setup wizard selects this file through COMPOSE_FILE in .env.
+services:
+  harbour:
+    networks:
+      - proxy
+networks:
+  proxy:
+    external: true
+    name: ${HARBOUR_PROXY_NETWORK:?Set the existing NPM Docker network name}

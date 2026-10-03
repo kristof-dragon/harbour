@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+.env.*
+!.env.example
+data/
+.demo-data/
+test-results/
+*.log
+*.pem
+*.key
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+.DS_Store

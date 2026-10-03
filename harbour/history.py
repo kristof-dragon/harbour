@@ -1,0 +1,217 @@
+"""Weighted SQLite time-series buckets with staged, incremental retention."""
+import json
+import math
+import threading
+import time
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
+
+from . import remote_probe, store
+from .auth import admin, authenticated
+
+router = APIRouter(prefix="/api")
+housekeeping_lock = threading.Lock()
+
+
+def policy():
+    return json.loads(store.one("SELECT value FROM settings WHERE key='monitoring'")["value"])
+
+
+def empty():
+    return {"attempts": 0, "up": 0, "n": 0, "cpu_sum": 0, "cpu_max": 0,
+            "memory_sum": 0, "memory_max": 0, "memory_used_sum": 0, "memory_total_sum": 0,
+            "latency_n": 0, "latency_sum": 0, "latency_max": 0, "disks": {},
+            "temperature_n": 0, "temperature_sum": 0, "temperature_max": -273.15, "sensors": {}}
+
+
+def merge(left, right):
+    left, right = {**empty(), **left}, {**empty(), **right}
+    value = dict(left)
+    for key in value:
+        if key in {"disks", "sensors"}:
+            continue
+        value[key] = max(left[key], right[key]) if key.endswith("_max") else left[key] + right[key]
+    for collection in ("disks", "sensors"):
+        value[collection] = {k: dict(v) for k, v in left[collection].items()}
+        for identity, item in right[collection].items():
+            if identity not in value[collection]:
+                value[collection][identity] = dict(item)
+            else:
+                target = value[collection][identity]
+                for key in item:
+                    target[key] = item[key] if isinstance(item[key], str) else min(target[key], item[key]) if key.endswith("_min") else (
+                        max(target[key], item[key]) if key.endswith("_max") else target[key] + item[key])
+    return value
+
+
+def sample_payload(metrics=None, latency_ms=None, up=False):
+    sample = empty()
+    sample.update(attempts=1, up=int(up))
+    if latency_ms is not None:
+        sample.update(latency_n=1, latency_sum=latency_ms, latency_max=latency_ms)
+    if metrics:
+        sample.update(n=1, cpu_sum=metrics["cpu"], cpu_max=metrics["cpu"],
+                      memory_sum=metrics["memory"]["percent"], memory_max=metrics["memory"]["percent"],
+                      memory_used_sum=metrics["memory"]["used"], memory_total_sum=metrics["memory"]["total"])
+        for disk in metrics["disks"]:
+            sample["disks"][disk["mount"]] = {"n": 1, "percent_sum": disk["percent"], "percent_max": disk["percent"],
+                "used_sum": disk["used"], "used_max": disk["used"], "total_sum": disk["total"],
+                "free_sum": disk["free"], "free_min": disk["free"]}
+        temp = remote_probe.temperature_summary(metrics.get("temperature", {}).get("sensors", []))
+        if temp["package"] is not None:
+            sample.update(temperature_n=1, temperature_sum=temp["package"], temperature_max=temp["package"])
+        for sensor in temp.get("sensors", []):
+            sample["sensors"][sensor["id"]] = {"label": sensor["label"], "n": 1, "sum": sensor["celsius"], "celsius_max": sensor["celsius"]}
+    return sample
+
+
+def put(con, server_id, bucket, resolution, payload):
+    row = con.execute("SELECT payload FROM resource_history WHERE server_id=? AND bucket=? AND resolution=?",
+                      (server_id, bucket, resolution)).fetchone()
+    if row:
+        payload = merge(json.loads(row[0]), payload)
+    con.execute("INSERT OR REPLACE INTO resource_history VALUES (?,?,?,?)", (server_id, bucket, resolution, json.dumps(payload)))
+
+
+def record(server_id, metrics=None, latency_ms=None, up=False, now=None):
+    now = time.time() if now is None else now
+    resolution = policy()["week1_minutes"] * 60
+    bucket = int(now // resolution * resolution)
+    with store.db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        put(con, server_id, bucket, resolution, sample_payload(metrics, latency_ms, up))
+
+
+def compact(now=None, limit=12000):
+    """Coarsen oldest tiers first. Delete inputs and merge outputs atomically."""
+    if not housekeeping_lock.acquire(blocking=False):
+        return
+    try:
+        now = time.time() if now is None else now
+        p = policy()
+        with store.db() as con:
+            con.execute("DELETE FROM resource_history WHERE bucket + resolution <= ?", (now-p["retention_days"]*86400,))
+        for age_days, minutes in ((28, p["older_minutes"]), (14, p["weeks3_4_minutes"]), (7, p["week2_minutes"])):
+            resolution = minutes * 60
+            # Process only complete target buckets beyond this tier's age boundary.
+            boundary = int((now-age_days*86400)//resolution*resolution)
+            with store.db() as con:
+                con.execute("BEGIN IMMEDIATE")
+                rows = con.execute("SELECT * FROM resource_history WHERE bucket+resolution<=? AND resolution<? ORDER BY bucket LIMIT ?",
+                                   (boundary, resolution, limit)).fetchall()
+                grouped = {}
+                for row in rows:
+                    key = (row["server_id"], int(row["bucket"]//resolution*resolution))
+                    grouped[key] = merge(grouped.get(key, empty()), json.loads(row["payload"]))
+                for (server_id, bucket), payload in grouped.items():
+                    put(con, server_id, bucket, resolution, payload)
+                con.executemany("DELETE FROM resource_history WHERE server_id=? AND bucket=? AND resolution=?",
+                                [(r["server_id"], r["bucket"], r["resolution"]) for r in rows])
+        with store.db() as con:
+            con.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    finally:
+        housekeeping_lock.release()
+
+
+def series(server_id, hours, now=None, requested_resolution=0):
+    now = time.time() if now is None else now
+    p = policy()
+    hours = min(hours, p["retention_days"] * 24)
+    since = now - hours * 3600
+    rows = store.rows("SELECT bucket,resolution,payload FROM resource_history WHERE server_id=? AND bucket+resolution>? AND bucket<=? ORDER BY bucket",
+                      (server_id, since, now))
+    multiple = math.lcm(*(r["resolution"] for r in rows)) if rows else p["week1_minutes"]*60
+    required = max(requested_resolution or hours*3600/240, hours*3600/2000, multiple)
+    choices = [60, 300, 600, 900, 1800, 3600, 10800, 21600, 43200, 86400, 172800, 604800]
+    resolution = next((n for n in choices if n >= required and n % multiple == 0), int(math.ceil(required/multiple)*multiple))
+    grouped = {}
+    for row in rows:
+        bucket = int(row["bucket"]//resolution*resolution)
+        grouped[bucket] = merge(grouped.get(bucket, empty()), json.loads(row["payload"]))
+    # Read the package's own aggregates, including legacy buckets. The old
+    # temperature_sum/max fields mixed unrelated sensors and must not be relabelled.
+    known = {key: {"id": key, **s} for data in grouped.values() for key, s in data["sensors"].items()
+             if remote_probe.temperature_kind({"id": key, **s}) == "cpu_package"}
+    server = store.one("SELECT snapshot FROM servers WHERE id=?", (server_id,))
+    current = json.loads(server["snapshot"]).get("metrics", {}).get("temperature", {}) if server else {}
+    selected = remote_probe.temperature_summary(current.get("sensors", []))["package_sensor_id"]
+    if not selected and known:
+        selected = min(known.values(), key=remote_probe.package_order)["id"]
+    points = []
+    for bucket, data in sorted(grouped.items()):
+        n, ln = data["n"], data["latency_n"]
+        package = data["sensors"].get(selected)
+        disks = [{"mount": mount, "percent": d["percent_sum"]/d["n"], "peak": d["percent_max"],
+                  "used_gb": d["used_sum"]/d["n"]/1e9, "free_gb": d["free_sum"]/d["n"]/1e9,
+                  "min_free_gb": d["free_min"]/1e9} for mount, d in data["disks"].items()]
+        points.append({"time": bucket, "cpu": data["cpu_sum"]/n if n else None, "cpu_peak": data["cpu_max"] if n else None,
+                       "memory": data["memory_sum"]/n if n else None, "memory_peak": data["memory_max"] if n else None,
+                       "disk": max((d["percent"] for d in disks), default=None), "disk_peak": max((d["peak"] for d in disks), default=None),
+                       "disks": disks, "latency_ms": data["latency_sum"]/ln if ln else None,
+                       "temperature": package["sum"]/package["n"] if package else None,
+                       "temperature_peak": package["celsius_max"] if package else None,
+                       "sensors": [{"id": key, "label": d["label"], "celsius": d["sum"]/d["n"], "peak": d["celsius_max"]} for key, d in data["sensors"].items()],
+                       "up_percent": 100*data["up"]/data["attempts"] if data["attempts"] else None,
+                       "attempts": data["attempts"], "samples": n})
+    return {"points": points, "resolution_seconds": resolution, "from": since, "to": now, "hours": hours,
+            "retention_days": p["retention_days"], "demo": store.DEMO, "requested_resolution": requested_resolution,
+            "temperature_source": known.get(selected, {}).get("label"), "temperature_sensor_id": selected}
+
+
+class MonitoringPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    poll_seconds: int = Field(ge=15, le=3600)
+    update_check_hours: int = Field(ge=1, le=168)
+    retention_days: int = Field(ge=1, le=730)
+    week1_minutes: int
+    week2_minutes: int
+    weeks3_4_minutes: int
+    older_minutes: int
+
+
+@router.get("/monitoring")
+def get_policy(user=Depends(admin)):
+    count = store.one("SELECT COUNT(*) AS n, MIN(bucket) AS oldest FROM resource_history")
+    with store.db() as con:
+        allocated = con.execute("PRAGMA page_count").fetchone()[0] * con.execute("PRAGMA page_size").fetchone()[0]
+        free = con.execute("PRAGMA freelist_count").fetchone()[0] * con.execute("PRAGMA page_size").fetchone()[0]
+    return {**policy(), "history_rows": count["n"], "oldest": count["oldest"], "db_bytes": allocated, "reusable_bytes": free}
+
+
+@router.put("/monitoring")
+def save_policy(body: MonitoringPolicy, user=Depends(admin)):
+    values = body.model_dump()
+    fields = ["week1_minutes", "week2_minutes", "weeks3_4_minutes", "older_minutes"]
+    choices = [{1, 5, 10, 15}, {5, 15, 30, 60}, {15, 30, 60}, {60, 180, 360}]
+    sizes = [values[k] for k in fields]
+    if any(n not in options for n, options in zip(sizes, choices)) or any(b < a or b % a for a, b in zip(sizes, sizes[1:])):
+        raise HTTPException(400, "Older tiers must use equal or coarser resolutions that are multiples of the previous tier")
+    store.execute("UPDATE settings SET value=? WHERE key='monitoring'", (json.dumps(values),))
+    # Retention applies on the next hourly sweep; no large synchronous deletion in a request.
+    return {"ok": True}
+
+
+class ServerMonitoring(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool
+    poll_seconds: int | None = Field(default=None, ge=15, le=3600)
+
+
+@router.put("/servers/{id_}/monitoring")
+def save_server_monitoring(id_: str, body: ServerMonitoring, user=Depends(admin)):
+    if not store.one("SELECT 1 FROM servers WHERE id=?", (id_,)):
+        raise HTTPException(404, "Server not found")
+    store.execute("UPDATE servers SET monitoring_enabled=?,poll_seconds=? WHERE id=?", (int(body.enabled), body.poll_seconds, id_))
+    return {"ok": True}
+
+
+@router.get("/servers/{id_}/history")
+def history(id_: str, hours: float = 6, resolution: int = 0, user=Depends(authenticated)):
+    if not math.isfinite(hours) or not 1 <= hours <= 17520:
+        raise HTTPException(400, "Choose between 1 and 17520 hours")
+    if not store.one("SELECT 1 FROM servers WHERE id=?", (id_,)):
+        raise HTTPException(404, "Server not found")
+    if resolution not in {0,60,300,600,900,1800,3600,10800,21600,43200,86400,604800}:
+        raise HTTPException(400, "Unsupported display resolution")
+    return series(id_, hours, requested_resolution=resolution)
