@@ -104,7 +104,7 @@ def save_settings(body: Settings):
     return public_config()
 
 
-def observe(server, warnings, successful=True, now=None):
+def observe(server, warnings, successful=True, now=None, unavailable=()):
     """Called once per resource sample. No network access on the poll worker."""
     now = time.time() if now is None else now
     with guard, store.db() as con:
@@ -119,7 +119,7 @@ def observe(server, warnings, successful=True, now=None):
             entities = json.loads(row['entities']) if row else {}
             if successful and row and now <= row['checked']:
                 continue  # Ignore duplicate or out-of-order observations.
-            if not successful:
+            if not successful or rule['kind'] in unavailable:
                 # Break duration continuity without re-arming an already delivered issue.
                 for entity in entities.values():
                     entity['since'] = None

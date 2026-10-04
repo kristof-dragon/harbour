@@ -152,6 +152,8 @@ def test_manual_and_background_resource_checks_never_overlap(client, monkeypatch
 @pytest.mark.parametrize('outcome', ['success', 'failure'])
 def test_late_response_from_changed_or_removed_host_is_discarded(client, monkeypatch, change, outcome):
     metrics = prepare()
+    metrics['cpu_counters'] = {'values': [100, 0, 0, 900, 0, 0, 0, 0],
+                               'boot_id': 'old-host', 'cores': 4, 'uptime': 1000}
     started, release = threading.Event(), threading.Event()
     def request(server, payload, cancel=None):
         started.set(); assert release.wait(2)  # Deliberately ignores cancellation.
@@ -181,6 +183,7 @@ def test_late_response_from_changed_or_removed_host_is_discarded(client, monkeyp
     else:
         assert server['error'] is None
         assert server['checked'] == (None if change == 'connection' else before)
+        assert '_cpu_baseline' not in json.loads(server['snapshot'])
 
 
 def test_resume_new_host_and_global_interval_changes(client, monkeypatch):

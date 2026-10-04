@@ -1,5 +1,11 @@
 'use strict';
-const resourceMeta = {cpu:{label:'CPU',unit:'%',color:'#2baf91',icon:'cpu'},memory:{label:'Memory',unit:'%',color:'#668bee',icon:'memory'},disk:{label:'Disk',unit:'%',color:'#bc86d6',icon:'disk'},temperature:{label:'CPU / SoC',unit:'°C',color:'#e89548',icon:'temperature'}};
+const resourceMeta = {cpu:{label:'CPU',unit:'%',color:'#2baf91',icon:'cpu'},memory:{label:'Memory',unit:'%',color:'#668bee',icon:'memory'},disk:{label:'Disk',unit:'%',color:'#bc86d6',icon:'disk'},temperature:{label:'CPU / SoC',unit:'°C',color:'#e89548',icon:'temperature'},load:{label:'Load average',unit:'',color:'#54bcca',icon:'activity'}};
+const loadKeys=['load1','load5','load15'];
+const seriesMeta={...resourceMeta,...Object.fromEntries(loadKeys.map((key,i)=>[key,{label:`Load · ${[1,5,15][i]} min`,short:`${[1,5,15][i]} min`,unit:'',color:['#54bcca','#8d9cf4','#e89548'][i],dash:['','7 4','2 4'][i]}]))};
+const resourceSeries=keys=>keys.flatMap(key=>key==='load'?loadKeys:[key]);
+const resourceValue=(value,key)=>value==null?'—':loadKeys.includes(key)?value.toFixed(2):percent(value);
+const loadLegend=()=>`<div class="load-legend">${loadKeys.map(key=>`<span style="--series:${seriesMeta[key].color}"><i class="${key}"></i>${seriesMeta[key].short}</span>`).join('')}</div>`;
+const loadHelp=()=>help('Load average','Linux load averages count tasks running, runnable or in uninterruptible wait (often I/O), over 1, 5 and 15 minutes. They are not percentages or disk throughput. Compare with the host’s logical CPU count, and with CPU usage, when interpreting demand.');
 const hourChoices=[1,3,6,12,24,48,168,336,672,2160,4320,8760,17520];
 let cardHours=Number(localStorage.getItem('harbour-card-hours'))||6;
 if(!hourChoices.includes(cardHours))cardHours=6;
@@ -18,36 +24,44 @@ function serverConnection(s,withHost=false){
 }
 function resourceCards(s){
   const m=s.metrics,t=s.thresholds,disk=cardDisk(s),temp=m.temperature||{};
-  const values={cpu:[m.cpu,`${m.cores??'—'} cores`,s.stale?'Last known usage':'Host CPU'],memory:[m.memory.percent,`${gb(m.memory.used)} / ${gb(m.memory.total)} GB`,'RAM'],disk:[disk?.percent,disk?`${disk.mount} · ${capacity(disk.used)} / ${capacity(disk.total)}`:'No volume selected',disk?`${capacity(disk.free)} free`:''],temperature:[temp.package,temp.package==null?'No CPU / SoC sensor':temp.package_label,temp.package_count>1?`${temp.package_count} packages · first shown`:temp.package==null?'Unavailable':'Selected sensor']};
+  const cpuPeriod=m.cpu==null?'Waiting for next poll':m.cpu_sample_seconds>0?`${duration(Math.round(m.cpu_sample_seconds))} average`:s.stale?'Last known usage':'Host CPU';
+  const values={cpu:[m.cpu,`${m.cores??'—'} cores`,cpuPeriod],memory:[m.memory.percent,`${gb(m.memory.used)} / ${gb(m.memory.total)} GB`,'RAM'],disk:[disk?.percent,disk?`${disk.mount} · ${capacity(disk.used)} / ${capacity(disk.total)}`:'No volume selected',disk?`${capacity(disk.free)} free`:''],temperature:[temp.package,temp.package==null?'No CPU / SoC sensor':temp.package_label,temp.package_count>1?`${temp.package_count} packages · first shown`:temp.package==null?'Unavailable':'Selected sensor']};
   return Object.entries(values).map(([key,[value,detail,aside]])=>{
     const meta=resourceMeta[key],warn=key==='disk'?!!disk?.warning:s.warnings.some(w=>key==='temperature'?w.kind==='cpu_package':w.id===key||w.id.startsWith(key+':'));
     return `<article data-key="metric:${key}" class="metric ${warn?'warning':''}"><div class="metric-label">${icon(meta.icon)}${meta.label}<span class="tag ${warn?'red':''}">${warn?'Attention':value==null?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="metric-value">${value==null?'—':percent(value)}<span>${value==null?'':meta.unit}</span></div><div class="metric-bottom"><span>${e(detail)}</span><span>${e(aside)}</span></div><button class="card-chart" type="button" data-action="history" data-resource="${key}" aria-label="Explore ${meta.label} history"><span data-card-chart="${key}" data-preserve-children>Loading history…</span></button>${key==='temperature'&&temp.sensors?.length?`<details class="sensor-details"><summary>${count(temp.sensors.length,'sensor')}</summary>${temp.sensors.map(sensor=>`<div class="between ${sensor.kind!=='cpu_auxiliary'&&sensor.celsius>=t.temperature?'sensor-warning':''}"><span>${e(sensor.label)}${sensor.kind==='cpu_auxiliary'?' · separate reading':''}</span><b>${percent(sensor.celsius)}°C</b></div>`).join('')}</details>`:''}</article>`;
-  }).join('');
+  }).join('')+loadResourceCard(s);
+}
+function loadResourceCard(s){
+  const m=s.metrics,available=loadKeys.some(key=>m[key]!=null);
+  return `<article data-key="metric:load" class="metric load-metric"><div><div class="metric-label">${icon('activity')}Load average<span class="tag">${!available?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="load-values">${loadKeys.map(key=>`<div><small style="color:${seriesMeta[key].color}">${seriesMeta[key].short}</small><b>${resourceValue(m[key],key)}</b></div>`).join('')}</div><div class="metric-bottom">${m.cores??'—'} logical CPUs · running, runnable or waiting on I/O</div></div><button class="card-chart" type="button" data-action="history" data-resource="load" aria-label="Explore Load average history"><span data-card-chart="load" data-preserve-children>Loading history…</span></button></article>`;
 }
 function graphValue(point,key){return point[historyState.stat==='peak'?key+'_peak':key];}
 function chartSVG(data,keys,{mini=false}={}){
+  keys=resourceSeries(keys);
   if(!data?.points.length)return `<span class="history-empty">No samples in this period</span>`;
   const width=mini?240:900,height=mini?55:310,left=mini?0:55,right=mini?240:840,top=mini?3:30,bottom=mini?52:260;
   const vals=keys.flatMap(k=>data.points.map(p=>mini?p[k]:graphValue(p,k))).filter(n=>n!=null);
-  if(!vals.length)return `<span class="history-empty">${keys[0]==='temperature'?'CPU package sensor unavailable':'No successful readings'}</span>`;
-  const temps=keys.includes('temperature'),percents=keys.some(k=>k!=='temperature');
+  if(!vals.length)return `<span class="history-empty">${keys[0]==='temperature'?'CPU package sensor unavailable':loadKeys.includes(keys[0])?'No load readings in this period':'No successful readings'}</span>`;
+  const temps=keys.includes('temperature'),loads=keys.some(k=>loadKeys.includes(k)),percents=keys.some(k=>k!=='temperature'&&!loadKeys.includes(k));
   const tv=data.points.map(p=>mini?p.temperature:graphValue(p,'temperature')).filter(n=>n!=null);
   const tMin=Math.min(0,Math.floor(Math.min(0,...tv)/10)*10),tMax=Math.max(100,Math.ceil(Math.max(0,...tv)/10)*10);
+  const loadMax=Math.max(1,...vals),loadStep=10**Math.floor(Math.log10(loadMax))/2,lMax=Math.ceil(loadMax/loadStep)*loadStep;
   const x=time=>left+Math.max(0,Math.min(1,(time-data.from)/(data.to-data.from)))*(right-left);
-  const y=(v,k)=>bottom-((v-(k==='temperature'?tMin:0))/((k==='temperature'?tMax-tMin:100)))*(bottom-top);
+  const y=(v,k)=>bottom-((v-(k==='temperature'?tMin:0))/(k==='temperature'?tMax-tMin:loadKeys.includes(k)?lMax:100))*(bottom-top);
   let grid='';
   if(!mini){
     for(let i=0;i<=4;i++){
       const py=top+(bottom-top)*i/4;
       grid+=`<line class="chart-grid" x1="${left}" x2="${right}" y1="${py}" y2="${py}"/>`;
       if(percents)grid+=`<text x="${left-9}" y="${py+4}" text-anchor="end">${100-i*25}%</text>`;
+      if(loads)grid+=`<text x="${left-9}" y="${py+4}" text-anchor="end">${Number((lMax*(1-i/4)).toFixed(2))}</text>`;
       if(temps)grid+=`<text x="${right+9}" y="${py+4}">${Math.round(tMax-(tMax-tMin)*i/4)}°</text>`;
     }
     for(let i=0;i<=4;i++){
       const stamp=data.from+(data.to-data.from)*i/4,date=new Date(stamp*1000);
       grid+=`<text x="${left+(right-left)*i/4}" y="${bottom+24}" text-anchor="middle">${e(date.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}))}</text>${data.hours>24?`<text x="${left+(right-left)*i/4}" y="${bottom+41}" text-anchor="middle">${e(date.toLocaleDateString([],{month:'short',day:'numeric'}))}</text>`:''}`;
     }
-    grid+=`<text x="${left}" y="15">${percents?'Utilisation (%)':''}</text>${temps?`<text x="${right}" y="15" text-anchor="end">Temperature (°C)</text>`:''}`;
+    grid+=`<text x="${left}" y="15">${loads?'Load average':percents?'Utilisation (%)':''}</text>${temps?`<text x="${right}" y="15" text-anchor="end">Temperature (°C)</text>`:''}`;
   }
   const pollGap=(data.poll_seconds||current()?.poll_seconds||60)*3.5;
   const legacyGap=Math.max(data.resolution_seconds*1.75,pollGap);
@@ -62,9 +76,9 @@ function chartSVG(data,keys,{mini=false}={}){
       previous=last;previousTimed=p.sample_last!=null;
     }
     if(segment.length)segments.push(segment);
-    return segments.map(s=>s.length===1?`<circle cx="${s[0][0]}" cy="${s[0][1]}" r="2.5" fill="${resourceMeta[key].color}"/>`:`<polyline fill="none" stroke="${resourceMeta[key].color}" stroke-width="${mini?2:2.3}" points="${s.map(p=>p.join(',')).join(' ')}"/>`).join('');
+    return segments.map(s=>s.length===1?`<circle cx="${s[0][0]}" cy="${s[0][1]}" r="2.5" fill="${seriesMeta[key].color}"/>`:`<polyline fill="none" stroke="${seriesMeta[key].color}" stroke-dasharray="${seriesMeta[key].dash||''}" stroke-width="${mini?2:2.3}" points="${s.map(p=>p.join(',')).join(' ')}"/>`).join('');
   }).join('');
-  const svg=`<svg class="history-chart ${mini?'mini-chart':''}" ${mini?'':`data-chart-keys="${keys.join(',')}" tabindex="0"`} viewBox="0 0 ${width} ${height}" role="img" aria-label="${e(keys.map(k=>resourceMeta[k].label).join(', '))} history, ${data.hours} hours, ${resolutionLabel(data.resolution_seconds)} buckets${mini?'':'. Hover, tap or use left and right arrows to inspect readings.'}">${grid}${lines}${mini?'':'<line class="chart-cursor" x1="55" x2="55" y1="30" y2="260" visibility="hidden"/>'}</svg>`;
+  const svg=`<svg class="history-chart ${mini?'mini-chart':''}" ${mini?'preserveAspectRatio="none"':`data-chart-keys="${keys.join(',')}" tabindex="0"`} viewBox="0 0 ${width} ${height}" role="img" aria-label="${e(keys.map(k=>seriesMeta[k].label).join(', '))} history, ${data.hours} hours, ${resolutionLabel(data.resolution_seconds)} buckets${mini?'':'. Hover, tap or use left and right arrows to inspect readings.'}">${grid}${lines}${mini?'':'<line class="chart-cursor" x1="55" x2="55" y1="30" y2="260" visibility="hidden"/>'}</svg>`;
   return mini?svg:`<div class="history-plot">${svg}<div class="chart-tooltip" role="status" hidden></div></div>`;
 }
 function showChartReading(svg,time){
@@ -75,7 +89,7 @@ function showChartReading(svg,time){
   const x=55+Math.max(0,Math.min(1,(point.time-data.from)/(data.to-data.from)))*785;
   const line=$('.chart-cursor',svg);line.setAttribute('x1',x);line.setAttribute('x2',x);line.setAttribute('visibility','visible');
   const bubble=$('.chart-tooltip',svg.parentElement);bubble.hidden=false;
-  updateHTML(bubble,`<b>${e(new Date(point.time*1000).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}))}</b><small>${resolutionLabel(data.resolution_seconds)} · ${historyState.stat==='peak'?'Peaks':'Averages'}</small>${keys.map(key=>`<div><span style="color:${resourceMeta[key].color}">${resourceMeta[key].label}</span><strong>${graphValue(point,key)==null?'No sample':percent(graphValue(point,key))+resourceMeta[key].unit}</strong></div>`).join('')}`);
+  updateHTML(bubble,`<b>${e(new Date(point.time*1000).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}))}</b><small>${resolutionLabel(data.resolution_seconds)} · ${historyState.stat==='peak'?'Peaks':'Averages'}</small>${keys.map(key=>`<div><span style="color:${seriesMeta[key].color}">${seriesMeta[key].label}</span><strong>${graphValue(point,key)==null?'No sample':resourceValue(graphValue(point,key),key)+seriesMeta[key].unit}</strong></div>`).join('')}`);
   const rect=svg.getBoundingClientRect(),plot=svg.parentElement.getBoundingClientRect();
   const location=new DOMPoint(x,30).matrixTransform(svg.getScreenCTM());
   bubble.style.left=Math.max(4,Math.min(location.x-plot.left+12,plot.width-bubble.offsetWidth-4))+'px';
@@ -118,19 +132,28 @@ function openHistory(resource){
   modal(`${e(current().name)} · Resource history`,`<div id="history-explorer"></div>`,true);
   $('.modal').classList.add('history-modal');renderHistory();fetchHistory();
 }
+function loadHistoryChart(data){
+  return `<section class="load-history"><div class="load-history-heading"><h3>Load average ${loadHelp()}</h3>${loadLegend()}</div>${chartSVG(data,['load'])}</section>`;
+}
+function combinedHistoryChart(data,keys){
+  const other=keys.filter(key=>key!=='load');
+  if(!keys.includes('load'))return chartSVG(data,other);
+  return other.length?`<div class="history-combined">${chartSVG(data,other)}${loadHistoryChart(data)}</div>`:loadHistoryChart(data);
+}
 function renderHistory(){
   const root=$('#history-explorer');if(!root)return;
   const h=historyState,data=h.data,keys=[...h.selected];
   root.innerHTML=`<div class="history-controls"><label>Time window<select id="history-hours">${hourOptions(h.hours)}</select></label><label>Display resolution<select id="history-resolution">${[0,60,300,600,900,1800,3600,10800,21600,43200,86400,604800].map(r=>`<option value="${r}" ${r===h.resolution?'selected':''}>${r?resolutionLabel(r):'Automatic'}</option>`).join('')}</select></label><label>Values<select id="history-stat"><option value="average" ${h.stat==='average'?'selected':''}>Averages</option><option value="peak" ${h.stat==='peak'?'selected':''}>Peaks</option></select></label><label>Disk volume<select id="history-disk"><option value="">Card selection</option>${[...new Set([...(current()?.metrics?.disks||[]).map(d=>d.mount),...(data?.disk_mounts||[])])].map(m=>`<option value="${e(m)}" ${m===h.disk?'selected':''}>${e(m)}</option>`).join('')}</select></label>${button('history-refresh','Refresh','refresh','small')}</div>
     <div class="history-modes segmented" aria-label="History layout">${[['tabs','Resource tabs'],['table','Table'],['side','Side by side'],['combined','Combined']].map(([mode,name])=>button('history-mode',name,'',h.mode===mode?'active':'',`data-mode="${mode}"`)).join('')}</div>
-    ${h.mode==='tabs'?`<div class="resource-legend">${Object.entries(resourceMeta).map(([k,m])=>button('history-tab',m.label,m.icon,h.resource===k?'active':'ghost',`data-resource="${k}"`)).join('')}</div>`:`<div class="resource-legend">${Object.entries(resourceMeta).map(([k,m])=>`<label style="--series:${m.color}"><input type="checkbox" data-history-resource="${k}" ${h.selected.has(k)?'checked':''}><i></i>${m.label}${k==='temperature'?' (°C)':' (%)'}</label>`).join('')}</div>`}
+    ${h.mode==='tabs'?`<div class="resource-legend">${Object.entries(resourceMeta).map(([k,m])=>button('history-tab',m.label,m.icon,h.resource===k?'active':'ghost',`data-resource="${k}"`)).join('')}</div>`:`<div class="resource-legend">${Object.entries(resourceMeta).map(([k,m])=>`<label style="--series:${m.color}"><input type="checkbox" data-history-resource="${k}" ${h.selected.has(k)?'checked':''}><i></i>${m.label}${m.unit?' ('+m.unit+')':''}</label>`).join('')}</div>`}
     <p class="hint history-caption">${data?`${data.hours} hours · actual resolution <b>${resolutionLabel(data.resolution_seconds)}</b> · ${count(data.points.length,'bucket')} · times in ${e(Intl.DateTimeFormat().resolvedOptions().timeZone)}.${data.requested_resolution&&data.resolution_seconds>data.requested_resolution?' Stored resolution or the 2,000-point display limit requires coarser buckets.':''}`:'Loading stored readings…'}</p>
-    <div class="history-content">${!data?'<div class="empty">Loading history…</div>':h.mode==='tabs'?`<h3>${resourceMeta[h.resource].label}</h3>${chartSVG(data,[h.resource])}`:!keys.length?'<div class="empty">Select at least one resource.</div>':h.mode==='table'?historyTable(data,keys):h.mode==='side'?`<div class="history-grid">${keys.map(k=>`<article><h3>${icon(resourceMeta[k].icon)}${resourceMeta[k].label}</h3>${chartSVG(data,[k])}</article>`).join('')}</div>`:chartSVG(data,keys)}</div>
-    <p class="hint">${data?.demo?'Synthetic demo history. ':''}Disk: ${e(h.disk||'highest usage among volumes selected for cards')}; CPU temperature uses ${e(data?.temperature_source||'the package sensor')}. Lines bridge up to two missed polls; longer gaps remain. Missing values are not stored or included in averages. Peaks remain available after consolidation.</p><div class="form-error" role="alert"></div>`;
+    <div class="history-content">${!data?'<div class="empty">Loading history…</div>':h.mode==='tabs'?h.resource==='load'?loadHistoryChart(data):`<h3>${resourceMeta[h.resource].label}</h3>${chartSVG(data,[h.resource])}`:!keys.length?'<div class="empty">Select at least one resource.</div>':h.mode==='table'?historyTable(data,keys):h.mode==='side'?`<div class="history-grid">${keys.map(k=>`<article><h3>${icon(resourceMeta[k].icon)}${resourceMeta[k].label}</h3>${k==='load'?loadLegend():''}${chartSVG(data,[k])}</article>`).join('')}</div>`:combinedHistoryChart(data,keys)}</div>
+    <p class="hint">${data?.demo?'Synthetic demo history. ':''}${h.mode==='tabs'&&h.resource==='load'?`Load uses a task-count scale · ${current()?.metrics?.cores??'—'} logical CPUs on this host.`:`Disk: ${e(h.disk||'highest usage among volumes selected for cards')}; CPU temperature uses ${e(data?.temperature_source||'the package sensor')}. Load uses a separate task-count scale.`} Lines bridge up to two missed polls; longer gaps remain. Missing values are excluded from averages. Peaks remain available after consolidation.</p><div class="form-error" role="alert"></div>`;
 }
 function historyTable(data,keys){
+  keys=resourceSeries(keys);
   if(!data.points.length)return '<div class="empty">No readings in this window.</div>';
-  return `<div class="history-table-wrap" tabindex="0" aria-label="Scrollable resource readings"><table class="history-table"><thead><tr><th>Bucket start</th>${keys.map(k=>`<th>${resourceMeta[k].label} (${resourceMeta[k].unit})</th>`).join('')}<th>Disk used / free</th><th>SSH (ms)</th><th>Samples / checks</th></tr></thead><tbody>${[...data.points].reverse().map(p=>`<tr><td>${e(new Date(p.time*1000).toLocaleString())}</td>${keys.map(k=>`<td>${graphValue(p,k)==null?'—':percent(graphValue(p,k))}</td>`).join('')}<td>${p.disks.map(d=>`<div>${e(d.mount)}: ${capacity(d.used_gb*1e9)} / ${capacity(d.free_gb*1e9)}</div>`).join('')||'—'}</td><td>${p.latency_ms==null?'—':percent(p.latency_ms)}</td><td>${p.samples} / ${p.attempts}</td></tr>`).join('')}</tbody></table></div>`;
+  return `<div class="history-table-wrap" tabindex="0" aria-label="Scrollable resource readings"><table class="history-table"><thead><tr><th>Bucket start</th>${keys.map(k=>`<th>${seriesMeta[k].label}${seriesMeta[k].unit?' ('+seriesMeta[k].unit+')':''}</th>`).join('')}<th>Disk used / free</th><th>SSH (ms)</th><th>Samples / checks</th></tr></thead><tbody>${[...data.points].reverse().map(p=>`<tr><td>${e(new Date(p.time*1000).toLocaleString())}</td>${keys.map(k=>`<td>${resourceValue(graphValue(p,k),k)}</td>`).join('')}<td>${p.disks.map(d=>`<div>${e(d.mount)}: ${capacity(d.used_gb*1e9)} / ${capacity(d.free_gb*1e9)}</div>`).join('')||'—'}</td><td>${p.latency_ms==null?'—':percent(p.latency_ms)}</td><td>${p.samples} / ${p.attempts}</td></tr>`).join('')}</tbody></table></div>`;
 }
 async function fetchHistory(){
   const seq=++historyState.sequence,{server,hours,resolution,disk}=historyState;
@@ -146,7 +169,7 @@ function serverSettings(s){
   const fields=[['cpu','CPU %',1,100],['memory','Memory %',1,100],['disk','Disk %',1,100],['disk_free_gb','Free space GB',0,1000000],['temperature','Temperature °C',1,180]];
   modal(`<span class="server-settings-name">${e(s.name)}</span><input name="name" aria-label="Server name" value="${e(s.name)}" maxlength="80" required hidden>${iconButton('edit-server-name','Edit server name','pencil')}<span class="settings-context">settings</span>`,
     `<form id="server-settings-form" data-id="${e(s.id)}">
-      <section class="settings-section"><div class="settings-section-heading"><h3>${fieldCaption('Warning thresholds','Global inherits the workspace limits. Custom sets limits for this server. Disk warnings trigger on either usage or free space for volumes with Warn enabled. CPU and memory use the latest sample. CPU temperature uses package / SoC sensors; other device sensors warn separately.')}</h3><input type="hidden" name="threshold_mode" value="${mode}">${slidingControl('threshold-mode','Threshold source',[['global','Global'],['custom','Custom']],mode,'settings-choice','data-field="threshold_mode"')}</div>
+      <section class="settings-section"><div class="settings-section-heading"><h3>${fieldCaption('Warning thresholds','Global inherits the workspace limits. Custom sets limits for this server. Disk warnings trigger on either usage or free space for volumes with Warn enabled. CPU uses the average between successful polls; memory uses the latest reading. CPU temperature uses package / SoC sensors; other device sensors warn separately.')}</h3><input type="hidden" name="threshold_mode" value="${mode}">${slidingControl('threshold-mode','Threshold source',[['global','Global'],['custom','Custom']],mode,'settings-choice','data-field="threshold_mode"')}</div>
       <div class="threshold-row">${fields.map(([key,label,min,max])=>`<label>${label}<input name="${key}" type="number" min="${min}" max="${max}" step="0.1" value="${s.thresholds[key]}" required ${s.override?'':'disabled'}></label>`).join('')}</div></section>
       <section class="settings-section settings-checks"><div class="settings-type"><h3>${fieldCaption('Server type','Plain servers collect resources only. Docker hosts also discover containers, check images and support Docker actions.')}</h3><input type="hidden" name="server_type" value="${s.server_type}">${slidingControl('settings-server-type','Server type',[['docker','Docker host'],['plain','Plain server']],s.server_type,'settings-choice','data-field="server_type"')}</div>
       <label class="settings-poll">${fieldCaption('Poll interval (s)','Leave blank to inherit the global interval. Checks never overlap on a host; pausing keeps history and permits manual refresh.')}<input aria-label="Polling interval (seconds)" name="poll_seconds" type="number" min="15" max="3600" placeholder="Global" title="Current effective interval: ${s.poll_seconds}s" value="${s.poll_override??''}"></label><label class="check-line settings-enabled"><input name="enabled" type="checkbox" ${s.monitoring_enabled?'checked':''}>Monitoring enabled</label></section>

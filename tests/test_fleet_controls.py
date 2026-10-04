@@ -126,18 +126,26 @@ def test_plain_creation_and_refresh_payload(client,monkeypatch):
     assert saved['services']==[] and saved['metrics']['docker'] is None
 
 
-def test_mount_discovery_keeps_equal_capacity_mounts_and_plain_metrics_skip_docker(monkeypatch):
+@pytest.mark.parametrize('load', [(1.25, 2.5, 3.75), None])
+def test_mount_discovery_keeps_equal_capacity_mounts_and_plain_metrics_skip_docker(monkeypatch, load):
     original_open=builtins.open
     def open_(path,*args,**kwargs):
         data={'/proc/stat':'cpu 100 0 0 100 0 0 0 0\n','/proc/meminfo':'MemTotal: 1000 kB\nMemAvailable: 500 kB\n','/proc/mounts':'/dev/root / ext4 rw 0 0\n/dev/root /home ext4 rw 0 0\n','/proc/uptime':'1000 0\n','/etc/os-release':'PRETTY_NAME="Test Linux"\n'}
         return io.StringIO(data[path]) if path in data else original_open(path,*args,**kwargs)
     monkeypatch.setattr(builtins,'open',open_)
-    monkeypatch.setattr(remote_probe.time,'sleep',lambda _:None)
+    monkeypatch.setattr(remote_probe.time,'sleep',lambda _:pytest.fail('Resource collection must not pause for a CPU sample'))
     monkeypatch.setattr(remote_probe.os,'statvfs',lambda _:SimpleNamespace(f_blocks=100,f_bavail=60,f_bfree=60,f_frsize=4096))
     monkeypatch.setattr(remote_probe,'run',lambda *a,**kw:pytest.fail('Plain metrics executed Docker'))
     monkeypatch.setattr(remote_probe,'timezone_info',lambda:{})
+    def getloadavg():
+        if load is None:
+            raise OSError('Load average unavailable')
+        return load
+    monkeypatch.setattr(remote_probe.os, 'getloadavg', getloadavg)
     result=remote_probe.metrics(docker=False)
+    assert result['cpu'] is None and result['cpu_counters']['values'] == [100, 0, 0, 100, 0, 0, 0, 0]
     assert [d['mount'] for d in result['disks']]==['/','/home'] and result['docker'] is None
+    assert tuple(result[key] for key in ('load1', 'load5', 'load15')) == (load or (None, None, None))
 
 
 def test_order_persists_and_requires_complete_unique_list(client):

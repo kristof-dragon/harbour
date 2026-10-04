@@ -207,13 +207,25 @@ def inventory():
 
 
 def metrics(docker=True):
-    def cpu():
-        with open("/proc/stat") as f:
-            values = [int(v) for v in f.readline().split()[1:9]]
-        return sum(values), values[3] + values[4]
-    first = cpu()
-    time.sleep(0.35)
-    second = cpu()
+    with open("/proc/stat") as f:
+        # guest/guest_nice are already included in user/nice; only use the
+        # first eight counters. Harbour keeps the baseline between polls.
+        values = [int(v) for v in f.readline().split()[1:9]]
+        boot_time = next((line.split()[1] for line in f if line.startswith('btime ')), None)
+    with open("/proc/uptime") as f:
+        uptime = float(f.read().split()[0])
+    try:
+        with open('/proc/sys/kernel/random/boot_id') as f:
+            boot_id = f.read().strip()
+    except OSError:
+        boot_id = None
+    boot_id = boot_id or ('btime:' + boot_time if boot_time else None)
+    cores = os.cpu_count()
+    counters = {'values': values, 'boot_id': boot_id, 'uptime': uptime, 'cores': cores}
+    try:
+        load = os.getloadavg()
+    except OSError:
+        load = (None, None, None)
     with open("/proc/meminfo") as f:
         mem = {line.split(":")[0]: int(line.split()[1]) * 1024 for line in f}
     total = mem["MemTotal"]
@@ -239,8 +251,6 @@ def metrics(docker=True):
                           "percent": round(100 * used / max(used + free, 1), 1)})
         except OSError:
             continue
-    with open("/proc/uptime") as f:
-        uptime = float(f.read().split()[0])
     os_name = "Linux"
     try:
         with open("/etc/os-release") as f:
@@ -249,8 +259,9 @@ def metrics(docker=True):
                     os_name = line.strip().split("=", 1)[1].strip('"')
     except OSError:
         pass
-    return {"cpu": round(100 * (1 - (second[1] - first[1]) / max(second[0] - first[0], 1)), 1),
-            "cores": os.cpu_count(), "memory": {"total": total, "used": total - available,
+    return {"cpu": None, "cpu_counters": counters,
+            **dict(zip(("load1", "load5", "load15"), load)),
+            "cores": cores, "memory": {"total": total, "used": total - available,
             "percent": round(100 * (total - available) / total, 1)}, "disks": disks,
             "uptime": uptime, "os": os_name, "kernel": os.uname().release,
             "temperature": temperatures(), "timezone": timezone_info(),

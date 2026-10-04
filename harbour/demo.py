@@ -82,6 +82,8 @@ def seed_history():
         if not metrics:
             continue
         metrics.setdefault("kernel", "6.8.0-79-generic")
+        for key, factor in (("load1", 1), ("load5", .9), ("load15", .8)):
+            metrics.setdefault(key, round(metrics["cpu"] / 100 * metrics["cores"] * factor, 2))
         sensors = [] if server["id"] == "edge" else [{"id": "demo:cpu", "label": "CPU package", "celsius": 48.2 if server["id"] != "luna" else 57.5, "cpu": True}, {"id": "demo:nvme", "label": "NVMe composite", "celsius": 39.4, "cpu": False}]
         metrics["temperature"] = remote_probe.temperature_summary(metrics.get("temperature", {}).get("sensors", sensors))
         store.execute("UPDATE servers SET snapshot=?,connection_status='up',latency_ms=?,last_attempt=COALESCE(last_attempt,?) WHERE id=?",
@@ -95,6 +97,8 @@ def seed_history():
                 sample = json.loads(json.dumps(metrics))
                 phase = i / 13
                 sample["cpu"] = max(.5, min(100, metrics["cpu"] + 10*math.sin(phase) + 4*math.sin(i/3)))
+                for key, amplitude, period in (("load1", .6, 13), ("load5", .35, 18), ("load15", .15, 30)):
+                    sample[key] = round(max(0, metrics[key] + amplitude * math.sin(i / period)), 2)
                 sample["memory"]["percent"] = max(1, metrics["memory"]["percent"] + 3*math.sin(i/40))
                 sample["memory"]["used"] = sample["memory"]["total"]*sample["memory"]["percent"]/100
                 for sensor in sample["temperature"]["sensors"]:

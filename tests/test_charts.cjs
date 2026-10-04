@@ -16,3 +16,23 @@ assert.equal((image.match(/<polyline /g)||[]).length,1,'Bucket boundaries must n
 image=svg([point(0,null),point(60,null)]);
 assert.match(image,/No successful readings/);
 console.log('PASS: chart continuity across two missed polls; longer gaps and missing readings preserved');
+// Load shares one count axis across all three periods, including values above 100.
+context.data=data([point(0,20),{...point(60,20),load1:0,load5:.15,load15:110},
+ { ...point(120,20),load1:4,load5:1.5,load15:120}]);
+image=vm.runInContext('chartSVG(data,["load"])',context);
+assert.equal((image.match(/<polyline /g)||[]).length,3);
+assert.match(image,/data-chart-keys="load1,load5,load15"/);
+assert.match(image,/Load · 1 min, Load · 5 min, Load · 15 min/);
+assert.doesNotMatch(image,/%|NaN|undefined/);
+for(const match of image.matchAll(/points="([^"]+)"/g)){
+ for(const pair of match[1].split(' ')){
+  const y=Number(pair.split(',')[1]);assert.ok(y>=30&&y<=260,'Load must fit its own scale');
+ }
+}
+context.data=data([point(0,20),point(60,30)]);
+assert.match(vm.runInContext('chartSVG(data,["load"])',context),/No load readings/);
+context.data=data([{...point(0,20),load1:0,load5:0,load15:0}]);
+image=vm.runInContext('chartSVG(data,["load"],{mini:true})',context);
+assert.equal((image.match(/<circle /g)||[]).length,3);
+assert.doesNotMatch(image,/NaN/);
+console.log('PASS: three load series, independent count scale, zero and legacy missing readings');

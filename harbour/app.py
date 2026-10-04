@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from . import __version__, auth, demo, history, notifications, polling, remote_probe, ssh, store, volumes
+from . import __version__, auth, cpu, demo, history, notifications, polling, remote_probe, ssh, store, volumes
 from .auth import authenticated, admin
 
 pool = ThreadPoolExecutor(max_workers=4)
@@ -171,6 +171,16 @@ def poll_resources(server, lock, cancel=None, background=False, raise_errors=Fal
                 return
             snapshot = json.loads(row['snapshot'])
             metrics = result['metrics']
+            if 'cpu_counters' in metrics:
+                counters = metrics.pop('cpu_counters')
+                baseline = snapshot.get('_cpu_baseline', {})
+                signature = connection_signature(dict(row))
+                previous = baseline.get('counters') if baseline.get('connection') == signature else None
+                metrics['cpu'], metrics['cpu_sample_seconds'] = cpu.usage(previous, counters)
+                snapshot['_cpu_baseline'] = {'connection': signature, 'counters': counters if cpu.valid(counters) else None}
+            else:
+                # Synthetic/legacy percentage readings cannot seed a counter interval.
+                snapshot.pop('_cpu_baseline', None)
             metrics['docker'] = snapshot.get('docker', snapshot.get('metrics', {}).get('docker')) if row['server_type'] == 'docker' else None
             snapshot['metrics'] = metrics
             if row['server_type'] == 'plain':
@@ -401,7 +411,7 @@ def server_warnings(server, snapshot, threshold):
     if metrics:
         metrics["temperature"] = remote_probe.temperature_summary(metrics.get("temperature", {}).get("sensors", []))
         for key, value in (("cpu", metrics["cpu"]), ("memory", metrics["memory"]["percent"])):
-            if value >= threshold[key]:
+            if value is not None and value >= threshold[key]:
                 warnings.append({"id": key, "title": key.capitalize() + " usage is high", "detail": f"{value:.1f}% used · threshold {threshold[key]}%"})
         metrics["disks"] = volumes.decorate(server, metrics["disks"], threshold)
         for disk in metrics["disks"]:
@@ -426,8 +436,11 @@ def observe_notifications(server_id, successful=True):
         server = get_server(server_id)
         if successful and not server['checked']:
             return
-        warnings = server_warnings(server, json.loads(server['snapshot']), thresholds_for(server))[0] if successful else []
-        notifications.observe(server, warnings, successful, now=server['checked'] if successful else None)
+        snapshot = json.loads(server['snapshot'])
+        warnings = server_warnings(server, snapshot, thresholds_for(server))[0] if successful else []
+        unavailable = {'cpu'} if snapshot.get('metrics', {}).get('cpu') is None else set()
+        notifications.observe(server, warnings, successful, now=server['checked'] if successful else None,
+                              unavailable=unavailable)
     except Exception:
         # Notification storage must never turn a successful resource poll into a failure.
         import logging
@@ -445,13 +458,16 @@ def clear_resolved_warning_dismissals(server_id, warnings=None):
     records = store.rows("SELECT user_id,service_id,digest FROM dismissals WHERE server_id=? AND service_id LIKE 'warning:%'", (server_id,))
     if not records:
         return
+    server = store.one('SELECT * FROM servers WHERE id=?', (server_id,))
+    if not server:
+        return
+    snapshot = json.loads(server['snapshot'])
     if warnings is None:
-        server = store.one('SELECT * FROM servers WHERE id=?', (server_id,))
-        if not server:
-            return
-        warnings, _ = server_warnings(server, json.loads(server['snapshot']), thresholds_for(server))
+        warnings, _ = server_warnings(server, snapshot, thresholds_for(server))
     active = {warning_notification(w) for w in warnings}
-    expired = [(r['user_id'], server_id, r['service_id'], r['digest']) for r in records if (r['service_id'], r['digest']) not in active]
+    expired = [(r['user_id'], server_id, r['service_id'], r['digest']) for r in records
+               if (r['service_id'], r['digest']) not in active
+               and not (r['service_id'] == 'warning:cpu' and snapshot.get('metrics', {}).get('cpu') is None)]
     if expired:
         with store.db() as con:
             con.executemany('DELETE FROM dismissals WHERE user_id=? AND server_id=? AND service_id=? AND digest=?', expired)
@@ -459,6 +475,7 @@ def clear_resolved_warning_dismissals(server_id, warnings=None):
 
 def public_server(server, user):
     snapshot = json.loads(server["snapshot"])
+    snapshot.pop('_cpu_baseline', None)
     threshold = thresholds_for(server)
     dismissed = {(d["service_id"], d["digest"]) for d in store.rows("SELECT service_id,digest FROM dismissals WHERE user_id=? AND server_id=?", (user["id"], server["id"]))}
     services = snapshot.get("services", []) if server["server_type"] == "docker" else []

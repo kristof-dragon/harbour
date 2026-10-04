@@ -217,6 +217,65 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  assert.equal(await page.locator('.telegram-table-wrap').evaluate(el=>el.scrollWidth>el.clientWidth),true);
  if(process.env.HARBOUR_TEST_CAPTURE)await page.locator('.telegram-modal').screenshot({path:'test-results/telegram-mobile-v0113.png'});
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();assert.equal(await page.locator('#discard-guard').count(),0);
+ // Load: current values, three-line overview, all explorer layouts and mobile inspection.
+ Object.assign(dashboard.servers[0].metrics,{load1:1.75,load5:1.25,load15:.46});
+ for(let i=0;i<history.points.length;i++){
+  Object.assign(history.points[i],i<10||i===30?{load1:null,load5:null,load15:null}:{load1:1.15+i/100,load5:.65+i/100,load15:.4+i/1000,load1_peak:2.5,load5_peak:2,load15_peak:.8});
+ }
+ await page.setViewportSize({width:1280,height:900});
+ await page.evaluate(async()=>{state.server='host-0';state.tab='containers';cardCache.clear();await load();await loadCardHistory(current(),true);});
+ const loadCard=page.locator('[data-key="metric:load"]');
+ assert.deepEqual(await loadCard.locator('.load-values b').allTextContents(),['1.75','1.25','0.46']);
+ assert.equal(await loadCard.locator('polyline').count(),6,'Three lines each side of the long gap');
+ if(process.env.HARBOUR_TEST_CAPTURE){await loadCard.scrollIntoViewIfNeeded();await page.screenshot({path:'test-results/load-overview.png'});}
+ await page.getByRole('button',{name:'Explore Load average history',exact:true}).click();
+ const loadPlot=page.locator('[data-chart-keys="load1,load5,load15"]');
+ await loadPlot.waitFor();
+ assert.equal(await loadPlot.locator('polyline').count(),6);
+ assert.doesNotMatch(await loadPlot.textContent(),/%/);
+ await loadPlot.focus();await page.keyboard.press('End');
+ assert.match(await page.locator('.chart-tooltip').textContent(),/Load · 1 min1.75.*Load · 5 min1.25.*Load · 15 min0.46/);
+ await page.keyboard.press('Home');assert.match(await page.locator('.chart-tooltip').textContent(),/No sample/);
+ await page.locator('#history-stat').selectOption('peak');await loadPlot.focus();await page.keyboard.press('End');
+ assert.match(await page.locator('.chart-tooltip').textContent(),/Load · 1 min2.50.*Load · 5 min2.00.*Load · 15 min0.80/);
+ await page.locator('#history-stat').selectOption('average');
+ for(const theme of ['dark','light']){
+  await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+  if(process.env.HARBOUR_TEST_CAPTURE)await page.locator('.history-modal').screenshot({path:`test-results/load-history-${theme}.png`});
+ }
+ await page.getByRole('button',{name:'Combined',exact:true}).click();
+ assert.equal(await page.locator('[data-chart-keys]').count(),2,'Load has a separate count axis in Combined');
+ assert.equal(await page.locator('.load-legend span').count(),3);
+ await page.getByRole('button',{name:'Side by side',exact:true}).click();
+ assert.equal(await page.locator('.history-grid article').count(),5);
+ await page.getByRole('button',{name:'Table',exact:true}).click();
+ for(const label of ['Load · 1 min','Load · 5 min','Load · 15 min'])assert.equal(await page.getByRole('columnheader',{name:label,exact:true}).count(),1);
+ await page.getByRole('button',{name:'Resource tabs',exact:true}).click();
+ await page.getByRole('button',{name:'Load average',exact:true}).click();
+ await page.setViewportSize({width:390,height:844});
+ assert.equal(await loadPlot.evaluate(el=>el.getBoundingClientRect().right<=innerWidth),true);
+ await loadPlot.focus();await page.keyboard.press('End');
+ assert.equal(await page.locator('.chart-tooltip').evaluate(el=>el.getBoundingClientRect().right<=innerWidth),true);
+ if(process.env.HARBOUR_TEST_CAPTURE)await page.locator('.history-modal').screenshot({path:'test-results/load-history-mobile.png'});
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ assert.equal(await loadCard.evaluate(el=>el.getBoundingClientRect().right<=innerWidth),true);
+ console.log('PASS: load overview and history, three series, averages/peaks, legacy gaps, all layouts, desktop/mobile and keyboard tooltips');
+ // First CPU reading has no percentage; later cards describe the actual interval.
+ dashboard.servers[0].metrics.cpu=null;dashboard.servers[0].metrics.cpu_sample_seconds=null;
+ await page.evaluate(()=>load());
+ const cpuCard=page.locator('[data-key="metric:cpu"]');
+ assert.equal(await cpuCard.locator('.metric-value').textContent(),'—');
+ assert.match(await cpuCard.textContent(),/Waiting for next poll/);
+ assert.match(await page.locator('[data-key="server:host-0"] .resource-chip').first().textContent(),/—/);
+ dashboard.servers[0].metrics.cpu=25;dashboard.servers[0].metrics.cpu_sample_seconds=180;
+ await page.evaluate(()=>load());
+ assert.equal(await cpuCard.locator('.metric-value').textContent(),'25.0%');
+ assert.match(await cpuCard.textContent(),/3m 0s average/);
+ dashboard.servers[0].metrics.cpu=0;dashboard.servers[0].metrics.cpu_sample_seconds=60;
+ await page.evaluate(()=>load());
+ assert.equal(await cpuCard.locator('.metric-value').textContent(),'0.0%');
+ assert.match(await cpuCard.textContent(),/1m 0s average/);
+ console.log('PASS: CPU baseline waiting state, actual interval label and genuine zero usage');
  assert.deepEqual(errors,[]);assert.ok(requests>=4);
  console.log('PASS: changed-value rendering, desktop/mobile scroll, focus/caret, expanded panels, persistent animation, live progress/log scroll, task counts, collapsible filters, refresh-all, chart hover/touch/keyboard/missing values, container and Activity status colours, bulk notification dismissal, inline stack chips, combined service filters and matching-only bulk actions');
  }finally{await browser.close();server.close();}
