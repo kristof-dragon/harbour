@@ -274,7 +274,7 @@ def linux_metrics(docker=True):
             "cores": cores, "memory": {"total": total, "used": total - available,
             "percent": round(100 * (total - available) / total, 1)}, "disks": disks,
             "uptime": uptime, "os": os_name, "kernel": os.uname().release,
-            "temperature": temperatures(), "timezone": timezone_info(),
+            "temperature": temperatures(), **linux_hardware(), "timezone": timezone_info(),
             "docker": run(["docker", "version", "--format", "{{.Server.Version}}"]).strip() if docker else None}
 
 
@@ -389,12 +389,16 @@ def macos_metrics(docker=True):
     return {'cpu': None, 'cpu_counters': counters, 'cores': cores, 'memory': memory,
             **dict(zip(('load1', 'load5', 'load15'), load)), 'disks': macos_disks(),
             'uptime': uptime, 'os': ('macOS ' + version).strip(), 'kernel': os.uname().release,
-            'temperature': temperature_summary([]), 'timezone': timezone_info(),
+            **macos_hardware(), 'timezone': timezone_info(),
             'docker': run(['docker', 'version', '--format', '{{.Server.Version}}']).strip() if docker else None}
 
 
 def temperature_kind(sensor):
     """Classify actual package/die readings, never infer one from a hot core."""
+    # The legacy cpu_package category also contains explicitly identified SoC
+    # and die aggregate channels. Preserve the exact source label in the UI.
+    if sensor['id'] == 'smc:TCMb' and sensor['label'] == 'SMC · CPU die average':
+        return 'cpu_package'
     chip, _, label = sensor["label"].partition(" · ")
     chip, label = chip.lower(), label.lower()
     if (chip == "coretemp" and re.fullmatch(r"(?:package|physical) id \d+", label)
@@ -467,6 +471,310 @@ def temperatures(root="/sys"):
         except ValueError:
             continue
     return temperature_summary(sensors)
+
+
+def sensor_text(path):
+    try:
+        return path.read_text().strip()
+    except (OSError, UnicodeError):
+        return ''
+
+
+def sensor_number(value):
+    import math
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def hardware_reading(identity, label, value, unit, source):
+    return {'id': identity, 'label': label, 'value': round(value, 4), 'unit': unit, 'source': source}
+
+
+def linux_hardware(root='/sys'):
+    """Optional read-only kernel interfaces; missing permissions never fail a poll."""
+    readings, batteries = [], []
+    root = Path(root)
+    # Units from the Linux hwmon ABI. Keep each channel separate: rails and
+    # package/SoC power often overlap and must never be added into a total.
+    specs = [('fan', 'input', 1, 'RPM'), ('in', 'input', 1000, 'V'),
+             ('curr', 'input', 1000, 'A'), ('power', 'input', 1e6, 'W'),
+             ('power', 'average', 1e6, 'W'), ('energy', 'input', 1e6, 'J')]
+    for hw in sorted(root.glob('class/hwmon/hwmon*')):
+        chip = sensor_text(hw / 'name') or hw.name
+        # hwmon indices can change after reboot. Use the physical device path
+        # where available, stripping only the dynamically allocated hwmon tail.
+        physical = re.sub(r'/hwmon/hwmon\d+$', '', str(hw.resolve()))
+        try:
+            physical = str(Path(physical).relative_to(root.resolve()))
+        except ValueError:
+            pass
+        for prefix, attribute, divisor, unit in specs:
+            for path in sorted(hw.glob(prefix + '*_' + attribute)):
+                if not re.fullmatch(prefix + r'\d+_' + attribute, path.name):
+                    continue
+                stem = path.name.rsplit('_', 1)[0]
+                if (sensor_text(hw / (stem + '_fault')) == '1'
+                        or sensor_text(hw / (stem + '_enable')) == '0'):
+                    continue
+                value = sensor_number(sensor_text(path))
+                if value is None or unit in ('RPM', 'J') and value < 0:
+                    continue
+                label = sensor_text(hw / (stem + '_label')) or stem
+                suffix = ' (average)' if attribute == 'average' else ''
+                readings.append(hardware_reading('hwmon:' + physical + ':' + chip + ':' + path.name,
+                    chip + ' · ' + label + suffix, value / divisor, unit, 'Linux hwmon'))
+    by_label = {}
+    for reading in readings:
+        by_label.setdefault(reading['label'], []).append(reading)
+    for group in by_label.values():
+        if len(group) < 2:
+            continue
+        devices = [r['id'].rsplit(':', 2)[0].removeprefix('hwmon:') for r in group]
+        short = [Path(device).name for device in devices]
+        for reading, device in zip(group, short if len(set(short)) == len(short) else devices):
+            reading['label'] += ' [' + device + ']'
+    for device in sorted(root.glob('class/power_supply/*')):
+        if sensor_text(device / 'type') != 'Battery' or sensor_text(device / 'present') == '0':
+            continue
+        name = device.name
+        batteries.append({'name': name, 'status': sensor_text(device / 'status') or 'Unknown',
+                          'condition': sensor_text(device / 'health') or 'Unknown'})
+        specs = [('capacity', 1, '%', 'charge'), ('cycle_count', 1, 'cycles', 'cycles'),
+                 ('voltage_now', 1e6, 'V', 'voltage'), ('current_now', 1e6, 'A', 'current'),
+                 ('power_now', 1e6, 'W', 'battery power'), ('temp', 10, '°C', 'temperature'),
+                 ('energy_now', 1e6, 'Wh', 'stored energy'), ('energy_full', 1e6, 'Wh', 'full energy'),
+                 ('energy_full_design', 1e6, 'Wh', 'design energy'),
+                 ('charge_now', 1e6, 'Ah', 'stored charge'), ('charge_full', 1e6, 'Ah', 'full charge'),
+                 ('charge_full_design', 1e6, 'Ah', 'design charge')]
+        values = {}
+        for attribute, divisor, unit, label in specs:
+            value = sensor_number(sensor_text(device / attribute))
+            if value is None or (attribute == 'capacity' and not 0 <= value <= 100):
+                continue
+            if unit in ('cycles', 'Wh', 'Ah') and value < 0 or unit == '°C' and not -40 <= value / divisor <= 100:
+                continue
+            values[attribute] = value
+            readings.append(hardware_reading('battery:' + name + ':' + attribute,
+                name + ' · ' + label, value / divisor, unit, 'Linux battery'))
+        for basis in ('energy', 'charge'):
+            full, design = (values.get(basis + suffix) for suffix in ('_full', '_full_design'))
+            if full is not None and design is not None and full >= 0 and design > 0:
+                readings.append(hardware_reading('battery:' + name + ':capacity_health',
+                    name + ' · capacity health', full / design * 100, '%', 'Full / design capacity'))
+                break
+    # Expose RAPL energy as energy, never mislabel a wrapping cumulative counter
+    # as watts. Interval power needs a separately validated sampling strategy.
+    seen = set()
+    for path in sorted(root.glob('class/powercap/*/energy_uj')):
+        resolved = str(path.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        value = sensor_number(sensor_text(path))
+        if value is not None and value >= 0:
+            name = sensor_text(path.parent / 'name') or path.parent.name
+            readings.append(hardware_reading('powercap:' + path.parent.name + ':energy',
+                name + ' · accumulated energy', value / 1e6, 'J', 'Linux powercap (wrapping counter)'))
+    return {'hardware': readings, 'batteries': batteries}
+
+
+def smc_decode(type_, data):
+    import struct
+    if type_ == 'flt ' and len(data) == 4:
+        value = struct.unpack('<f', data)[0]
+    elif type_ == 'sp78' and len(data) == 2:
+        value = int.from_bytes(data, 'big', signed=True) / 256
+    elif type_ == 'fpe2' and len(data) == 2:
+        value = int.from_bytes(data, 'big') / 4
+    elif type_ in {'ui8 ', 'ui16', 'ui32', 'ui64', 'si8 ', 'si16', 'si32', 'si64'}:
+        width = {'8 ': 1, '16': 2, '32': 4, '64': 8}[type_[2:]]
+        if len(data) != width:
+            return None
+        value = int.from_bytes(data, 'big', signed=type_.startswith('si'))
+    else:
+        return None
+    return sensor_number(value)
+
+
+class MacSMC:
+    """Small read-only AppleSMC client. No key enumeration or write operation."""
+    def __init__(self):
+        import ctypes as C
+        self.C = C
+        u8, u16, u32 = C.c_uint8, C.c_uint16, C.c_uint32
+        class Version(C.Structure):
+            _fields_ = [('major', u8), ('minor', u8), ('build', u8), ('reserved', u8), ('release', u16)]
+        class Limit(C.Structure):
+            _fields_ = [('version', u16), ('length', u16), ('cpu', u32), ('gpu', u32), ('memory', u32)]
+        class Info(C.Structure):
+            _fields_ = [('size', u32), ('type', u32), ('attributes', u8)]
+        class Request(C.Structure):
+            _fields_ = [('key', u32), ('version', Version), ('limit', Limit), ('info', Info),
+                        ('result', u8), ('status', u8), ('command', u8), ('index', u32), ('data', u8 * 32)]
+        self.Request = Request
+        io = C.CDLL('/System/Library/Frameworks/IOKit.framework/IOKit')
+        libc = C.CDLL('/usr/lib/libSystem.B.dylib')
+        def bind(name, ret, args):
+            fn = getattr(io, name)
+            fn.restype, fn.argtypes = ret, args
+            return fn
+        matching = bind('IOServiceMatching', C.c_void_p, [C.c_char_p])
+        services = bind('IOServiceGetMatchingServices', C.c_int, [u32, C.c_void_p, C.POINTER(u32)])
+        next_ = bind('IOIteratorNext', u32, [u32])
+        name_ = bind('IORegistryEntryGetName', C.c_int, [u32, C.c_char_p])
+        release = bind('IOObjectRelease', C.c_int, [u32])
+        open_ = bind('IOServiceOpen', C.c_int, [u32, u32, u32, C.POINTER(u32)])
+        self.close = bind('IOServiceClose', C.c_int, [u32])
+        self.call = bind('IOConnectCallStructMethod', C.c_int,
+                         [u32, u32, C.c_void_p, C.c_size_t, C.c_void_p, C.POINTER(C.c_size_t)])
+        iterator, self.conn = u32(), u32()
+        if services(0, matching(b'AppleSMC'), C.byref(iterator)):
+            raise OSError('SMC services unavailable')
+        try:
+            while True:
+                device = next_(iterator)
+                if not device:
+                    break
+                try:
+                    name = C.create_string_buffer(128)
+                    name_(device, name)
+                    if name.value not in (b'AppleSMCKeysEndpoint', b'AppleSMC'):
+                        continue
+                    if not open_(device, u32.in_dll(libc, 'mach_task_self_').value, 0, C.byref(self.conn)) and self.conn.value:
+                        break
+                finally:
+                    release(device)
+        finally:
+            release(iterator)
+        if not self.conn.value:
+            raise OSError('SMC endpoint unavailable')
+
+    def query(self, request):
+        if request.command not in (5, 9):
+            raise ValueError('Only sensor reads are supported')
+        C = self.C
+        out, size = self.Request(), C.c_size_t(C.sizeof(self.Request))
+        error = self.call(self.conn, 2, C.byref(request), C.sizeof(request), C.byref(out), C.byref(size))
+        if error or out.result or size.value != C.sizeof(out):
+            raise OSError('SMC key unavailable')
+        return out
+
+    def read(self, key):
+        code = int.from_bytes(key.encode('ascii'), 'big')
+        info = self.query(self.Request(key=code, command=9)).info
+        if not 0 < info.size <= 32:
+            return None
+        data = bytes(self.query(self.Request(key=code, info=info, command=5)).data[:info.size])
+        type_ = int(info.type).to_bytes(4, 'big').decode('ascii')
+        return smc_decode(type_, data)
+
+
+def macos_smc(chip=''):
+    temps, readings = [], []
+    client = MacSMC()
+    try:
+        def read(key):
+            try:
+                return sensor_number(client.read(key))
+            except (OSError, ValueError, UnicodeError):
+                return None
+        # SMC mappings are model-dependent and undocumented by Apple. Only
+        # known channels are named; unknown channels are not guessed by prefix.
+        temperature_keys = [('TCMb', 'SMC · CPU die average', True),
+                            ('TCMz', 'SMC · CPU die maximum', True),
+                            ('TB0T', 'SMC · Battery', False)]
+        if 'Intel' in chip:
+            temperature_keys += [('TC0P', 'SMC · CPU proximity', True), ('TC0D', 'SMC · CPU die', True),
+                                 ('TG0P', 'SMC · GPU proximity', False), ('TG0D', 'SMC · GPU die', False)]
+        if chip == 'Apple M1 Max':
+            temperature_keys += [(key, 'SMC · GPU sensor ' + str(i + 1), False)
+                                 for i, key in enumerate(('Tg05', 'Tg0D', 'Tg0L', 'Tg0T'))]
+        for key, label, cpu in temperature_keys:
+            value = read(key)
+            if value is not None and -40 <= value <= 180:
+                temps.append({'id': 'smc:' + key, 'label': label, 'celsius': round(value, 1), 'cpu': cpu})
+        count = read('FNum')
+        for i in range(int(count) if count is not None and count.is_integer() and 0 <= count <= 16 else 0):
+            key = 'F' + format(i, 'X') + 'Ac'
+            value = read(key)
+            if value is not None and 0 <= value <= 100000:
+                readings.append(hardware_reading('smc:' + key, 'Fan ' + str(i + 1), value, 'RPM', 'Apple SMC'))
+        for key, label, unit in [('PSTR', 'System power estimate', 'W'), ('PDTR', 'DC input power', 'W'),
+                                 ('VD0R', 'DC input voltage', 'V'), ('ID0R', 'DC input current', 'A')]:
+            value = read(key)
+            if value is not None and 0 <= value <= 10000:
+                readings.append(hardware_reading('smc:' + key, label, value, unit, 'Apple SMC · ' + key))
+    finally:
+        client.close(client.conn)
+    return temps, readings
+
+
+def macos_battery():
+    import plistlib
+    from xml.parsers.expat import ExpatError
+    raw = run(['/usr/sbin/ioreg', '-a', '-r', '-c', 'AppleSmartBattery'], timeout=3)
+    try:
+        data = plistlib.loads(raw.encode())
+    except (ValueError, ExpatError, OverflowError):
+        return [], []
+    readings, batteries = [], []
+    for index, device in enumerate(data if isinstance(data, list) else []):
+        if not isinstance(device, dict) or not device.get('BatteryInstalled'):
+            continue
+        name = 'Battery ' + str(index + 1)
+        status = ('Charging' if device.get('IsCharging') else 'Full' if device.get('FullyCharged')
+                  else 'External power' if device.get('ExternalConnected') else 'Discharging')
+        batteries.append({'name': name, 'status': status, 'condition': 'Unknown'})
+        def add(field, value, unit, label):
+            value = sensor_number(value)
+            if value is not None:
+                readings.append(hardware_reading('battery:mac:' + str(index) + ':' + field,
+                    name + ' · ' + label, value, unit, 'macOS battery'))
+        current, maximum = (sensor_number(device.get(k)) for k in ('CurrentCapacity', 'MaxCapacity'))
+        if current is not None and maximum is not None and maximum > 0 and 0 <= current <= maximum:
+            add('capacity', current / maximum * 100, '%', 'charge')
+        cycles = sensor_number(device.get('CycleCount'))
+        if cycles is not None and cycles >= 0:
+            add('cycles', cycles, 'cycles', 'cycles')
+        voltage = sensor_number(device.get('Voltage'))
+        if voltage is not None and 0 < voltage < 100000:
+            add('voltage', voltage / 1000, 'V', 'voltage')
+        raw_current = device.get('Amperage')
+        if type(raw_current) is int:
+            # ioreg may serialize signed milliamps as unsigned 64-bit values.
+            if 2 ** 63 <= raw_current < 2 ** 64:
+                raw_current -= 2 ** 64
+            if abs(raw_current) < 100000:
+                add('current', raw_current / 1000, 'A', 'current (+ charging)')
+                if voltage is not None and 0 < voltage < 100000:
+                    add('power', voltage * raw_current / 1e6, 'W', 'battery power (+ charging)')
+        # Modern macOS MaxCapacity is often a percentage. Only compare raw
+        # capacity fields with a known matching mAh design field.
+        full, design = (sensor_number(device.get(k)) for k in ('AppleRawMaxCapacity', 'DesignCapacity'))
+        if full is not None and design is not None and full >= 0 and design > 0:
+            add('health', full / design * 100, '%', 'capacity health')
+    return readings, batteries
+
+
+def macos_hardware():
+    temps, readings, batteries = [], [], []
+    try:
+        chip = run(['/usr/sbin/sysctl', '-n', 'machdep.cpu.brand_string'], timeout=3).strip()
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        chip = ''
+    try:
+        temps, readings = macos_smc(chip)
+    except (OSError, ValueError, AttributeError):
+        pass
+    try:
+        battery_readings, batteries = macos_battery()
+        readings.extend(battery_readings)
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+        pass
+    return {'temperature': temperature_summary(temps), 'hardware': readings, 'batteries': batteries}
 
 
 def timezone_info():

@@ -84,6 +84,9 @@ def seed_history():
         metrics.setdefault("kernel", "6.8.0-79-generic")
         for key, factor in (("load1", 1), ("load5", .9), ("load15", .8)):
             metrics.setdefault(key, round(metrics["cpu"] / 100 * metrics["cores"] * factor, 2))
+        metrics.setdefault('hardware', [
+            remote_probe.hardware_reading('demo:fan', 'Case fan', 1250, 'RPM', 'Synthetic demo'),
+            remote_probe.hardware_reading('demo:power', 'CPU package power', 24.5, 'W', 'Synthetic demo')])
         sensors = [] if server["id"] == "edge" else [{"id": "demo:cpu", "label": "CPU package", "celsius": 48.2 if server["id"] != "luna" else 57.5, "cpu": True}, {"id": "demo:nvme", "label": "NVMe composite", "celsius": 39.4, "cpu": False}]
         metrics["temperature"] = remote_probe.temperature_summary(metrics.get("temperature", {}).get("sensors", sensors))
         store.execute("UPDATE servers SET snapshot=?,connection_status='up',latency_ms=?,last_attempt=COALESCE(last_attempt,?) WHERE id=?",
@@ -104,5 +107,7 @@ def seed_history():
                 for sensor in sample["temperature"]["sensors"]:
                     sensor["celsius"] += 3*math.sin(phase)
                 sample["temperature"] = remote_probe.temperature_summary(sample["temperature"]["sensors"])
+                for sensor in sample.get('hardware', []):
+                    sensor['value'] *= 1 + .1 * math.sin(phase)
                 stamp = int((now - 86400 + i*resolution)//resolution*resolution)
                 history.put(con, server["id"], stamp, resolution, history.sample_payload(sample, 2 + abs(math.sin(phase))*5, True))

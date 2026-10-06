@@ -300,6 +300,37 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  assert.equal(await page.locator('.modal').evaluate(el=>el.getBoundingClientRect().right<=innerWidth),true);
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
  console.log('PASS: macOS plain and Docker cards, unavailable temperature, history and mobile onboarding');
+ // Real sensor panel, history selection, independent scale, source escaping and mobile layout.
+ const fan={id:'fan:0',label:'Case fan <img src=x onerror=alert(1)>',value:0,unit:'RPM',source:'hwmon'};
+ const power={id:'power:0',label:'DC input',value:18.5,unit:'W',source:'SMC'};
+ Object.assign(dashboard.servers[0].metrics,{hardware:[fan,power],batteries:[{name:'BAT0',status:'Full'}]});
+ for(let i=0;i<history.points.length;i++)history.points[i].hardware=i<10||i===30?[]:[{...fan,value:1200+i,peak:2000},{...power,value:18.5,peak:25}];
+ await page.evaluate(()=>load());
+ await page.locator('.hardware-panel>summary').click();
+ assert.equal(await page.locator('.hardware-panel img').count(),0);
+ assert.match(await page.locator('.hardware-panel').textContent(),/0 RPM/);
+ assert.match(await page.locator('.hardware-panel').textContent(),/BAT0: Full/);
+ await page.evaluate(()=>load());assert.equal(await page.locator('.hardware-panel').evaluate(el=>el.open),true);
+ await page.locator('.hardware-table [data-action=sensor-history]').first().click();
+ const sensorPlot=page.locator('[data-chart-keys="sensor"]');await sensorPlot.waitFor();
+ assert.match(await sensorPlot.textContent(),/RPM/);assert.doesNotMatch(await sensorPlot.textContent(),/%/);
+ await sensorPlot.focus();await page.keyboard.press('End');
+ assert.match(await page.locator('.chart-tooltip').textContent(),/1,260 RPM/);
+ assert.equal(await page.locator('.chart-tooltip img').count(),0);
+ await page.keyboard.press('Home');assert.match(await page.locator('.chart-tooltip').textContent(),/No sample/);
+ await page.locator('#history-stat').selectOption('peak');await sensorPlot.focus();await page.keyboard.press('End');
+ assert.match(await page.locator('.chart-tooltip').textContent(),/2,000 RPM/);
+ await page.locator('#history-sensor').selectOption(JSON.stringify(['power:0','W','SMC']));
+ await sensorPlot.focus();await page.keyboard.press('End');assert.match(await page.locator('.chart-tooltip').textContent(),/25 W/);
+ await page.evaluate(()=>{const reading={id:'current',label:'Battery current',unit:'A',source:'battery',value:.025,peak:.035};for(const p of historyState.data.points)p.hardware=[reading];historyState.sensor=JSON.stringify(['current','A','battery']);historyState.stat='average';renderHistory();});
+ await sensorPlot.focus();await page.keyboard.press('End');assert.match(await page.locator('.chart-tooltip').textContent(),/0.025 A/);
+ assert.equal(await page.locator('.history-modal').evaluate(el=>el.getBoundingClientRect().right<=innerWidth),true);
+ assert.equal(await page.locator('#history-sensor').evaluate(el=>el.getBoundingClientRect().right<=innerWidth),true);
+ if(process.env.HARBOUR_TEST_CAPTURE)await page.locator('.history-modal').screenshot({path:'test-results/hardware-mobile.png'});
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ await page.setViewportSize({width:1280,height:900});
+ if(process.env.HARBOUR_TEST_CAPTURE){await page.locator('.hardware-panel').scrollIntoViewIfNeeded();await page.screenshot({path:'test-results/hardware-desktop.png'});}
+ console.log('PASS: hardware live panel and history, zero, signed scales, averages/peaks, gaps, escaped source labels, mobile selection');
  assert.deepEqual(errors,[]);assert.ok(requests>=4);
  console.log('PASS: changed-value rendering, desktop/mobile scroll, focus/caret, expanded panels, persistent animation, live progress/log scroll, task counts, collapsible filters, refresh-all, chart hover/touch/keyboard/missing values, container and Activity status colours, bulk notification dismissal, inline stack chips, combined service filters and matching-only bulk actions');
  }finally{await browser.close();server.close();}

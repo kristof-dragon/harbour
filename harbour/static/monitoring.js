@@ -11,7 +11,7 @@ let cardHours=Number(localStorage.getItem('harbour-card-hours'))||6;
 if(!hourChoices.includes(cardHours))cardHours=6;
 const cardCache=new Map();
 const historyState={server:null,hours:24,resolution:0,mode:'combined',stat:'average',selected:new Set(Object.keys(resourceMeta)),resource:'cpu',disk:'',data:null,sequence:0};
-const monitorActions=new Set(['history','history-mode','history-tab','history-refresh','monitoring']);
+const monitorActions=new Set(['history','history-mode','history-tab','history-refresh','sensor-history','monitoring']);
 const monitorForms=new Set(['monitoring-form','server-settings-form']);
 const uptime=n=>n==null?'Unavailable':`${Math.floor(n/86400)}d ${Math.floor(n%86400/3600)}h ${Math.floor(n%3600/60)}m`;
 const hourOptions=value=>hourChoices.map(h=>`<option value="${h}" ${h===value?'selected':''}>${h<48?count(h,'hour'):h/24+' days'}</option>`).join('');
@@ -35,6 +35,32 @@ function loadResourceCard(s){
   const m=s.metrics,available=loadKeys.some(key=>m[key]!=null);
   return `<article data-key="metric:load" class="metric load-metric"><div><div class="metric-label">${icon('activity')}Load average<span class="tag">${!available?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="load-values">${loadKeys.map(key=>`<div><small style="color:${seriesMeta[key].color}">${seriesMeta[key].short}</small><b>${resourceValue(m[key],key)}</b></div>`).join('')}</div><div class="metric-bottom">${m.cores??'—'} logical CPUs · system load</div></div><button class="card-chart" type="button" data-action="history" data-resource="load" aria-label="Explore Load average history"><span data-card-chart="load" data-preserve-children>Loading history…</span></button></article>`;
 }
+const sensorIdentity=s=>JSON.stringify([s.id,s.unit,s.source||'']);
+const temperatureReadings=sensors=>(sensors||[]).map(s=>({...s,value:s.celsius,unit:'°C',source:'Temperature sensor'}));
+const hardwareReadings=m=>[...temperatureReadings(m?.temperature?.sensors),...(m?.hardware||[])];
+const sensorValue=(value,unit)=>value==null?'—':`${Number(value.toFixed(unit==='A'?3:unit==='RPM'||unit==='cycles'?0:2)).toLocaleString()} ${unit}`;
+function hardwarePanel(s){
+  const readings=hardwareReadings(s.metrics),batteries=s.metrics?.batteries||[];
+  return `<details data-key="hardware:${e(s.id)}" class="hardware-panel"><summary>Hardware sensors <span class="tag">${readings.length}${s.stale?' · Stale':''}</span></summary>${batteries.length?`<p class="hint">${batteries.map(b=>`${e(b.name)}: ${e(b.status)}${b.condition&&b.condition!=='Unknown'?' · '+e(b.condition):''}`).join(' · ')}</p>`:''}<p class="hint">Readings depend on the hardware and account permissions. Power channels can overlap; they are not a combined total or wall-plug measurement.</p>${readings.length?`<div class="history-table-wrap"><table class="hardware-table"><thead><tr><th>Sensor</th><th>Reading</th><th>Source</th><th>History</th></tr></thead><tbody>${readings.map(r=>`<tr><td>${e(r.label)}</td><td>${e(sensorValue(r.value,r.unit))}</td><td>${e(r.source)}</td><td>${button('sensor-history','History','activity','small',`data-sensor="${e(sensorIdentity(r))}" aria-label="History for ${e(r.label)}"`)}</td></tr>`).join('')}</tbody></table></div>`:'<p class="hint">No hardware sensors are exposed by this host.</p>'}${button('sensor-history','Explore sensor history','activity','small')}</details>`;
+}
+function sensorHistoryData(data){
+  return {...data,points:data.points.map(p=>{
+    const s=[...temperatureReadings(p.sensors),...(p.hardware||[])].find(s=>sensorIdentity(s)===historyState.sensor);
+    return {...p,sensor:s?.value??null,sensor_peak:s?.peak??null,
+      sample_first:s?.sample_first??p.sample_first,sample_last:s?.sample_last??p.sample_last};
+  })};
+}
+function hardwareHistory(data){
+  const known=new Map();
+  for(const p of data.points)for(const r of [...temperatureReadings(p.sensors),...(p.hardware||[])])known.set(sensorIdentity(r),r);
+  for(const r of hardwareReadings(current()?.metrics))known.set(sensorIdentity(r),r);
+  if(!known.size)return '<div class="empty">No sensor readings in this period.</div>';
+  if(!known.has(historyState.sensor))historyState.sensor=known.keys().next().value;
+  const selected=known.get(historyState.sensor);
+  seriesMeta.sensor={label:selected.label,unit:selected.unit,color:'#54bcca'};
+  return `<label class="sensor-selector">Sensor<select id="history-sensor">${[...known].map(([key,s])=>`<option value="${e(key)}" ${key===historyState.sensor?'selected':''}>${e(s.label)} (${e(s.unit)}) · ${e(s.source)}</option>`).join('')}</select></label><p class="hint">${e(selected.source)} · ${selected.unit==='J'?'Accumulated energy counter; can wrap or reset. This is not watts.':'Each sensor uses its own units and scale.'}</p>${chartSVG(sensorHistoryData(data),['sensor'])}`;
+}
+
 function graphValue(point,key){return point[historyState.stat==='peak'?key+'_peak':key];}
 function chartSVG(data,keys,{mini=false}={}){
   keys=resourceSeries(keys);
@@ -42,17 +68,19 @@ function chartSVG(data,keys,{mini=false}={}){
   const width=mini?240:900,height=mini?55:310,left=mini?0:55,right=mini?240:840,top=mini?3:30,bottom=mini?52:260;
   const vals=keys.flatMap(k=>data.points.map(p=>mini?p[k]:graphValue(p,k))).filter(n=>n!=null);
   if(!vals.length)return `<span class="history-empty">${keys[0]==='temperature'?'CPU package sensor unavailable':loadKeys.includes(keys[0])?'No load readings in this period':'No successful readings'}</span>`;
-  const temps=keys.includes('temperature'),loads=keys.some(k=>loadKeys.includes(k)),percents=keys.some(k=>k!=='temperature'&&!loadKeys.includes(k));
+  const sensor=keys.includes('sensor'),temps=keys.includes('temperature'),loads=keys.some(k=>loadKeys.includes(k)),percents=keys.some(k=>k!=='temperature'&&k!=='sensor'&&!loadKeys.includes(k));
   const tv=data.points.map(p=>mini?p.temperature:graphValue(p,'temperature')).filter(n=>n!=null);
   const tMin=Math.min(0,Math.floor(Math.min(0,...tv)/10)*10),tMax=Math.max(100,Math.ceil(Math.max(0,...tv)/10)*10);
   const loadMax=Math.max(1,...vals),loadStep=10**Math.floor(Math.log10(loadMax))/2,lMax=Math.ceil(loadMax/loadStep)*loadStep;
+  const sMin=Math.min(0,...vals),sMax=Math.max(1,...vals)*1.05;
   const x=time=>left+Math.max(0,Math.min(1,(time-data.from)/(data.to-data.from)))*(right-left);
-  const y=(v,k)=>bottom-((v-(k==='temperature'?tMin:0))/(k==='temperature'?tMax-tMin:loadKeys.includes(k)?lMax:100))*(bottom-top);
+  const y=(v,k)=>bottom-((v-(k==='sensor'?sMin:k==='temperature'?tMin:0))/(k==='sensor'?sMax-sMin:k==='temperature'?tMax-tMin:loadKeys.includes(k)?lMax:100))*(bottom-top);
   let grid='';
   if(!mini){
     for(let i=0;i<=4;i++){
       const py=top+(bottom-top)*i/4;
       grid+=`<line class="chart-grid" x1="${left}" x2="${right}" y1="${py}" y2="${py}"/>`;
+      if(sensor)grid+=`<text x="${left-9}" y="${py+4}" text-anchor="end">${Number((sMax-(sMax-sMin)*i/4).toFixed(2))}</text>`;
       if(percents)grid+=`<text x="${left-9}" y="${py+4}" text-anchor="end">${100-i*25}%</text>`;
       if(loads)grid+=`<text x="${left-9}" y="${py+4}" text-anchor="end">${Number((lMax*(1-i/4)).toFixed(2))}</text>`;
       if(temps)grid+=`<text x="${right+9}" y="${py+4}">${Math.round(tMax-(tMax-tMin)*i/4)}°</text>`;
@@ -61,7 +89,7 @@ function chartSVG(data,keys,{mini=false}={}){
       const stamp=data.from+(data.to-data.from)*i/4,date=new Date(stamp*1000);
       grid+=`<text x="${left+(right-left)*i/4}" y="${bottom+24}" text-anchor="middle">${e(date.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}))}</text>${data.hours>24?`<text x="${left+(right-left)*i/4}" y="${bottom+41}" text-anchor="middle">${e(date.toLocaleDateString([],{month:'short',day:'numeric'}))}</text>`:''}`;
     }
-    grid+=`<text x="${left}" y="15">${loads?'Load average':percents?'Utilisation (%)':''}</text>${temps?`<text x="${right}" y="15" text-anchor="end">Temperature (°C)</text>`:''}`;
+    grid+=`<text x="${left}" y="15">${sensor?e(seriesMeta.sensor.unit):loads?'Load average':percents?'Utilisation (%)':''}</text>${temps?`<text x="${right}" y="15" text-anchor="end">Temperature (°C)</text>`:''}`;
   }
   const pollGap=(data.poll_seconds||current()?.poll_seconds||60)*3.5;
   const legacyGap=Math.max(data.resolution_seconds*1.75,pollGap);
@@ -82,14 +110,15 @@ function chartSVG(data,keys,{mini=false}={}){
   return mini?svg:`<div class="history-plot">${svg}<div class="chart-tooltip" role="status" hidden></div></div>`;
 }
 function showChartReading(svg,time){
-  const data=historyState.data;if(!data?.points.length)return;
-  const keys=svg.dataset.chartKeys.split(','),nearest=data.points.reduce((a,b)=>Math.abs(b.time-time)<Math.abs(a.time-time)?b:a);
+  const keys=svg.dataset.chartKeys.split(',');
+  const data=keys.includes('sensor')&&historyState.data?sensorHistoryData(historyState.data):historyState.data;if(!data?.points.length)return;
+  const nearest=data.points.reduce((a,b)=>Math.abs(b.time-time)<Math.abs(a.time-time)?b:a);
   const point=Math.abs(nearest.time-time)<=data.resolution_seconds/2?nearest:{time:Math.round(time/data.resolution_seconds)*data.resolution_seconds};
   svg.dataset.inspectTime=point.time;
   const x=55+Math.max(0,Math.min(1,(point.time-data.from)/(data.to-data.from)))*785;
   const line=$('.chart-cursor',svg);line.setAttribute('x1',x);line.setAttribute('x2',x);line.setAttribute('visibility','visible');
   const bubble=$('.chart-tooltip',svg.parentElement);bubble.hidden=false;
-  updateHTML(bubble,`<b>${e(new Date(point.time*1000).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}))}</b><small>${resolutionLabel(data.resolution_seconds)} · ${historyState.stat==='peak'?'Peaks':'Averages'}</small>${keys.map(key=>`<div><span style="color:${seriesMeta[key].color}">${seriesMeta[key].label}</span><strong>${graphValue(point,key)==null?'No sample':resourceValue(graphValue(point,key),key)+seriesMeta[key].unit}</strong></div>`).join('')}`);
+  updateHTML(bubble,`<b>${e(new Date(point.time*1000).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}))}</b><small>${resolutionLabel(data.resolution_seconds)} · ${historyState.stat==='peak'?'Peaks':'Averages'}</small>${keys.map(key=>`<div><span style="color:${seriesMeta[key].color}">${e(seriesMeta[key].label)}</span><strong>${graphValue(point,key)==null?'No sample':e(key==='sensor'?sensorValue(graphValue(point,key),seriesMeta[key].unit):resourceValue(graphValue(point,key),key)+seriesMeta[key].unit)}</strong></div>`).join('')}`);
   const rect=svg.getBoundingClientRect(),plot=svg.parentElement.getBoundingClientRect();
   const location=new DOMPoint(x,30).matrixTransform(svg.getScreenCTM());
   bubble.style.left=Math.max(4,Math.min(location.x-plot.left+12,plot.width-bubble.offsetWidth-4))+'px';
@@ -126,9 +155,10 @@ async function loadCardHistory(s,force=false){
   }catch(error){cardCache.delete(key);if(current()?.id===s.id)document.querySelectorAll('[data-card-chart]').forEach(el=>{el.textContent='History unavailable';});}
 }
 function drawCardHistory(data){document.querySelectorAll('[data-card-chart]').forEach(el=>{updateHTML(el,chartSVG(data,[el.dataset.cardChart],{mini:true})+`<small>${data.hours}h · ${resolutionLabel(data.resolution_seconds)} averages</small>`);});}
-function openHistory(resource){
+function openHistory(resource,sensor){
   historyState.server=current().id;historyState.disk='';historyState.data=null;
   if(resource){historyState.mode='tabs';historyState.resource=resource;}
+  if(sensor!==undefined){historyState.mode='sensors';historyState.sensor=sensor;}
   modal(`${e(current().name)} · Resource history`,`<div id="history-explorer"></div>`,true);
   $('.modal').classList.add('history-modal');renderHistory();fetchHistory();
 }
@@ -144,11 +174,11 @@ function renderHistory(){
   const root=$('#history-explorer');if(!root)return;
   const h=historyState,data=h.data,keys=[...h.selected];
   root.innerHTML=`<div class="history-controls"><label>Time window<select id="history-hours">${hourOptions(h.hours)}</select></label><label>Display resolution<select id="history-resolution">${[0,60,300,600,900,1800,3600,10800,21600,43200,86400,604800].map(r=>`<option value="${r}" ${r===h.resolution?'selected':''}>${r?resolutionLabel(r):'Automatic'}</option>`).join('')}</select></label><label>Values<select id="history-stat"><option value="average" ${h.stat==='average'?'selected':''}>Averages</option><option value="peak" ${h.stat==='peak'?'selected':''}>Peaks</option></select></label><label>Disk volume<select id="history-disk"><option value="">Card selection</option>${[...new Set([...(current()?.metrics?.disks||[]).map(d=>d.mount),...(data?.disk_mounts||[])])].map(m=>`<option value="${e(m)}" ${m===h.disk?'selected':''}>${e(m)}</option>`).join('')}</select></label>${button('history-refresh','Refresh','refresh','small')}</div>
-    <div class="history-modes segmented" aria-label="History layout">${[['tabs','Resource tabs'],['table','Table'],['side','Side by side'],['combined','Combined']].map(([mode,name])=>button('history-mode',name,'',h.mode===mode?'active':'',`data-mode="${mode}"`)).join('')}</div>
-    ${h.mode==='tabs'?`<div class="resource-legend">${Object.entries(resourceMeta).map(([k,m])=>button('history-tab',m.label,m.icon,h.resource===k?'active':'ghost',`data-resource="${k}"`)).join('')}</div>`:`<div class="resource-legend">${Object.entries(resourceMeta).map(([k,m])=>`<label style="--series:${m.color}"><input type="checkbox" data-history-resource="${k}" ${h.selected.has(k)?'checked':''}><i></i>${m.label}${m.unit?' ('+m.unit+')':''}</label>`).join('')}</div>`}
+    <div class="history-modes segmented" aria-label="History layout">${[['tabs','Resource tabs'],['table','Table'],['side','Side by side'],['combined','Combined'],['sensors','Hardware sensors']].map(([mode,name])=>button('history-mode',name,'',h.mode===mode?'active':'',`data-mode="${mode}"`)).join('')}</div>
+    ${h.mode==='sensors'?'':h.mode==='tabs'?`<div class="resource-legend">${Object.entries(resourceMeta).map(([k,m])=>button('history-tab',m.label,m.icon,h.resource===k?'active':'ghost',`data-resource="${k}"`)).join('')}</div>`:`<div class="resource-legend">${Object.entries(resourceMeta).map(([k,m])=>`<label style="--series:${m.color}"><input type="checkbox" data-history-resource="${k}" ${h.selected.has(k)?'checked':''}><i></i>${m.label}${m.unit?' ('+m.unit+')':''}</label>`).join('')}</div>`}
     <p class="hint history-caption">${data?`${data.hours} hours · actual resolution <b>${resolutionLabel(data.resolution_seconds)}</b> · ${count(data.points.length,'bucket')} · times in ${e(Intl.DateTimeFormat().resolvedOptions().timeZone)}.${data.requested_resolution&&data.resolution_seconds>data.requested_resolution?' Stored resolution or the 2,000-point display limit requires coarser buckets.':''}`:'Loading stored readings…'}</p>
-    <div class="history-content">${!data?'<div class="empty">Loading history…</div>':h.mode==='tabs'?h.resource==='load'?loadHistoryChart(data):`<h3>${resourceMeta[h.resource].label}</h3>${chartSVG(data,[h.resource])}`:!keys.length?'<div class="empty">Select at least one resource.</div>':h.mode==='table'?historyTable(data,keys):h.mode==='side'?`<div class="history-grid">${keys.map(k=>`<article><h3>${icon(resourceMeta[k].icon)}${resourceMeta[k].label}</h3>${k==='load'?loadLegend():''}${chartSVG(data,[k])}</article>`).join('')}</div>`:combinedHistoryChart(data,keys)}</div>
-    <p class="hint">${data?.demo?'Synthetic demo history. ':''}${h.mode==='tabs'&&h.resource==='load'?`Load uses a task-count scale · ${current()?.metrics?.cores??'—'} logical CPUs on this host.`:`Disk: ${e(h.disk||'highest usage among volumes selected for cards')}; CPU temperature uses ${e(data?.temperature_source||'the package sensor')}. Load uses a separate task-count scale.`} Lines bridge up to two missed polls; longer gaps remain. Missing values are excluded from averages. Peaks remain available after consolidation.</p><div class="form-error" role="alert"></div>`;
+    <div class="history-content">${!data?'<div class="empty">Loading history…</div>':h.mode==='sensors'?hardwareHistory(data):h.mode==='tabs'?h.resource==='load'?loadHistoryChart(data):`<h3>${resourceMeta[h.resource].label}</h3>${chartSVG(data,[h.resource])}`:!keys.length?'<div class="empty">Select at least one resource.</div>':h.mode==='table'?historyTable(data,keys):h.mode==='side'?`<div class="history-grid">${keys.map(k=>`<article><h3>${icon(resourceMeta[k].icon)}${resourceMeta[k].label}</h3>${k==='load'?loadLegend():''}${chartSVG(data,[k])}</article>`).join('')}</div>`:combinedHistoryChart(data,keys)}</div>
+    <p class="hint">${data?.demo?'Synthetic demo history. ':''}${h.mode==='sensors'?'Hardware history starts when readings become available. ':h.mode==='tabs'&&h.resource==='load'?`Load uses a task-count scale · ${current()?.metrics?.cores??'—'} logical CPUs on this host.`:`Disk: ${e(h.disk||'highest usage among volumes selected for cards')}; CPU temperature uses ${e(data?.temperature_source||'the package sensor')}. Load uses a separate task-count scale.`} Lines bridge up to two missed polls; longer gaps remain. Missing values are excluded from averages. Peaks remain available after consolidation.</p><div class="form-error" role="alert"></div>`;
 }
 function historyTable(data,keys){
   keys=resourceSeries(keys);
@@ -201,6 +231,7 @@ async function monitoringSettings(){
 }
 async function handleMonitorAction(action,el){
   if(action==='history')openHistory(el.dataset.resource);
+  if(action==='sensor-history')openHistory(null,el.dataset.sensor||'');
   if(action==='history-mode'){historyState.mode=el.dataset.mode;renderHistory();}
   if(action==='history-tab'){historyState.resource=el.dataset.resource;renderHistory();}
   if(action==='history-refresh')await fetchHistory();
@@ -223,6 +254,7 @@ document.addEventListener('change',async event=>{
   if(el.dataset.volumeOption==='monitor'){const row=el.closest('[data-volume]');for(const key of ['warn','card']){const input=row.querySelector('[data-volume-option='+key+']');input.disabled=!el.checked;if(!el.checked)input.checked=false;}}
   if(el.id==='card-hours'){cardHours=Number(el.value);localStorage.setItem('harbour-card-hours',cardHours);await loadCardHistory(current(),true);}
   if(el.id==='history-hours'||el.id==='history-resolution'){historyState[el.id==='history-hours'?'hours':'resolution']=Number(el.value);historyState.data=null;renderHistory();await fetchHistory();}
+  if(el.id==='history-sensor'){historyState.sensor=el.value;renderHistory();}
   if(el.id==='history-stat'){historyState.stat=el.value;renderHistory();}
   if(el.dataset.historyResource){el.checked?historyState.selected.add(el.dataset.historyResource):historyState.selected.delete(el.dataset.historyResource);renderHistory();}
 });

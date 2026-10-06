@@ -36,3 +36,15 @@ image=vm.runInContext('chartSVG(data,["load"],{mini:true})',context);
 assert.equal((image.match(/<circle /g)||[]).length,3);
 assert.doesNotMatch(image,/NaN/);
 console.log('PASS: three load series, independent count scale, zero and legacy missing readings');
+// Hardware uses its own signed scale and independently sampled gaps.
+vm.runInContext("historyState.sensor=JSON.stringify(['fan','RPM','hwmon']);seriesMeta.sensor={label:'Fan',unit:'RPM',color:'#54bcca'}",context);
+context.data=data(Array.from({length:5},(_,i)=>({...point(i*60,10),hardware:i===0||i===4?[{id:'fan',label:'Fan',unit:'RPM',source:'hwmon',value:i?3000:0,peak:3500,sample_first:i*60,sample_last:i*60}]:[]})));
+image=vm.runInContext('chartSVG(sensorHistoryData(data),["sensor"])',context);
+assert.equal((image.match(/<circle /g)||[]).length,2,'Missing sensor readings must not bridge a long gap just because CPU is present');
+assert.match(image,/RPM/);assert.doesNotMatch(image,/%|NaN/);
+vm.runInContext("historyState.sensor=JSON.stringify(['current','A','battery']);seriesMeta.sensor={label:'Battery current',unit:'A',color:'#54bcca'}",context);
+context.data=data([0,60].map((time,i)=>({...point(time,10),hardware:[{id:'current',label:'Battery current',unit:'A',source:'battery',value:i?0:-2,peak:i?0:-1}]})));
+image=vm.runInContext('chartSVG(sensorHistoryData(data),["sensor"])',context);
+assert.match(image,/-2/);assert.doesNotMatch(image,/NaN/);
+for(const match of image.matchAll(/points="([^"]+)"/g))for(const pair of match[1].split(' ')){const y=Number(pair.split(',')[1]);assert.ok(y>=30&&y<=260);}
+console.log('PASS: hardware units, signed values, true zero and independent sensor gaps');

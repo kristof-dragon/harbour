@@ -25,7 +25,7 @@ def empty():
             **{key + suffix: 0 for key in LOAD_KEYS for suffix in ("_n", "_sum", "_max")},
             "memory_sum": 0, "memory_max": 0, "memory_used_sum": 0, "memory_total_sum": 0,
             "latency_n": 0, "latency_sum": 0, "latency_max": 0, "disks": {},
-            "temperature_n": 0, "temperature_sum": 0, "temperature_max": -273.15, "sensors": {}}
+            "temperature_n": 0, "temperature_sum": 0, "temperature_max": -273.15, "sensors": {}, "hardware": {}}
 
 
 def merge(left, right):
@@ -43,10 +43,10 @@ def merge(left, right):
         if key == "sample_first_min":
             value[key] = min(left.get(key, float("inf")), right.get(key, float("inf")))
             continue
-        if key in {"disks", "sensors"}:
+        if key in {"disks", "sensors", "hardware"}:
             continue
         value[key] = max(left[key], right[key]) if key.endswith("_max") else left[key] + right[key]
-    for collection in ("disks", "sensors"):
+    for collection in ("disks", "sensors", "hardware"):
         value[collection] = {k: dict(v) for k, v in left[collection].items()}
         for identity, item in right[collection].items():
             if identity not in value[collection]:
@@ -54,7 +54,7 @@ def merge(left, right):
             else:
                 target = value[collection][identity]
                 for key in item:
-                    target[key] = item[key] if isinstance(item[key], str) else min(target[key], item[key]) if key.endswith("_min") else (
+                    target[key] = item[key] if key not in target or isinstance(item[key], str) else min(target[key], item[key]) if key.endswith("_min") else (
                         max(target[key], item[key]) if key.endswith("_max") else target[key] + item[key])
     return value
 
@@ -84,6 +84,14 @@ def sample_payload(metrics=None, latency_ms=None, up=False):
             sample.update(temperature_n=1, temperature_sum=temp["package"], temperature_max=temp["package"])
         for sensor in temp.get("sensors", []):
             sample["sensors"][sensor["id"]] = {"label": sensor["label"], "n": 1, "sum": sensor["celsius"], "celsius_max": sensor["celsius"]}
+        for sensor in metrics.get('hardware', []):
+            value = sensor.get('value')
+            if type(value) not in (int, float) or not math.isfinite(value):
+                continue
+            # Unit/source changes start separate series, never mixed averages.
+            identity = json.dumps([sensor['id'], sensor['unit'], sensor['source']], ensure_ascii=False, separators=(',', ':'))
+            sample['hardware'][identity] = {**{k: sensor[k] for k in ('id', 'label', 'unit', 'source')},
+                                            'n': 1, 'sum': value, 'value_max': value}
     return sample
 
 
@@ -110,6 +118,9 @@ def record(server_id, metrics=None, latency_ms=None, up=False, now=None, connect
         payload = sample_payload(metrics, latency_ms, up)
         if metrics:
             payload.update(sample_first_min=now, sample_last_max=now)
+            for collection in ('sensors', 'hardware'):
+                for sensor in payload[collection].values():
+                    sensor.update(sample_first_min=now, sample_last_max=now)
         put(con, server_id, bucket, resolution, payload)
 
 
@@ -184,7 +195,11 @@ def series(server_id, hours, now=None, requested_resolution=0, disk_mount=None):
                        "disks": disks, "latency_ms": data["latency_sum"]/ln if ln else None,
                        "temperature": package["sum"]/package["n"] if package else None,
                        "temperature_peak": package["celsius_max"] if package else None,
-                       "sensors": [{"id": key, "label": d["label"], "celsius": d["sum"]/d["n"], "peak": d["celsius_max"]} for key, d in data["sensors"].items()],
+                       "sensors": [{"id": key, "label": d["label"], "celsius": d["sum"]/d["n"], "peak": d["celsius_max"], "sample_first": d.get("sample_first_min"), "sample_last": d.get("sample_last_max")} for key, d in data["sensors"].items()],
+                       "hardware": [{**{k: d[k] for k in ('id', 'label', 'unit', 'source')},
+                                     'value': d['sum']/d['n'], 'peak': d['value_max'], 'samples': d['n'],
+                                     'sample_first': d.get('sample_first_min'), 'sample_last': d.get('sample_last_max')}
+                                    for d in data['hardware'].values()],
                        "up_percent": 100*data["up"]/data["attempts"] if data["attempts"] else None,
                        "attempts": data["attempts"], "samples": n})
     return {"points": points, "resolution_seconds": resolution, "from": since, "to": now, "hours": hours,

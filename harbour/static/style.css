@@ -621,3 +621,10 @@ body.mobile-panel-open{overflow:hidden}
 .telegram-setup a{color:var(--accent)}
 .telegram-modal .form-actions{position:sticky;bottom:-26px;z-index:5;background:var(--panel);margin-top:14px;padding:14px 0}
 @media(max-width:650px){.modal.telegram-modal{padding:16px}.telegram-modal .modal-header{top:-16px}.telegram-modal .form-actions{bottom:-16px}.telegram-heading,.telegram-tools{flex-wrap:wrap}.telegram-table th:first-child{width:140px}.telegram-table-wrap{max-height:36vh}}
+
+.hardware-panel{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.hardware-panel>summary{cursor:pointer;font-weight:600}.hardware-panel>summary .tag{margin-left:8px}
+.hardware-table{table-layout:fixed;width:100%;border-collapse:collapse;font-size:13px}.hardware-table th,.hardware-table td{text-align:left;overflow-wrap:anywhere;padding:9px 5px;border-bottom:1px solid var(--line)}
+.hardware-table td:nth-child(2){font-variant-numeric:tabular-nums;white-space:nowrap}.sensor-selector{display:grid;gap:6px;max-width:100%}.sensor-selector select{max-width:100%;width:100%}
+
+.hardware-table th:nth-child(2){width:84px}.hardware-table th:nth-child(4){width:94px}.hardware-table button{max-width:100%;white-space:normal;flex-wrap:wrap}

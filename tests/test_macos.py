@@ -43,6 +43,7 @@ def mac(monkeypatch):
     monkeypatch.setattr(remote_probe.os, 'getloadavg', lambda: (1.25, 2.5, 3.75))
     monkeypatch.setattr(remote_probe.time, 'time', lambda: state['clock'])
     monkeypatch.setattr(remote_probe, 'macos_cpu_ticks', lambda: state['ticks'])
+    monkeypatch.setattr(remote_probe, 'macos_hardware', lambda: {'temperature': remote_probe.temperature_summary([]), 'hardware': [], 'batteries': []})
     monkeypatch.setattr(remote_probe, 'timezone_info', lambda: {'name': 'Europe/London'})
     monkeypatch.setattr(remote_probe, 'temperatures', lambda: pytest.fail('macOS used Linux sensors'))
     def run(argv, **kwargs):
