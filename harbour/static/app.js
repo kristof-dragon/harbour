@@ -3,6 +3,9 @@ const $ = (s, root = document) => root.querySelector(s);
 const escapeHTML = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const e = escapeHTML;
 const paths = {
+ fan:'M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4M11 10C2 4 10 0 14 4l-1 6M14 12c10-4 9 5 4 7l-5-5M11 14c0 10-8 6-7 1l6-3',
+ power:'m13 2-9 12h7l-1 8 10-13h-7z',
+ battery:'M3 7h16v10H3zM22 10v4M6 10h7v4H6z',
  stop:'M6 6h12v12H6z',
  pencil:'m16 3 5 5M3 21l5-1L21 7a2.8 2.8 0 0 0-4-4L4 16z',
  temperature:'M9 14.8V5a3 3 0 0 1 6 0v9.8a5 5 0 1 1-6 0M12 8v10',

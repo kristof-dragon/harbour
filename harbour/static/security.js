@@ -6,8 +6,8 @@ function timezoneLabel(tz) {
 
 function sidebarMetrics(server) {
   return [['cpu', 'cpu', server.metrics.cpu], ['memory', 'memory', server.metrics.memory.percent],
-    ['disk', 'disk', cardDisk(server)?.percent], ['temperature', 'temperature', server.metrics.temperature?.package]].map(([key, symbol, value]) => {
-    const warning = server.warnings.some(w => key === 'temperature' ? w.kind === 'cpu_package' : w.id === key || w.id.startsWith(key + ':'));
+    ['disk', 'disk', cardDisk(server)?.percent], ['temperature', 'temperature', (primaryResource(server)?primaryResource(server).value:server.metrics.temperature?.package)]].filter(([key])=>useResourceCard(server,key)).map(([key, symbol, value]) => {
+    const warning = key==='temperature'&&primaryResource(server)?primaryResource(server).warning:server.warnings.some(w => key === 'temperature' ? w.kind === 'cpu_package' : w.id === key || w.id.startsWith(key + ':'));
     return `<span class="resource-chip ${warning ? 'resource-warning' : ''}" ${warning ? `data-warning-server="${e(server.id)}" data-warning-kind="${key}"` : ''}>${icon(symbol)}${value==null?'—':Math.round(value)+(key==='temperature'?'°':'%')}</span>`;
   }).join('');
 }

@@ -22,18 +22,67 @@ function serverConnection(s,withHost=false){
   const label=({up:'UP',down:'DOWN',unknown:'CHECK FAILED',pending:'PENDING',paused:'PAUSED',stale:'STALE'})[status]||'PENDING';
   return `<div class="server-connection"><span class="connection-pill ${e(status)}"><i></i>${label}</span>${withHost?`<span class="card-host mono" title="${e(s.host)}">${e(s.host)}</span><span class="connection-separator">–</span>`:''}<span class="latency" title="Authenticated SSH command round-trip; excludes connection setup. Not ICMP ping.">${s.latency_ms==null?'SSH —':`${percent(s.latency_ms)} ms${withHost?'':' SSH'}`}${status!=='up'&&s.latency_ms!=null?' · last':''}</span></div>`;
 }
+const resourceEnabled=r=>r?.monitor!==false&&r?.card!==false;
+const resourceRow=(s,id)=>s.metrics?.resources?.find(r=>r.id===id);
+function primaryResource(s){
+  const rows=(s.metrics?.resources||[]).filter(r=>r.group==='temperature'&&r.kind==='cpu_package'&&resourceEnabled(r));
+  return rows.find(r=>r.id==='temperature:'+s.metrics?.temperature?.package_sensor_id)||rows.find(r=>r.present)||rows[0];
+}
+function useResourceCard(s,key){
+  if(!s.metrics?.resources)return true;
+  return key==='temperature'?!!primaryResource(s):key==='disk'?true:resourceEnabled(resourceRow(s,key));
+}
+const cardLoadKeys=s=>loadKeys.filter(key=>!s.metrics?.resources||resourceRow(s,'resource:'+key)&&resourceEnabled(resourceRow(s,'resource:'+key)));
+const resourceSensor=r=>({id:r.sensor_id,unit:r.unit,source:r.source});
+const sensorIcon=unit=>unit==='°C'?'temperature':unit==='RPM'?'fan':['W','V','A','J','Wh','Ah'].includes(unit)?'power':unit==='%'||unit==='cycles'?'battery':'activity';
+function additionalResourceCards(s){
+  const primary=primaryResource(s),rows=s.metrics?.resources||hardwareReadings(s.metrics).map(r=>({...r,sensor_id:r.id,group:'hardware',present:r.value!=null}));
+  return rows.filter(r=>['temperature','hardware'].includes(r.group)&&resourceEnabled(r)&&r.id!==primary?.id).map(r=>{
+    const sensor=sensorIdentity(resourceSensor(r)),value=sensorValue(r.value,r.unit);
+    const limits=r.warn?[[r.low,'Low'],[r.high,'High']].filter(([v])=>v!=null).map(([v,label])=>`${label}: ${sensorValue(v,r.unit)}`).join(' · '):'Warnings off';
+    return `<article data-key="resource:${e(r.id)}" class="metric sensor-card ${r.warning?'warning':''}"><div class="metric-label">${icon(sensorIcon(r.unit))}<span class="sensor-card-label">${e(r.label)}</span><span class="tag ${r.warning?'red':''}">${r.warning?'Attention':r.value==null?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="metric-value">${e(value)}</div><div class="metric-bottom"><span>${e(r.source)}</span><span>${e(limits)}</span></div><button class="card-chart" type="button" data-action="sensor-history" data-sensor="${e(sensor)}" aria-label="Explore ${e(r.label)} history"><span data-card-sensor="${e(sensor)}" data-label="${e(r.label)}" data-unit="${e(r.unit)}" data-preserve-children>Loading history…</span></button></article>`;
+  }).join('');
+}
+function sensorCardChart(data,identity,label,unit){
+  const old=seriesMeta.sensor;
+  try{seriesMeta.sensor={label,unit,color:'#54bcca'};return chartSVG(sensorHistoryData(data,identity),['sensor'],{mini:true});}
+  finally{seriesMeta.sensor=old;}
+}
+function resourceSettingsTable(s){
+  const rows=s.metrics?.resources||[];
+  return `<div class="resource-settings-wrap" tabindex="0" aria-label="Resource settings"><table class="resource-settings"><thead><tr><th scope="col">Resource</th><th scope="col">Latest</th><th scope="col">Monitor</th><th scope="col">Warn</th><th scope="col">Use in cards</th><th scope="col">Warning limits</th></tr></thead><tbody>${rows.map(r=>`<tr data-resource-setting="${e(r.id)}" data-group="${e(r.group)}"><th scope="row">${e(r.label)}<small>${e(r.source)}${r.present?'':' · Unavailable'}</small></th><td>${e(sensorValue(r.value,r.unit))}</td>${['monitor','warn','card'].map(key=>`<td><input type="checkbox" data-resource-option="${key}" aria-label="${key==='card'?'Use in cards':key==='warn'?'Warn':'Monitor'} ${e(r.label)}" ${r[key]?'checked':''} ${key!=='monitor'&&!r.monitor?'disabled':''}></td>`).join('')}<td class="resource-limit-cell"><select data-resource-limit="mode" aria-label="Warning limit source for ${e(r.label)}" ${r.monitor&&r.warn?'':'disabled'}><option value="default" ${r.limit_mode==='default'?'selected':''}>${['cpu','memory','temperature'].includes(r.group)?'Inherited':'No defaults'}</option><option value="custom" ${r.limit_mode==='custom'?'selected':''}>Custom</option></select><div class="resource-limits">${['low','high'].map(side=>`<label>${side==='low'?'Low':'High'} ${e(r.unit)}<input type="number" step="any" data-resource-limit="${side}" aria-label="${side==='low'?'Low':'High'} warning limit for ${e(r.label)}" value="${r[side]??''}" placeholder="Off" ${r.monitor&&r.warn&&r.limit_mode==='custom'?'':'disabled'}></label>`).join('')}</div></td></tr>`).join('')||'<tr><td colspan="6">Resources appear after a successful check.</td></tr>'}</tbody></table></div>`;
+}
+function updateResourceInputs(row){
+  const monitor=row.querySelector('[data-resource-option=monitor]').checked,warn=row.querySelector('[data-resource-option=warn]'),card=row.querySelector('[data-resource-option=card]'),mode=row.querySelector('[data-resource-limit=mode]');
+  warn.disabled=card.disabled=!monitor;
+  if(!monitor)warn.checked=card.checked=false;
+  if(warn.checked&&mode.value==='default'&&!['cpu','memory','temperature'].includes(row.dataset.group))mode.value='custom';
+  mode.disabled=!monitor||!warn.checked;
+  for(const input of row.querySelectorAll('input[data-resource-limit]'))input.disabled=!monitor||!warn.checked||mode.value!=='custom';
+}
+function updateInheritedResourceLimits(form){
+  for(const row of form.querySelectorAll('[data-resource-setting]')){
+    if(row.querySelector('[data-resource-limit=mode]').value!=='default')continue;
+    const key=row.dataset.group;
+    row.querySelector('[data-resource-limit=low]').value='';
+    row.querySelector('[data-resource-limit=high]').value=form.elements[key]?.value??'';
+  }
+}
+
 function resourceCards(s){
-  const m=s.metrics,t=s.thresholds,disk=cardDisk(s),temp=m.temperature||{};
+  const m=s.metrics,t=s.thresholds,disk=cardDisk(s),primary=primaryResource(s),temp=primary?{...(m.temperature||{}),package:primary.value,package_label:primary.label}:m.temperature||{};
   const cpuPeriod=m.cpu==null?'Waiting for next poll':m.cpu_sample_seconds>0?`${duration(Math.round(m.cpu_sample_seconds))} average`:s.stale?'Last known usage':'Host CPU';
-  const values={cpu:[m.cpu,`${m.cores??'—'} cores`,cpuPeriod],memory:[m.memory.percent,`${gb(m.memory.used)} / ${gb(m.memory.total)} GB`,'RAM'],disk:[disk?.percent,disk?`${disk.mount} · ${capacity(disk.used)} / ${capacity(disk.total)}`:'No volume selected',disk?`${capacity(disk.free)} free`:''],temperature:[temp.package,temp.package==null?'No CPU / SoC sensor':temp.package_label,temp.package_count>1?`${temp.package_count} packages · first shown`:temp.package==null?'Unavailable':'Selected sensor']};
-  return Object.entries(values).map(([key,[value,detail,aside]])=>{
-    const meta=resourceMeta[key],warn=key==='disk'?!!disk?.warning:s.warnings.some(w=>key==='temperature'?w.kind==='cpu_package':w.id===key||w.id.startsWith(key+':'));
-    return `<article data-key="metric:${key}" class="metric ${warn?'warning':''}"><div class="metric-label">${icon(meta.icon)}${meta.label}<span class="tag ${warn?'red':''}">${warn?'Attention':value==null?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="metric-value">${value==null?'—':percent(value)}<span>${value==null?'':meta.unit}</span></div><div class="metric-bottom"><span>${e(detail)}</span><span>${e(aside)}</span></div><button class="card-chart" type="button" data-action="history" data-resource="${key}" aria-label="Explore ${meta.label} history"><span data-card-chart="${key}" data-preserve-children>Loading history…</span></button>${key==='temperature'&&temp.sensors?.length?`<details class="sensor-details"><summary>${count(temp.sensors.length,'sensor')}</summary>${temp.sensors.map(sensor=>`<div class="between ${sensor.kind!=='cpu_auxiliary'&&sensor.celsius>=t.temperature?'sensor-warning':''}"><span>${e(sensor.label)}${sensor.kind==='cpu_auxiliary'?' · separate reading':''}</span><b>${percent(sensor.celsius)}°C</b></div>`).join('')}</details>`:''}</article>`;
-  }).join('')+loadResourceCard(s);
+  const values={cpu:[m.cpu,`${m.cores??'—'} cores`,cpuPeriod],memory:[m.memory.percent,`${gb(m.memory.used)} / ${gb(m.memory.total)} GB`,'RAM'],disk:[disk?.percent,disk?`${disk.mount} · ${capacity(disk.used)} / ${capacity(disk.total)}`:'No volume selected',disk?`${capacity(disk.free)} free`:''],temperature:[temp.package,temp.package==null?'No CPU / SoC sensor':temp.package_label,primary?'Selected sensor':temp.package_count>1?`${temp.package_count} packages · first shown`:temp.package==null?'Unavailable':'Selected sensor']};
+  return Object.entries(values).filter(([key])=>useResourceCard(s,key)).map(([key,[value,detail,aside]])=>{
+    const meta=resourceMeta[key],warn=key==='disk'?!!disk?.warning:key==='temperature'&&primary?primary.warning:s.warnings.some(w=>key==='temperature'?w.kind==='cpu_package':w.id===key||w.id.startsWith(key+':'));
+    return `<article data-key="metric:${key}" class="metric ${warn?'warning':''}"><div class="metric-label">${icon(meta.icon)}${meta.label}<span class="tag ${warn?'red':''}">${warn?'Attention':value==null?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="metric-value">${value==null?'—':percent(value)}<span>${value==null?'':meta.unit}</span></div><div class="metric-bottom"><span>${e(detail)}</span><span>${e(aside)}</span></div><button class="card-chart" type="button" ${key==='temperature'&&primary?`data-action="sensor-history" data-sensor="${e(sensorIdentity(resourceSensor(primary)))}"`:`data-action="history" data-resource="${key}"`} aria-label="Explore ${meta.label} history"><span data-card-chart="${key}" data-preserve-children>Loading history…</span></button>${key==='temperature'&&temp.sensors?.length?`<details class="sensor-details"><summary>${count(temp.sensors.length,'sensor')}</summary>${temp.sensors.map(sensor=>`<div class="between ${(resourceRow(s,'temperature:'+sensor.id)?.warning??(sensor.kind!=='cpu_auxiliary'&&sensor.celsius>=t.temperature))?'sensor-warning':''}"><span>${e(sensor.label)}${sensor.kind==='cpu_auxiliary'?' · separate reading':''}</span><b>${percent(sensor.celsius)}°C</b></div>`).join('')}</details>`:''}</article>`;
+  }).join('')+loadResourceCard(s)+additionalResourceCards(s);
 }
 function loadResourceCard(s){
-  const m=s.metrics,available=loadKeys.some(key=>m[key]!=null);
-  return `<article data-key="metric:load" class="metric load-metric"><div><div class="metric-label">${icon('activity')}Load average<span class="tag">${!available?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="load-values">${loadKeys.map(key=>`<div><small style="color:${seriesMeta[key].color}">${seriesMeta[key].short}</small><b>${resourceValue(m[key],key)}</b></div>`).join('')}</div><div class="metric-bottom">${m.cores??'—'} logical CPUs · system load</div></div><button class="card-chart" type="button" data-action="history" data-resource="load" aria-label="Explore Load average history"><span data-card-chart="load" data-preserve-children>Loading history…</span></button></article>`;
+  const m=s.metrics,keys=cardLoadKeys(s),available=keys.some(key=>m[key]!=null);
+  if(!keys.length)return '';
+  const warning=keys.some(key=>resourceRow(s,'resource:'+key)?.warning);
+  return `<article data-key="metric:load" class="metric load-metric ${warning?'warning':''}"><div><div class="metric-label">${icon('activity')}Load average<span class="tag">${warning?'Attention':!available?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="load-values">${keys.map(key=>`<div><small style="color:${seriesMeta[key].color}">${seriesMeta[key].short}</small><b>${resourceValue(m[key],key)}</b></div>`).join('')}</div><div class="metric-bottom">${m.cores??'—'} logical CPUs · system load</div></div><button class="card-chart" type="button" data-action="history" data-resource="load" aria-label="Explore Load average history"><span data-card-chart="load" data-preserve-children>Loading history…</span></button></article>`;
 }
 const sensorIdentity=s=>JSON.stringify([s.id,s.unit,s.source||'']);
 const temperatureReadings=sensors=>(sensors||[]).map(s=>({...s,value:s.celsius,unit:'°C',source:'Temperature sensor'}));
@@ -43,9 +92,9 @@ function hardwarePanel(s){
   const readings=hardwareReadings(s.metrics),batteries=s.metrics?.batteries||[];
   return `<details data-key="hardware:${e(s.id)}" class="hardware-panel"><summary>Hardware sensors <span class="tag">${readings.length}${s.stale?' · Stale':''}</span></summary>${batteries.length?`<p class="hint">${batteries.map(b=>`${e(b.name)}: ${e(b.status)}${b.condition&&b.condition!=='Unknown'?' · '+e(b.condition):''}`).join(' · ')}</p>`:''}<p class="hint">Readings depend on the hardware and account permissions. Power channels can overlap; they are not a combined total or wall-plug measurement.</p>${readings.length?`<div class="history-table-wrap"><table class="hardware-table"><thead><tr><th>Sensor</th><th>Reading</th><th>Source</th><th>History</th></tr></thead><tbody>${readings.map(r=>`<tr><td>${e(r.label)}</td><td>${e(sensorValue(r.value,r.unit))}</td><td>${e(r.source)}</td><td>${button('sensor-history','History','activity','small',`data-sensor="${e(sensorIdentity(r))}" aria-label="History for ${e(r.label)}"`)}</td></tr>`).join('')}</tbody></table></div>`:'<p class="hint">No hardware sensors are exposed by this host.</p>'}${button('sensor-history','Explore sensor history','activity','small')}</details>`;
 }
-function sensorHistoryData(data){
+function sensorHistoryData(data,identity=historyState.sensor){
   return {...data,points:data.points.map(p=>{
-    const s=[...temperatureReadings(p.sensors),...(p.hardware||[])].find(s=>sensorIdentity(s)===historyState.sensor);
+    const s=[...temperatureReadings(p.sensors),...(p.hardware||[])].find(s=>sensorIdentity(s)===identity);
     return {...p,sensor:s?.value??null,sensor_peak:s?.peak??null,
       sample_first:s?.sample_first??p.sample_first,sample_last:s?.sample_last??p.sample_last};
   })};
@@ -152,9 +201,15 @@ async function loadCardHistory(s,force=false){
     const data=await api(`/servers/${s.id}/history?hours=${cardHours}`);
     cardCache.set(key,{data,loaded:Date.now(),pending:false});
     if(current()?.id===s.id&&key===s.id+':'+cardHours)drawCardHistory(data);
-  }catch(error){cardCache.delete(key);if(current()?.id===s.id)document.querySelectorAll('[data-card-chart]').forEach(el=>{el.textContent='History unavailable';});}
+  }catch(error){cardCache.delete(key);if(current()?.id===s.id)document.querySelectorAll('[data-card-chart],[data-card-sensor]').forEach(el=>{el.textContent='History unavailable';});}
 }
-function drawCardHistory(data){document.querySelectorAll('[data-card-chart]').forEach(el=>{updateHTML(el,chartSVG(data,[el.dataset.cardChart],{mini:true})+`<small>${data.hours}h · ${resolutionLabel(data.resolution_seconds)} averages</small>`);});}
+function drawCardHistory(data){
+  document.querySelectorAll('[data-card-chart],[data-card-sensor]').forEach(el=>{
+    const key=el.dataset.cardChart,primary=primaryResource(current()),caption=`<small>${data.hours}h · ${resolutionLabel(data.resolution_seconds)} averages</small>`;
+    const chart=el.dataset.cardSensor?sensorCardChart(data,el.dataset.cardSensor,el.dataset.label,el.dataset.unit):key==='temperature'&&primary?sensorCardChart(data,sensorIdentity(resourceSensor(primary)),primary.label,primary.unit):chartSVG(data,key==='load'?cardLoadKeys(current()):[key],{mini:true});
+    updateHTML(el,chart+caption);
+  });
+}
 function openHistory(resource,sensor){
   historyState.server=current().id;historyState.disk='';historyState.data=null;
   if(resource){historyState.mode='tabs';historyState.resource=resource;}
@@ -203,6 +258,7 @@ function serverSettings(s){
       <div class="threshold-row">${fields.map(([key,label,min,max])=>`<label>${label}<input name="${key}" type="number" min="${min}" max="${max}" step="0.1" value="${s.thresholds[key]}" required ${s.override?'':'disabled'}></label>`).join('')}</div></section>
       <section class="settings-section settings-checks"><div class="settings-type"><h3>${fieldCaption('Server type','Plain servers collect resources only. Docker hosts also discover containers, check images and support Docker actions.')}</h3><input type="hidden" name="server_type" value="${s.server_type}">${slidingControl('settings-server-type','Server type',[['docker','Docker host'],['plain','Plain server']],s.server_type,'settings-choice','data-field="server_type"')}</div>
       <label class="settings-poll">${fieldCaption('Poll interval (s)','Leave blank to inherit the global interval. Checks never overlap on a host; pausing keeps history and permits manual refresh.')}<input aria-label="Polling interval (seconds)" name="poll_seconds" type="number" min="15" max="3600" placeholder="Global" title="Current effective interval: ${s.poll_seconds}s" value="${s.poll_override??''}"></label><label class="check-line settings-enabled"><input name="enabled" type="checkbox" ${s.monitoring_enabled?'checked':''}>Monitoring enabled</label></section>
+      <section class="settings-section settings-resources"><div class="settings-section-heading"><h3>${fieldCaption('Resources','Monitor records future history. Warn checks the low and high limits, including equality. Use in cards displays the resource. Turning off Monitor also turns off Warn and Use in cards. Inherited limits follow the CPU, memory and temperature thresholds above; other sensors require custom limits. Blank limits are off. Missing values never count as zero; existing history is retained.')}</h3></div>${resourceSettingsTable(s)}</section>
       <section class="settings-section settings-volumes"><div class="settings-section-heading"><h3>${fieldCaption('Volumes','Monitor stores this volume’s history. Warn enables disk thresholds. Use in cards selects the disk in the resource card and sidebar; if several are selected, the highest percentage is shown. Existing history is retained when monitoring is disabled. Capacities use decimal GB.')}</h3></div>${volumeSettingsTable(s)}</section>
       <div class="form-error" role="alert"></div><div class="form-actions settings-save">${button('remove-server','Remove server','trash','danger ghost small',`title="Remove from Harbour; services on the host are unaffected"`)}<button class="primary" type="submit">Save</button></div>
     </form>`);
@@ -223,6 +279,7 @@ function setServerSettingsChoice(el){
     for(const i of inputs){i.disabled=value==='global';i.value=value==='global'?state.data.thresholds[i.name]:(form.thresholdDraft?.[i.name]??i.value);}
   }
   input.value=value;updateSlidingControl(el.closest('.sliding-control'),value);
+  updateInheritedResourceLimits(form);
 }
 async function monitoringSettings(){
   const p=await api('/monitoring');
@@ -240,8 +297,15 @@ async function handleMonitorAction(action,el){
 async function handleMonitorForm(form,data){
   if(form.id==='server-settings-form'){
     const volumes=[...form.querySelectorAll('[data-volume]')].map(row=>({mount:row.dataset.volume,...Object.fromEntries(['monitor','warn','card'].map(key=>[key,row.querySelector('[data-volume-option='+key+']').checked]))}));
+    const resources=[...form.querySelectorAll('[data-resource-setting]')].map(row=>{
+      const limit_mode=row.querySelector('[data-resource-limit=mode]').value;
+      const limits=Object.fromEntries(['low','high'].map(side=>{const value=row.querySelector('[data-resource-limit='+side+']').value;return [side,limit_mode==='custom'&&value!==''?Number(value):null];}));
+      return {id:row.dataset.resourceSetting,...Object.fromEntries(['monitor','warn','card'].map(key=>[key,row.querySelector('[data-resource-option='+key+']').checked])),limit_mode,...limits};
+    });
+    const invalid=resources.find(r=>r.warn&&r.limit_mode==='custom'&&(r.low==null&&r.high==null||r.low!=null&&r.high!=null&&r.low>=r.high));
+    if(invalid)throw new Error('Set a low or high warning limit, with the low limit less than the high limit.');
     const thresholds=data.threshold_mode==='global'?null:Object.fromEntries(['cpu','memory','disk','disk_free_gb','temperature'].map(key=>[key,Number(data[key])]));
-    const saved=await api(`/servers/${form.dataset.id}/settings`,'PUT',{name:data.name,server_type:data.server_type,thresholds,volumes,enabled:data.enabled==='on',poll_seconds:data.poll_seconds?Number(data.poll_seconds):null});
+    const saved=await api(`/servers/${form.dataset.id}/settings`,'PUT',{name:data.name,server_type:data.server_type,thresholds,volumes,resources,enabled:data.enabled==='on',poll_seconds:data.poll_seconds?Number(data.poll_seconds):null});
     form.elements.name.value=saved.name;form.elements.name.hidden=true;$('.server-settings-name',form).textContent=saved.name;$('.server-settings-name',form).hidden=false;$('[data-action=edit-server-name]',form).hidden=false;
     markFormSaved(form);cardCache.clear();state.selected.clear();await load();toast('Server settings saved');
   }
@@ -250,6 +314,16 @@ async function handleMonitorForm(form,data){
 }
 document.addEventListener('change',async event=>{
   const el=event.target;
+  if(el.dataset.resourceOption||el.dataset.resourceLimit){
+    const row=el.closest('[data-resource-setting]');
+    if(el.dataset.resourceLimit==='mode'){
+      const fields=[...row.querySelectorAll('input[data-resource-limit]')];
+      if(el.value==='default')row.limitDraft=fields.map(input=>input.value);
+      else if(row.limitDraft)fields.forEach((input,i)=>input.value=row.limitDraft[i]);
+    }
+    updateResourceInputs(row);if(el.dataset.resourceLimit==='mode')updateInheritedResourceLimits(row.closest('form'));
+  }
+  if(el.closest('.threshold-row'))updateInheritedResourceLimits(el.closest('form'));
   if(el.id==='history-disk'){historyState.disk=el.value;await fetchHistory();}
   if(el.dataset.volumeOption==='monitor'){const row=el.closest('[data-volume]');for(const key of ['warn','card']){const input=row.querySelector('[data-volume-option='+key+']');input.disabled=!el.checked;if(!el.checked)input.checked=false;}}
   if(el.id==='card-hours'){cardHours=Number(el.value);localStorage.setItem('harbour-card-hours',cardHours);await loadCardHistory(current(),true);}

@@ -15,8 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from . import auth, history, store
 
 router = APIRouter(prefix='/api/notifications', dependencies=[Depends(auth.admin)])
-KINDS = ('cpu', 'memory', 'disk', 'temperature')
-LABELS = dict(zip(KINDS, ('CPU', 'Memory', 'Storage', 'Temperature')))
+KINDS = ('cpu', 'memory', 'disk', 'temperature', 'resource')
+LABELS = dict(zip(KINDS, ('CPU', 'Memory', 'Storage', 'Temperature', 'Resources')))
 guard = threading.RLock()
 sending = threading.Lock()
 DEFAULT = {'enabled': False, 'chat_id': '', 'token_encrypted': '', 'revision': '',
@@ -26,7 +26,7 @@ DEFAULT = {'enabled': False, 'chat_id': '', 'token_encrypted': '', 'revision': '
 class Rule(BaseModel):
     model_config = ConfigDict(extra='forbid')
     server_id: str = Field(min_length=1, max_length=128)
-    kind: Literal['cpu', 'memory', 'disk', 'temperature']
+    kind: Literal['cpu', 'memory', 'disk', 'temperature', 'resource']
     enabled: bool = False
     delay_seconds: int = Field(default=300, ge=0, le=604800)
     repeat_seconds: int = Field(default=3600, ge=0, le=2592000)
@@ -104,6 +104,22 @@ def save_settings(body: Settings):
     return public_config()
 
 
+def invalidate(con, server_id, identities):
+    """Changed warning settings require a fresh observation, per resource."""
+    if not identities:
+        return
+    for row in con.execute('SELECT * FROM notification_state WHERE server_id=?', (server_id,)).fetchall():
+        previous = json.loads(row['entities'])
+        entities = {key: value for key, value in previous.items() if key not in identities}
+        if entities == previous:
+            continue
+        if entities:
+            con.execute('UPDATE notification_state SET entities=? WHERE server_id=? AND kind=?',
+                        (json.dumps(entities), server_id, row['kind']))
+        else:
+            con.execute('DELETE FROM notification_state WHERE server_id=? AND kind=?', (server_id, row['kind']))
+
+
 def observe(server, warnings, successful=True, now=None, unavailable=()):
     """Called once per resource sample. No network access on the poll worker."""
     now = time.time() if now is None else now
@@ -126,12 +142,13 @@ def observe(server, warnings, successful=True, now=None, unavailable=()):
                 con.execute('UPDATE notification_state SET checked=0,entities=? WHERE server_id=? AND kind=?', (json.dumps(entities), *key))
                 continue
             matches = {w['id']: w for w in warnings if w['id'].split(':', 1)[0] == rule['kind']}
-            if not matches:
+            missing = {id_: {**entity, 'since': None} for id_, entity in entities.items() if id_ in unavailable}
+            if not matches and not missing:
                 con.execute('DELETE FROM notification_state WHERE server_id=? AND kind=?', key)
                 continue
             max_gap = max(120, (server['poll_seconds'] or history.policy()['poll_seconds']) * 2 + 15)
             continuous = row and 0 < now - row['checked'] <= max_gap
-            updated = {}
+            updated = missing
             for id_, warning in matches.items():
                 previous = entities.get(id_, {})
                 updated[id_] = {'since': previous.get('since') if continuous and previous.get('since') is not None else now,

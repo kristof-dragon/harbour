@@ -8,7 +8,7 @@ const metrics={cpu:24.2,cores:4,memory:{percent:42,total:8e9,used:3.36e9},disks:
 const servers=Array.from({length:24},(_,i)=>({id:'host-'+i,name:'Host '+i,host:'192.0.2.'+(i+1),port:22,metrics:structuredClone(metrics),services:[structuredClone(service)],warnings:[],updates:1,checked:now,update_checked:now,monitoring_enabled:true,connection_status:'up',poll_seconds:15,latency_ms:2,thresholds,server_type:'docker'}));
 let job={id:'task',server_id:'host-0',server_name:'Host 0',actor:'admin',action:'pull_up',status:'running',created:now,progress:{completed:0,total:2,label:'Pulling web',phase:'executing',started:now,heartbeat:now},target_names:['stack / web'],output:Array.from({length:100},(_,i)=>'Download layer '+i).join('\n')};
 let queued={...structuredClone(job),id:'queued',status:'queued',queue_position:1,waiting_for:'pull_up',progress:{}};
-let dashboard={servers,thresholds,jobs:[queued,job]},requests=0,refreshAll=0,lastPlan=null;
+let dashboard={servers,thresholds,jobs:[queued,job]},requests=0,refreshAll=0,lastPlan=null,lastSettings=null;
 const history={from:now-3600,to:now,hours:1,resolution_seconds:60,poll_seconds:15,points:Array.from({length:61},(_,i)=>({time:now-3600+i*60,cpu:i===30?null:20+i/10,memory:40,disk:42,temperature:48,cpu_peak:30,temperature_peak:52,disks:[],samples:4,attempts:4})),disk_mounts:['/']};
 let telegram={enabled:false,chat_id:'',token_saved:false,demo:true,last_sent:null,last_error:'',next_attempt:0,rules:[],servers:servers.map(s=>({id:s.id,name:s.name,monitoring_enabled:true}))},telegramTests=0;
 const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'harbour/static',req.url==='/'?'index.html':req.url.replace('/static/',''));try{res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html');res.end(fs.readFileSync(file));}catch{res.writeHead(404).end();}});
@@ -20,11 +20,17 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  const page=await browser.newPage({viewport:{width:1280,height:800}}),errors=[];page.on('pageerror',err=>errors.push(err.message));
  await page.route('**/api/**',async route=>{const url=new URL(route.request().url());let data;
  if(url.pathname==='/api/config')data={demo:true,version:'test'};
- else if(url.pathname==='/api/notifications'){if(route.request().method()==='PUT'){const body=route.request().postDataJSON();assert.equal(body.rules.length,servers.length*4);telegram={...telegram,...body,token_saved:!!body.bot_token||telegram.token_saved};delete telegram.bot_token;}data=telegram;}
+ else if(url.pathname==='/api/notifications'){if(route.request().method()==='PUT'){const body=route.request().postDataJSON();assert.equal(body.rules.length,servers.length*5);telegram={...telegram,...body,token_saved:!!body.bot_token||telegram.token_saved};delete telegram.bot_token;}data=telegram;}
  else if(url.pathname==='/api/notifications/test'){telegramTests++;data={ok:true,simulated:true};}
+ else if(url.pathname==='/api/session/activity')data={ok:true};
  else if(url.pathname==='/api/me')data={id:'admin',name:'admin',role:'admin',csrf:'test'};
  else if(url.pathname==='/api/dashboard'){requests++;data=dashboard;}
  else if(url.pathname==='/api/jobs/task')data=job;
+ else if(url.pathname.endsWith('/settings')){
+  lastSettings=route.request().postDataJSON();const s=dashboard.servers.find(s=>url.pathname.includes('/'+s.id+'/'));
+  for(const config of lastSettings.resources){const row=s.metrics.resources.find(r=>r.id===config.id);Object.assign(row,config);row.warning=!!(row.monitor&&row.warn&&row.value!=null&&(row.low!=null&&row.value<=row.low||row.high!=null&&row.value>=row.high));}
+  s.name=lastSettings.name;data={ok:true,name:s.name};
+ }
  else if(url.pathname.endsWith('/history'))data=history;
  else if(url.pathname==='/api/servers/refresh-all'){refreshAll++;data={jobs:[],errors:[]};}
  else if(url.pathname.endsWith('/plan')){lastPlan=route.request().postDataJSON();data={token:'test-plan',commands:[]};}
@@ -193,7 +199,7 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  await page.evaluate(()=>{setMobilePanel(false);document.querySelector('#sidebar-menu').open=true;});
  await page.getByRole('button',{name:'Notifications',exact:true}).click();
  await page.locator('#telegram-form').waitFor();
- assert.equal(await page.locator('.telegram-rule').count(),96);
+ assert.equal(await page.locator('.telegram-rule').count(),servers.length*5);
  const cpu=page.getByRole('checkbox',{name:'Host 0 CPU notifications',exact:true});
  const delay=page.getByRole('spinbutton',{name:'Host 0 CPU trigger delay in minutes',exact:true});
  const repeat=page.getByRole('spinbutton',{name:'Host 0 CPU repeat interval in minutes',exact:true});
@@ -331,6 +337,50 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  await page.setViewportSize({width:1280,height:900});
  if(process.env.HARBOUR_TEST_CAPTURE){await page.locator('.hardware-panel').scrollIntoViewIfNeeded();await page.screenshot({path:'test-results/hardware-desktop.png'});}
  console.log('PASS: hardware live panel and history, zero, signed scales, averages/peaks, gaps, escaped source labels, mobile selection');
+ // Resource selection mirrors Volumes, survives refresh, and saves typed limits.
+ const m=dashboard.servers[0].metrics;
+ const row=(id,label,value,unit,group,extra={})=>({id,label,value,unit,group,source:group,monitor:true,warn:false,card:true,present:value!=null,limit_mode:'default',low:null,high:null,...extra});
+ m.resources=[row('cpu','CPU',m.cpu,'%','cpu',{warn:true,high:85}),row('memory','Memory',m.memory.percent,'%','memory',{warn:true,high:85}),
+  ...['load1','load5','load15'].map((key,i)=>row('resource:'+key,'Load · '+[1,5,15][i]+' min',m[key],'','load',{metric:key})),
+  row('resource:fan','Case fan',0,'RPM','hardware',{sensor_id:fan.id,source:fan.source}),
+  row('resource:power','DC input',18.5,'W','hardware',{sensor_id:power.id,source:power.source})];
+ await page.evaluate(async()=>{cardCache.clear();await load();await loadCardHistory(current(),true);});
+ assert.equal(await page.locator('[data-key="resource:resource:fan"]').count(),1);
+ assert.match(await page.locator('[data-key="resource:resource:fan"]').textContent(),/0 RPM/);
+ assert.equal(await page.locator('[data-key="resource:resource:fan"] svg.mini-chart').count(),1);
+ if(process.env.HARBOUR_TEST_CAPTURE){await page.locator('[data-key="resource:resource:fan"]').scrollIntoViewIfNeeded();await page.screenshot({path:'test-results/resource-cards.png'});}
+ await page.getByRole('button',{name:'Server settings',exact:true}).click();
+ const resourceTable=page.locator('.resource-settings');assert.equal(await resourceTable.locator('tbody tr').count(),7);
+ const cpuRow=page.locator('[data-resource-setting="cpu"]'),fanRow=page.locator('[data-resource-setting="resource:fan"]'),powerRow=page.locator('[data-resource-setting="resource:power"]');
+ await cpuRow.locator('[data-resource-option=monitor]').uncheck();
+ assert.equal(await cpuRow.locator('[data-resource-option=warn]').isChecked(),false);
+ assert.equal(await cpuRow.locator('[data-resource-option=card]').isEnabled(),false);
+ await fanRow.locator('[data-resource-option=warn]').check();
+ assert.equal(await fanRow.locator('[data-resource-limit=mode]').inputValue(),'custom');
+ await fanRow.locator('[data-resource-limit=low]').fill('0');
+ await fanRow.locator('[data-resource-limit=high]').fill('4500');
+ await fanRow.locator('[data-resource-option=card]').uncheck();
+ await powerRow.locator('[data-resource-option=monitor]').uncheck();
+ await page.evaluate(()=>load());assert.equal(await fanRow.locator('[data-resource-limit=high]').inputValue(),'4500');
+ if(process.env.HARBOUR_TEST_CAPTURE)await page.locator('.server-settings-modal').screenshot({path:'test-results/resource-settings-desktop.png'});
+ await page.setViewportSize({width:390,height:844});
+ assert.equal(await page.locator('.resource-settings-wrap').evaluate(el=>el.getBoundingClientRect().right<=innerWidth&&el.scrollWidth>el.clientWidth),true);
+ if(process.env.HARBOUR_TEST_CAPTURE)await page.locator('.server-settings-modal').screenshot({path:'test-results/resource-settings-mobile.png'});
+ await page.locator('#server-settings-form button[type=submit]').click();
+ await page.getByText('Server settings saved',{exact:true}).waitFor({state:'attached'});
+ await page.waitForFunction(()=>!document.querySelector('#server-settings-form').dataset.busy);
+ const savedFan=lastSettings.resources.find(r=>r.id==='resource:fan');
+ assert.deepEqual(savedFan,{id:'resource:fan',monitor:true,warn:true,card:false,limit_mode:'custom',low:0,high:4500});
+ assert.deepEqual(lastSettings.resources.find(r=>r.id==='cpu'),{id:'cpu',monitor:false,warn:false,card:false,limit_mode:'default',low:null,high:null});
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ assert.equal(await page.locator('[data-key="metric:cpu"]').count(),0);
+ assert.equal(await page.locator('[data-key="resource:resource:fan"],[data-key="resource:resource:power"]').count(),0);
+ await page.getByRole('button',{name:'Server settings',exact:true}).click();
+ assert.equal(await fanRow.locator('[data-resource-limit=low]').inputValue(),'0');
+ assert.equal(await fanRow.locator('[data-resource-option=warn]').isChecked(),true);
+ assert.equal(await powerRow.locator('[data-resource-option=monitor]').isChecked(),false);
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ console.log('PASS: discovered resource cards, per-resource history, Monitor/Warn/Card selection, editable limits, saved state, refresh stability, mobile scrolling');
  assert.deepEqual(errors,[]);assert.ok(requests>=4);
  console.log('PASS: changed-value rendering, desktop/mobile scroll, focus/caret, expanded panels, persistent animation, live progress/log scroll, task counts, collapsible filters, refresh-all, chart hover/touch/keyboard/missing values, container and Activity status colours, bulk notification dismissal, inline stack chips, combined service filters and matching-only bulk actions');
  }finally{await browser.close();server.close();}

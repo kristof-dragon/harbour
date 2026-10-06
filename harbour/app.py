@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from . import __version__, auth, cpu, demo, history, notifications, polling, remote_probe, ssh, store, volumes
+from . import __version__, auth, cpu, demo, history, notifications, polling, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
 
 pool = ThreadPoolExecutor(max_workers=4)
@@ -182,6 +182,8 @@ def poll_resources(server, lock, cancel=None, background=False, raise_errors=Fal
                 # Synthetic/legacy percentage readings cannot seed a counter interval.
                 snapshot.pop('_cpu_baseline', None)
             metrics['docker'] = snapshot.get('docker', snapshot.get('metrics', {}).get('docker')) if row['server_type'] == 'docker' else None
+            con.execute('UPDATE servers SET resource_catalog=? WHERE id=?',
+                        (json.dumps(resources.catalog(dict(row), metrics)), id_))
             snapshot['metrics'] = metrics
             if row['server_type'] == 'plain':
                 snapshot['services'] = []
@@ -410,18 +412,12 @@ def server_warnings(server, snapshot, threshold):
     metrics = snapshot.get("metrics", {})
     if metrics:
         metrics["temperature"] = remote_probe.temperature_summary(metrics.get("temperature", {}).get("sensors", []))
-        for key, value in (("cpu", metrics["cpu"]), ("memory", metrics["memory"]["percent"])):
-            if value is not None and value >= threshold[key]:
-                warnings.append({"id": key, "title": key.capitalize() + " usage is high", "detail": f"{value:.1f}% used · threshold {threshold[key]}%"})
+        metrics['resources'] = resources.decorate(server, metrics, threshold)
+        warnings.extend(resources.warnings(metrics['resources']))
         metrics["disks"] = volumes.decorate(server, metrics["disks"], threshold)
         for disk in metrics["disks"]:
             if disk["warning"]:
                 warnings.append({"id": "disk:" + disk["mount"], "title": "Disk space · " + disk["mount"], "detail": f"{disk['percent']:.1f}% used · {volumes.capacity(disk['free'])} free"})
-        for sensor in metrics.get("temperature", {}).get("sensors", []):
-            if sensor["kind"] != "cpu_auxiliary" and sensor["celsius"] >= threshold["temperature"]:
-                warnings.append({"id": "temperature:" + sensor["id"], "title": "Temperature · " + sensor["label"],
-                                 "kind": sensor["kind"],
-                                 "detail": f"{sensor['celsius']:.1f}°C · threshold {threshold['temperature']}°C"})
     for s in services:
         # Docker can retain the last health result after a container stops.
         issue = s["state"] if s["state"] in {"restarting", "dead"} else (
@@ -438,7 +434,7 @@ def observe_notifications(server_id, successful=True):
             return
         snapshot = json.loads(server['snapshot'])
         warnings = server_warnings(server, snapshot, thresholds_for(server))[0] if successful else []
-        unavailable = {'cpu'} if snapshot.get('metrics', {}).get('cpu') is None else set()
+        unavailable = resources.unavailable(server, snapshot.get('metrics', {}), thresholds_for(server))
         notifications.observe(server, warnings, successful, now=server['checked'] if successful else None,
                               unavailable=unavailable)
     except Exception:
@@ -465,9 +461,10 @@ def clear_resolved_warning_dismissals(server_id, warnings=None):
     if warnings is None:
         warnings, _ = server_warnings(server, snapshot, thresholds_for(server))
     active = {warning_notification(w) for w in warnings}
+    unavailable = resources.unavailable(server, snapshot.get('metrics', {}), thresholds_for(server))
     expired = [(r['user_id'], server_id, r['service_id'], r['digest']) for r in records
                if (r['service_id'], r['digest']) not in active
-               and not (r['service_id'] == 'warning:cpu' and snapshot.get('metrics', {}).get('cpu') is None)]
+               and r['service_id'].removeprefix('warning:') not in unavailable]
     if expired:
         with store.db() as con:
             con.executemany('DELETE FROM dismissals WHERE user_id=? AND server_id=? AND service_id=? AND digest=?', expired)
@@ -574,10 +571,44 @@ class ServerTypeInput(Input):
     server_type: Literal['docker', 'plain']
 
 
+class ResourceOption(Input):
+    id: str = Field(min_length=1, max_length=4096)
+    monitor: bool
+    warn: bool
+    card: bool
+    limit_mode: Literal['default', 'custom'] = 'default'
+    low: float | None = Field(default=None, allow_inf_nan=False)
+    high: float | None = Field(default=None, allow_inf_nan=False)
+
+
+def resource_config(server, values, thresholds):
+    config = resources.preferences(server)
+    if values is None:
+        return config
+    known = resources.catalog(server)
+    identities = [v.id for v in values]
+    if len(identities) != len(set(identities)) or any(k not in known for k in identities):
+        raise HTTPException(400, 'Choose from the discovered resources')
+    for value in values:
+        if not value.monitor and (value.warn or value.card):
+            raise HTTPException(400, 'Enable monitoring before warnings or card display')
+        data = value.model_dump(exclude={'id'})
+        if value.limit_mode == 'default':
+            data.update(low=None, high=None)
+        effective = resources.options({**server, 'resource_settings': json.dumps({value.id: data})}, known[value.id], thresholds)
+        if effective['low'] is not None and effective['high'] is not None and effective['low'] >= effective['high']:
+            raise HTTPException(400, 'The low warning limit must be less than the high limit')
+        if value.warn and effective['low'] is None and effective['high'] is None:
+            raise HTTPException(400, 'Set at least one warning limit for ' + known[value.id]['label'])
+        config[value.id] = data
+    return config
+
+
 class ServerSettingsInput(ServerTypeInput):
     name: str = Field(min_length=1, max_length=80)
     thresholds: Thresholds | None
     volumes: list[VolumeOption] = Field(max_length=500)
+    resources: list[ResourceOption] | None = Field(default=None, max_length=2000)
     enabled: bool
     poll_seconds: int | None = Field(default=None, ge=15, le=3600)
 
@@ -590,11 +621,19 @@ def save_server_settings(id_: str, body: ServerSettingsInput, user=Depends(admin
     try:
         server = get_server(id_)
         config = volume_config(server, body.volumes)
+        next_thresholds = thresholds_for({**server, 'thresholds': body.thresholds.model_dump_json() if body.thresholds else None})
+        resource_settings = resource_config(server, body.resources, next_thresholds)
+        known = resources.catalog(server)
+        old_thresholds, old_resources = thresholds_for(server), resources.preferences(server)
+        changed = {identity for identity, resource in known.items()
+                   if {k: v for k, v in resources.options(server, resource, old_thresholds, old_resources).items() if k != 'card'} !=
+                   {k: v for k, v in resources.options(server, resource, next_thresholds, resource_settings).items() if k != 'card'}}
         # One transaction prevents a rejected setting from leaving a partial save.
-        with store.db() as con:
-            con.execute('UPDATE servers SET name=?,thresholds=?,volume_settings=?,monitoring_enabled=?,poll_seconds=?,server_type=? WHERE id=?',
+        with notifications.guard, store.db() as con:
+            con.execute('UPDATE servers SET name=?,thresholds=?,volume_settings=?,resource_settings=?,resource_catalog=?,monitoring_enabled=?,poll_seconds=?,server_type=? WHERE id=?',
                         (body.name, body.thresholds.model_dump_json() if body.thresholds else None,
-                         json.dumps(config), int(body.enabled), body.poll_seconds, body.server_type, id_))
+                         json.dumps(config), json.dumps(resource_settings), json.dumps(known), int(body.enabled), body.poll_seconds, body.server_type, id_))
+            notifications.invalidate(con, id_, changed)
             if body.enabled and not server['monitoring_enabled']:
                 con.execute('UPDATE servers SET last_attempt=NULL WHERE id=?', (id_,))
             if server['server_type'] != body.server_type:

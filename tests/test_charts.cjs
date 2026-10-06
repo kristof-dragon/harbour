@@ -48,3 +48,11 @@ image=vm.runInContext('chartSVG(sensorHistoryData(data),["sensor"])',context);
 assert.match(image,/-2/);assert.doesNotMatch(image,/NaN/);
 for(const match of image.matchAll(/points="([^"]+)"/g))for(const pair of match[1].split(' ')){const y=Number(pair.split(',')[1]);assert.ok(y>=30&&y<=260);}
 console.log('PASS: hardware units, signed values, true zero and independent sensor gaps');
+// Card preferences apply independently, including selected load periods and CPU packages.
+context.server={metrics:{resources:[{id:'cpu',monitor:false,card:false},{id:'resource:load1',monitor:true,card:false},{id:'resource:load5',monitor:true,card:true},
+ {id:'temperature:package0',group:'temperature',kind:'cpu_package',monitor:true,card:false,present:true,value:50},
+ {id:'temperature:package1',group:'temperature',kind:'cpu_package',monitor:true,card:true,present:true,value:60,sensor_id:'package1',unit:'°C',source:'Temperature sensor'}],temperature:{package_sensor_id:'package0'}}};
+assert.equal(vm.runInContext('useResourceCard(server,"cpu")',context),false);
+assert.equal(vm.runInContext('primaryResource(server).id',context),'temperature:package1');
+assert.equal(vm.runInContext('cardLoadKeys(server).join(",")',context),'load5');
+console.log('PASS: resource card visibility, selected CPU package and independently selected load periods');

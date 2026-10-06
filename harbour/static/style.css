@@ -628,3 +628,11 @@ body.mobile-panel-open{overflow:hidden}
 .hardware-table td:nth-child(2){font-variant-numeric:tabular-nums;white-space:nowrap}.sensor-selector{display:grid;gap:6px;max-width:100%}.sensor-selector select{max-width:100%;width:100%}
 
 .hardware-table th:nth-child(2){width:84px}.hardware-table th:nth-child(4){width:94px}.hardware-table button{max-width:100%;white-space:normal;flex-wrap:wrap}
+
+.sensor-card-label{min-width:0;overflow-wrap:anywhere;flex:1}.sensor-card .metric-value{font-size:28px;overflow-wrap:anywhere}.sensor-card .metric-bottom{overflow-wrap:anywhere}
+.resource-settings-wrap{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:12px}
+.resource-settings{width:100%;min-width:730px;border-collapse:collapse;font-size:11px;table-layout:fixed}
+.resource-settings th,.resource-settings td{padding:9px 6px;text-align:left;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.resource-settings thead th{position:sticky;top:0;background:var(--panel);z-index:1}.resource-settings th:first-child{width:25%}.resource-settings th:nth-child(2){width:12%}.resource-settings th:nth-child(3),.resource-settings th:nth-child(4),.resource-settings th:nth-child(5){width:8%;text-align:center}
+.resource-settings tbody td:nth-child(3),.resource-settings tbody td:nth-child(4),.resource-settings tbody td:nth-child(5){text-align:center}.resource-settings input[type=checkbox]{width:15px;height:15px;margin:0}
+.resource-settings th small{display:block;font-weight:400;color:var(--muted);font-size:10px}.resource-settings select,.resource-settings input[type=number]{padding:5px 6px;font-size:11px;width:100%;min-width:0}.resource-limits{display:flex;gap:6px;margin-top:5px}.resource-limits label{flex:1;min-width:0;font-size:10px;margin:0}

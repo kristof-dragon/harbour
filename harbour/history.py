@@ -8,7 +8,7 @@ from contextlib import nullcontext
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import polling, remote_probe, store, volumes
+from . import polling, remote_probe, resources, store, volumes
 from .auth import admin, authenticated
 
 router = APIRouter(prefix="/api")
@@ -23,7 +23,7 @@ def policy():
 def empty():
     return {"attempts": 0, "up": 0, "n": 0, "cpu_n": 0, "cpu_sum": 0, "cpu_max": 0,
             **{key + suffix: 0 for key in LOAD_KEYS for suffix in ("_n", "_sum", "_max")},
-            "memory_sum": 0, "memory_max": 0, "memory_used_sum": 0, "memory_total_sum": 0,
+            "memory_n": 0, "memory_sum": 0, "memory_max": 0, "memory_used_sum": 0, "memory_total_sum": 0,
             "latency_n": 0, "latency_sum": 0, "latency_max": 0, "disks": {},
             "temperature_n": 0, "temperature_sum": 0, "temperature_max": -273.15, "sensors": {}, "hardware": {}}
 
@@ -31,7 +31,7 @@ def empty():
 def merge(left, right):
     # Legacy buckets had a CPU reading for every resource sample. New first
     # polls and reset intervals have other metrics but no CPU percentage.
-    left, right = ({**empty(), **data, 'cpu_n': data.get('cpu_n', data.get('n', 0))} for data in (left, right))
+    left, right = ({**empty(), **data, 'cpu_n': data.get('cpu_n', data.get('n', 0)), 'memory_n': data.get('memory_n', data.get('n', 0))} for data in (left, right))
     value = dict(left)
     for key in ("sample_first_min", "sample_last_max"):
         if key in right and key not in value:
@@ -65,9 +65,11 @@ def sample_payload(metrics=None, latency_ms=None, up=False):
     if latency_ms is not None:
         sample.update(latency_n=1, latency_sum=latency_ms, latency_max=latency_ms)
     if metrics:
-        sample.update(n=1,
-                      memory_sum=metrics["memory"]["percent"], memory_max=metrics["memory"]["percent"],
-                      memory_used_sum=metrics["memory"]["used"], memory_total_sum=metrics["memory"]["total"])
+        sample.update(n=1)
+        memory = metrics.get('memory')
+        if memory and resources.finite(memory.get('percent')):
+            sample.update(memory_n=1, memory_sum=memory['percent'], memory_max=memory['percent'],
+                          memory_used_sum=memory['used'], memory_total_sum=memory['total'])
         value = metrics.get('cpu')
         if isinstance(value, (int, float)) and math.isfinite(value) and 0 <= value <= 100:
             sample.update(cpu_n=1, cpu_sum=value, cpu_max=value)
@@ -114,6 +116,7 @@ def record(server_id, metrics=None, latency_ms=None, up=False, now=None, connect
         if not server:
             return
         if metrics and server:
+            metrics = resources.filter_history(dict(server), metrics)
             metrics = {**metrics, "disks": [d for d in metrics["disks"] if volumes.options(dict(server), d["mount"])["monitor"]]}
         payload = sample_payload(metrics, latency_ms, up)
         if metrics:
@@ -181,7 +184,7 @@ def series(server_id, hours, now=None, requested_resolution=0, disk_mount=None):
         selected = min(known.values(), key=remote_probe.package_order)["id"]
     points = []
     for bucket, data in sorted(grouped.items()):
-        n, ln, cn = data["n"], data["latency_n"], data["cpu_n"]
+        n, ln, cn, mn = data["n"], data["latency_n"], data["cpu_n"], data["memory_n"]
         package = data["sensors"].get(selected)
         disks = [{"mount": mount, "percent": d["percent_sum"]/d["n"], "peak": d["percent_max"],
                   "used_gb": d["used_sum"]/d["n"]/1e9, "free_gb": d["free_sum"]/d["n"]/1e9,
@@ -190,7 +193,7 @@ def series(server_id, hours, now=None, requested_resolution=0, disk_mount=None):
         points.append({"time": bucket, "sample_first": data.get("sample_first_min"), "sample_last": data.get("sample_last_max"), "cpu": data["cpu_sum"]/cn if cn else None, "cpu_peak": data["cpu_max"] if cn else None,
                        **{key: data[key + "_sum"]/data[key + "_n"] if data[key + "_n"] else None for key in LOAD_KEYS},
                        **{key + "_peak": data[key + "_max"] if data[key + "_n"] else None for key in LOAD_KEYS},
-                       "memory": data["memory_sum"]/n if n else None, "memory_peak": data["memory_max"] if n else None,
+                       "memory": data["memory_sum"]/mn if mn else None, "memory_peak": data["memory_max"] if mn else None,
                        "disk": max((d["percent"] for d in card_disks), default=None), "disk_peak": max((d["peak"] for d in card_disks), default=None),
                        "disks": disks, "latency_ms": data["latency_sum"]/ln if ln else None,
                        "temperature": package["sum"]/package["n"] if package else None,

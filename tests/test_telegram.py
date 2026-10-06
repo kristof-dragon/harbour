@@ -6,7 +6,7 @@ import urllib.error
 import pytest
 
 from test_harbour import client
-from harbour import app as module, notifications as alerts, store
+from harbour import app as module, notifications as alerts, resources, store
 
 TOKEN = '123456789:' + 'a' * 35
 
@@ -185,12 +185,14 @@ def test_background_integration_independent_of_dismissals_and_docker_lock(client
     snapshot['metrics']['memory']['percent'] = 99
     snapshot['metrics']['disks'][0]['percent'] = 99
     snapshot['metrics']['temperature']['sensors'][0]['celsius'] = 100
+    sensor_id = resources.hardware_id(snapshot['metrics']['hardware'][0])
+    store.execute("UPDATE servers SET resource_settings=? WHERE id='atlas'", (json.dumps({sensor_id: {'monitor': True, 'warn': True, 'card': True, 'limit_mode': 'custom', 'low': None, 'high': 1000}}),))
     store.execute("UPDATE servers SET snapshot=? WHERE id='atlas'", (json.dumps(snapshot),))
     module.refresh_server('atlas')
     assert {r['kind'] for r in store.rows('SELECT * FROM notification_state')} == set(alerts.KINDS)
     client.post('/api/dismiss-all')
     before = store.rows('SELECT * FROM notification_state')
-    assert len(before) == 4
+    assert len(before) == len(alerts.KINDS)
     snapshot['metrics']['cpu'] = 10
     store.execute("UPDATE servers SET snapshot=? WHERE id='atlas'", (json.dumps(snapshot),))
     lock = threading.Lock(); lock.acquire()

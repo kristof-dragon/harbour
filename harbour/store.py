@@ -128,6 +128,7 @@ def initialize():
         add_columns("servers", {"poll_seconds": "INTEGER", "monitoring_enabled": "INTEGER NOT NULL DEFAULT 1",
             "last_attempt": "REAL", "latency_ms": "REAL", "connection_status": "TEXT NOT NULL DEFAULT 'pending'",
             "auth_method": "TEXT NOT NULL DEFAULT 'key'", "password_encrypted": "TEXT", "server_type": "TEXT NOT NULL DEFAULT 'docker'",
+            "resource_settings": "TEXT NOT NULL DEFAULT '{}'", "resource_catalog": "TEXT NOT NULL DEFAULT '{}'",
             "volume_settings": "TEXT NOT NULL DEFAULT '{}'", "sort_order": "INTEGER NOT NULL DEFAULT 0"})
         old_sessions = add_columns("sessions", {"created": "REAL NOT NULL DEFAULT 0",
             "last_activity": "REAL NOT NULL DEFAULT 0", "address": "TEXT NOT NULL DEFAULT ''",
