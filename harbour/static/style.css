@@ -549,7 +549,8 @@ body.mobile-panel-open{overflow:hidden}
 .service-versions{display:flex;gap:4px 14px;flex-wrap:wrap;font-size:10px;margin-top:5px;font-weight:450}.running-version{color:var(--muted)}.available-version{color:var(--accent)}.service-title{min-width:0}.service-title>small{overflow-wrap:anywhere}.service-versions>span{overflow-wrap:anywhere}
 
 /* One compact server settings form; all edits share the footer Save action. */
-.modal.server-settings-modal{width:min(770px,100%);padding:18px 20px;max-height:calc(100dvh - 32px)}
+.modal-backdrop:has(>.server-settings-modal){padding-block:10px}
+.modal.server-settings-modal{width:min(770px,100%);padding:18px 20px;max-height:calc(100dvh - 20px);overscroll-behavior-y:contain}
 .server-settings-modal .modal-header{gap:10px;margin:0 0 12px}
 .server-settings-modal .modal-header h2{display:flex;align-items:center;gap:6px;flex:1;min-width:0;font-size:18px}
 .server-settings-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -630,7 +631,7 @@ body.mobile-panel-open{overflow:hidden}
 .hardware-table th:nth-child(2){width:84px}.hardware-table th:nth-child(4){width:94px}.hardware-table button{max-width:100%;white-space:normal;flex-wrap:wrap}
 
 .sensor-card-label{min-width:0;overflow-wrap:anywhere;flex:1}.sensor-card .metric-value{font-size:28px;overflow-wrap:anywhere}.sensor-card .metric-bottom{overflow-wrap:anywhere}
-.resource-settings-wrap{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:12px}
+.resource-settings-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;margin-top:12px}
 .resource-settings{width:100%;min-width:730px;border-collapse:collapse;font-size:11px;table-layout:fixed}
 .resource-settings th,.resource-settings td{padding:9px 6px;text-align:left;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
 .resource-settings thead th{position:sticky;top:0;background:var(--panel);z-index:1}.resource-settings th:first-child{width:25%}.resource-settings th:nth-child(2){width:12%}.resource-settings th:nth-child(3),.resource-settings th:nth-child(4),.resource-settings th:nth-child(5){width:8%;text-align:center}
