@@ -1,4 +1,4 @@
-"""Sent over pinned SSH; requires only Python 3 and Docker on the Linux host.
+"""Sent over pinned SSH; uses Python 3 on Linux/macOS, plus Docker when enabled.
 
 No shell expansion and no arbitrary commands from the browser. This module is
 also imported locally to construct the exact same operation preview.
@@ -11,12 +11,14 @@ import subprocess
 import codecs
 import selectors
 import signal
+import sys
 import time
 from pathlib import Path
 
 
 def run(argv, timeout=30, cwd=None):
-    result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                            env={**os.environ, 'LC_ALL': 'C'})
     if result.returncode:
         raise RuntimeError((result.stderr or result.stdout or "Command failed")[-4000:])
     return result.stdout
@@ -207,6 +209,14 @@ def inventory():
 
 
 def metrics(docker=True):
+    if sys.platform == 'darwin':
+        return macos_metrics(docker)
+    if sys.platform.startswith('linux'):
+        return linux_metrics(docker)
+    raise RuntimeError('Unsupported host OS: Harbour monitors Linux and macOS hosts.')
+
+
+def linux_metrics(docker=True):
     with open("/proc/stat") as f:
         # guest/guest_nice are already included in user/nice; only use the
         # first eight counters. Harbour keeps the baseline between polls.
@@ -266,6 +276,121 @@ def metrics(docker=True):
             "uptime": uptime, "os": os_name, "kernel": os.uname().release,
             "temperature": temperatures(), "timezone": timezone_info(),
             "docker": run(["docker", "version", "--format", "{{.Server.Version}}"]).strip() if docker else None}
+
+
+def macos_cpu_ticks():
+    """Read cumulative Mach CPU ticks once, without sampling delays or dependencies."""
+    import ctypes
+    lib = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+    lib.mach_host_self.argtypes = []
+    lib.mach_host_self.restype = ctypes.c_uint
+    lib.host_statistics.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.POINTER(ctypes.c_uint),
+                                    ctypes.POINTER(ctypes.c_uint)]
+    lib.host_statistics.restype = ctypes.c_int
+    lib.mach_port_deallocate.argtypes = [ctypes.c_uint, ctypes.c_uint]
+    lib.mach_port_deallocate.restype = ctypes.c_int
+    ticks, count = (ctypes.c_uint * 4)(), ctypes.c_uint(4)
+    host = lib.mach_host_self()
+    try:
+        # HOST_CPU_LOAD_INFO: user, system, idle, nice (32-bit unsigned ticks).
+        status = lib.host_statistics(host, 3, ticks, ctypes.byref(count))
+        if status or count.value != 4:
+            raise OSError('macOS CPU counters are unavailable')
+        return list(ticks)
+    finally:
+        task = ctypes.c_uint.in_dll(lib, 'mach_task_self_').value
+        lib.mach_port_deallocate(task, host)
+
+
+def macos_memory(total, output):
+    # vm_stat reports the actual page size: 4 KiB on Intel, often 16 KiB on ARM.
+    page_size = re.search(r'page size of (\d+) bytes', output)
+    pages = {name.strip(): int(value) for name, value in
+             re.findall(r'^([^:\n]+):\s*(\d+)\.', output, re.MULTILINE)}
+    if (total <= 0 or not page_size or int(page_size[1]) <= 0
+            or not {'Pages free', 'Pages inactive'} <= pages.keys()):
+        raise RuntimeError('macOS memory statistics are unavailable')
+    # Free and inactive pages are reclaimable. Compressed memory stays counted
+    # as used; this is a capacity percentage, not Activity Monitor's pressure.
+    available = min(total, (pages['Pages free'] + pages['Pages inactive']) * int(page_size[1]))
+    used = total - available
+    return {'total': total, 'used': used, 'percent': round(100 * used / total, 1)}
+
+
+def macos_disks():
+    mounts = []
+    for line in run(['/sbin/mount'], timeout=5).splitlines():
+        match = re.match(r'^.+? on (.+) \(([^, )]+)(?:, (.*))?\)$', line)
+        if match:
+            mounts.append((match[1], match[2], set((match[3] or '').split(', '))))
+    data = '/System/Volumes/Data'
+    has_data = any(mount == data and fs == 'apfs' for mount, fs, _ in mounts)
+    disks, seen = [], set()
+    for path, fs, flags in mounts:
+        # Show the writable startup volume as /, not its tiny sealed snapshot.
+        mount = '/' if path == data else path
+        if path == '/' and has_data:
+            continue
+        if mount != '/' and (fs not in {'apfs', 'hfs', 'exfat', 'msdos', 'ntfs', 'ufs', 'zfs', 'nfs', 'smbfs', 'afpfs', 'webdav', 'osxfuse', 'macfuse'}
+                or path.startswith(('/System/Volumes/', '/Volumes/.timemachine/', '/Library/Developer/CoreSimulator/'))
+                or 'nobrowse' in flags):
+            continue
+        if mount in seen:
+            continue
+        try:
+            stat = os.statvfs(path)
+        except OSError:
+            continue
+        if not stat.f_blocks:
+            continue
+        seen.add(mount)
+        total = stat.f_blocks * stat.f_frsize
+        free = stat.f_bavail * stat.f_frsize
+        # APFS capacity/free space belongs to the shared container; include
+        # sibling volumes and snapshots in used space so fullness is meaningful.
+        used = total - free if fs == 'apfs' else (stat.f_blocks - stat.f_bfree) * stat.f_frsize
+        disks.append({'mount': mount, 'total': total, 'used': used, 'free': free,
+                      'percent': round(100 * used / max(used + free, 1), 1)})
+    return disks
+
+
+def macos_metrics(docker=True):
+    boot = run(['/usr/sbin/sysctl', '-n', 'kern.boottime'], timeout=5)
+    match = re.search(r'sec\s*=\s*(\d+),\s*usec\s*=\s*(\d+)', boot)
+    if not match:
+        raise RuntimeError('macOS boot time is unavailable')
+    uptime = max(0, time.time() - int(match[1]) - int(match[2]) / 1_000_000)
+    boot_id = 'darwin:btime:' + match[1] + ':' + match[2]
+    try:
+        session = run(['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'], timeout=5).strip()
+        if session:
+            boot_id = 'darwin:' + session
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        pass
+    cores, counters = os.cpu_count(), None
+    try:
+        user, system, idle, nice = macos_cpu_ticks()
+        # Normalize to the existing user/nice/system/idle/iowait/irq/softirq/steal
+        # schema. A wrap or reset rebaselines safely in harbour.cpu.
+        counters = {'source': 'darwin', 'values': [user, nice, system, idle, 0, 0, 0, 0],
+                    'boot_id': boot_id, 'uptime': uptime, 'cores': cores}
+    except (OSError, AttributeError, ValueError):
+        pass  # Keep other resources usable when CPU statistics are unavailable.
+    total = int(run(['/usr/sbin/sysctl', '-n', 'hw.memsize'], timeout=5).strip())
+    memory = macos_memory(total, run(['/usr/bin/vm_stat'], timeout=5))
+    try:
+        version = run(['/usr/bin/sw_vers', '-productVersion'], timeout=5).strip()
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        version = ''
+    try:
+        load = os.getloadavg()
+    except OSError:
+        load = (None, None, None)
+    return {'cpu': None, 'cpu_counters': counters, 'cores': cores, 'memory': memory,
+            **dict(zip(('load1', 'load5', 'load15'), load)), 'disks': macos_disks(),
+            'uptime': uptime, 'os': ('macOS ' + version).strip(), 'kernel': os.uname().release,
+            'temperature': temperature_summary([]), 'timezone': timezone_info(),
+            'docker': run(['docker', 'version', '--format', '{{.Server.Version}}']).strip() if docker else None}
 
 
 def temperature_kind(sensor):

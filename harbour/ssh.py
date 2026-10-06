@@ -4,6 +4,7 @@ import hmac
 import io
 import json
 import socket
+import shlex
 import threading
 import time
 from pathlib import Path
@@ -13,6 +14,17 @@ import paramiko
 from . import store
 
 DISABLED_ALGORITHMS = {"pubkeys": ["ssh-rsa"], "keys": ["ssh-rsa"]}
+
+# Fixed code only: no host, credential or browser-supplied value enters the shell.
+# macOS SSH sessions omit Homebrew and Docker Desktop from PATH. Prefer installed
+# Python over Apple's development-tools stub and expose Docker credential helpers.
+REMOTE_PYTHON = '/bin/sh -c ' + shlex.quote('''
+if [ "$(uname -s)" = Darwin ]; then
+    PATH="/opt/homebrew/bin:/usr/local/bin:$PATH:$HOME/.docker/bin:/Applications/Docker.app/Contents/Resources/bin"
+    export PATH
+fi
+exec python3 -
+'''.strip())
 
 
 def host_fingerprint(key):
@@ -153,7 +165,7 @@ def install_key(server, key_id, password):
         source = Path(__file__).with_name('remote_install_key.py').read_text()
         public = key.get_name() + ' ' + key.get_base64()
         source += '\nimport json\nprint(json.dumps(install_public_key(' + repr(public) + ')))\n'
-        stdin, stdout, stderr = client.exec_command('python3 -', timeout=15)
+        stdin, stdout, stderr = client.exec_command(REMOTE_PYTHON, timeout=15)
         stdin.write(source)
         stdin.flush()
         stdin.channel.shutdown_write()
@@ -259,7 +271,7 @@ def request(server, payload, on_event=None, cancel=None):
             source += "\ndef emit(event):\n print(json.dumps({'event':event}), flush=True)\ntry:\n result=handle(json.loads(" + repr(json.dumps(payload)) + "), emit)\nexcept Exception as exc:\n result={'error':str(exc)}\nprint(json.dumps({'result':result}), flush=True)\n"
         else:
             source += "\ntry:\n print(json.dumps(handle(json.loads(" + repr(json.dumps(payload)) + "))))\nexcept Exception as exc:\n print(json.dumps({'error': str(exc)}))\n"
-        stdin, stdout, stderr = client.exec_command("python3 -", timeout=15)
+        stdin, stdout, stderr = client.exec_command(REMOTE_PYTHON, timeout=15)
         if cancel:
             cancel.check()
         stdin.write(source)

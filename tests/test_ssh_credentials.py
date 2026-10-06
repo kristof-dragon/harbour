@@ -46,7 +46,7 @@ def install_host(tmp_path):
                     if command == b'true':
                         channel.send_exit_status(0)
                     else:
-                        assert command == b'python3 -'
+                        assert command == ssh.REMOTE_PYTHON.encode()
                         channel.settimeout(5)
                         source = bytearray()
                         while chunk := channel.recv(65536):

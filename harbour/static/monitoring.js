@@ -5,7 +5,7 @@ const seriesMeta={...resourceMeta,...Object.fromEntries(loadKeys.map((key,i)=>[k
 const resourceSeries=keys=>keys.flatMap(key=>key==='load'?loadKeys:[key]);
 const resourceValue=(value,key)=>value==null?'—':loadKeys.includes(key)?value.toFixed(2):percent(value);
 const loadLegend=()=>`<div class="load-legend">${loadKeys.map(key=>`<span style="--series:${seriesMeta[key].color}"><i class="${key}"></i>${seriesMeta[key].short}</span>`).join('')}</div>`;
-const loadHelp=()=>help('Load average','Linux load averages count tasks running, runnable or in uninterruptible wait (often I/O), over 1, 5 and 15 minutes. They are not percentages or disk throughput. Compare with the host’s logical CPU count, and with CPU usage, when interpreting demand.');
+const loadHelp=()=>help('Load average','Load averages describe demand over 1, 5 and 15 minutes. macOS counts runnable tasks; Linux also includes tasks in uninterruptible wait (often I/O). They are not percentages or disk throughput. Compare with the host’s logical CPU count, and with CPU usage, when interpreting demand.');
 const hourChoices=[1,3,6,12,24,48,168,336,672,2160,4320,8760,17520];
 let cardHours=Number(localStorage.getItem('harbour-card-hours'))||6;
 if(!hourChoices.includes(cardHours))cardHours=6;
@@ -33,7 +33,7 @@ function resourceCards(s){
 }
 function loadResourceCard(s){
   const m=s.metrics,available=loadKeys.some(key=>m[key]!=null);
-  return `<article data-key="metric:load" class="metric load-metric"><div><div class="metric-label">${icon('activity')}Load average<span class="tag">${!available?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="load-values">${loadKeys.map(key=>`<div><small style="color:${seriesMeta[key].color}">${seriesMeta[key].short}</small><b>${resourceValue(m[key],key)}</b></div>`).join('')}</div><div class="metric-bottom">${m.cores??'—'} logical CPUs · running, runnable or waiting on I/O</div></div><button class="card-chart" type="button" data-action="history" data-resource="load" aria-label="Explore Load average history"><span data-card-chart="load" data-preserve-children>Loading history…</span></button></article>`;
+  return `<article data-key="metric:load" class="metric load-metric"><div><div class="metric-label">${icon('activity')}Load average<span class="tag">${!available?'Unavailable':s.stale?'Stale':'Latest'}</span></div><div class="load-values">${loadKeys.map(key=>`<div><small style="color:${seriesMeta[key].color}">${seriesMeta[key].short}</small><b>${resourceValue(m[key],key)}</b></div>`).join('')}</div><div class="metric-bottom">${m.cores??'—'} logical CPUs · system load</div></div><button class="card-chart" type="button" data-action="history" data-resource="load" aria-label="Explore Load average history"><span data-card-chart="load" data-preserve-children>Loading history…</span></button></article>`;
 }
 function graphValue(point,key){return point[historyState.stat==='peak'?key+'_peak':key];}
 function chartSVG(data,keys,{mini=false}={}){

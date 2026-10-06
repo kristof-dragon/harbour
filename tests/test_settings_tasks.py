@@ -183,7 +183,7 @@ def test_real_ssh_stream_delivers_output_before_command_finishes(client,tmp_path
                 try:
                     if command==b'true':channel.send_exit_status(0)
                     else:
-                        assert command==b'python3 -'
+                        assert command==ssh.REMOTE_PYTHON.encode()
                         source=bytearray();channel.settimeout(5)
                         while chunk:=channel.recv(65536):source.extend(chunk)
                         with subprocess.Popen([sys.executable,'-'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,

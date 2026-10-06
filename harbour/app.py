@@ -724,7 +724,7 @@ def probe_fingerprint(body: SSHHostInput, user=Depends(admin)):
 
 class SSHLoginInput(SSHHostInput):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=False)
-    username: str = Field(pattern=r"^[a-z_][a-z0-9_-]{0,63}$")
+    username: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
     fingerprint: str = Field(pattern=r"^SHA256:[A-Za-z0-9+/]{43}$")
 
     @field_validator('host', 'username', 'fingerprint', 'name', 'key_id', mode='before', check_fields=False)

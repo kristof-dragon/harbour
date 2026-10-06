@@ -276,6 +276,30 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  assert.equal(await cpuCard.locator('.metric-value').textContent(),'0.0%');
  assert.match(await cpuCard.textContent(),/1m 0s average/);
  console.log('PASS: CPU baseline waiting state, actual interval label and genuine zero usage');
+ // macOS uses the same resource cards for plain and Docker hosts; temperature
+ // stays unavailable and resource history remains accessible for either type.
+ dashboard.servers[0].metrics.os='macOS 15.7.1';dashboard.servers[0].metrics.kernel='24.6.0';
+ dashboard.servers[0].metrics.temperature={package:null,sensors:[],package_count:0};
+ for(const type of ['plain','docker']){
+  dashboard.servers[0].server_type=type;await page.evaluate(()=>load());
+  assert.match(await page.locator('.host-facts').textContent(),/macOS 15.7.1/);
+  assert.equal(await page.locator('[data-key="metric:temperature"] .metric-value').textContent(),'—');
+  assert.match(await page.locator('[data-key="metric:load"]').textContent(),/system load/);
+  assert.equal(await page.getByRole('button',{name:'Explore history',exact:true}).count(),1);
+  assert.equal(await page.locator('#service-search').count(),type==='docker'?1:0);
+ }
+ await page.evaluate(()=>onboard());
+ assert.match(await page.locator('#onboard-form').textContent(),/Monitor Linux or macOS using either server type/);
+ assert.match(await page.locator('#onboard-form').textContent(),/Remote Login/);
+ assert.equal(await page.locator('[name="server_type"] option').count(),2);
+ await page.locator('[name="username"]').fill('Mac.User');
+ assert.equal(await page.locator('[name="username"]').evaluate(el=>el.checkValidity()),true);
+ await page.locator('[name="username"]').fill('user;id');
+ assert.equal(await page.locator('[name="username"]').evaluate(el=>el.checkValidity()),false);
+ await page.locator('[name="username"]').fill('harbour');
+ assert.equal(await page.locator('.modal').evaluate(el=>el.getBoundingClientRect().right<=innerWidth),true);
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ console.log('PASS: macOS plain and Docker cards, unavailable temperature, history and mobile onboarding');
  assert.deepEqual(errors,[]);assert.ok(requests>=4);
  console.log('PASS: changed-value rendering, desktop/mobile scroll, focus/caret, expanded panels, persistent animation, live progress/log scroll, task counts, collapsible filters, refresh-all, chart hover/touch/keyboard/missing values, container and Activity status colours, bulk notification dismissal, inline stack chips, combined service filters and matching-only bulk actions');
  }finally{await browser.close();server.close();}

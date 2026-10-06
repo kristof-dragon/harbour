@@ -52,6 +52,7 @@ def test_cpu_rebaselines_without_fabricated_zero_or_spike(change):
 
 
 def test_probe_reads_counters_once_without_sleep_or_guest_double_counting(monkeypatch):
+    monkeypatch.setattr(remote_probe.sys, 'platform', 'linux')
     files = {'/proc/stat': 'cpu 100 10 20 600 100 5 5 20 1000 2000\nbtime 12345\n',
              '/proc/uptime': '1000.25 4000\n', '/proc/sys/kernel/random/boot_id': 'boot-a\n',
              '/proc/meminfo': 'MemTotal: 1000 kB\nMemAvailable: 500 kB\n', '/proc/mounts': '',

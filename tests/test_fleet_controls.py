@@ -128,6 +128,7 @@ def test_plain_creation_and_refresh_payload(client,monkeypatch):
 
 @pytest.mark.parametrize('load', [(1.25, 2.5, 3.75), None])
 def test_mount_discovery_keeps_equal_capacity_mounts_and_plain_metrics_skip_docker(monkeypatch, load):
+    monkeypatch.setattr(remote_probe.sys, 'platform', 'linux')
     original_open=builtins.open
     def open_(path,*args,**kwargs):
         data={'/proc/stat':'cpu 100 0 0 100 0 0 0 0\n','/proc/meminfo':'MemTotal: 1000 kB\nMemAvailable: 500 kB\n','/proc/mounts':'/dev/root / ext4 rw 0 0\n/dev/root /home ext4 rw 0 0\n','/proc/uptime':'1000 0\n','/etc/os-release':'PRETTY_NAME="Test Linux"\n'}

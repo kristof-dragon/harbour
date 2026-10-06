@@ -159,7 +159,7 @@ function metricCard(label,ico,value,unit,detail,aside,pct,warning=false,extra=''
 function renderMain(){
   if(!$('#main'))return;
   const s=current();
-  if(!s){updateHTML($('#main'),`<div class="no-servers empty">${icon('server')}<h1>Your fleet starts here</h1><p>Add your first Linux server to see its resources and Docker services.</p>${admin()?button('onboard','Add your first server','plus','primary'):''}</div>`);return;}
+  if(!s){updateHTML($('#main'),`<div class="no-servers empty">${icon('server')}<h1>Your fleet starts here</h1><p>Add your first Linux or macOS server to see its resources and Docker services.</p>${admin()?button('onboard','Add your first server','plus','primary'):''}</div>`);return;}
   const m=s.metrics,isDocker=s.server_type!=='plain';
   const view=!isDocker&&state.tab==='containers'?'storage':state.tab;
   updateHTML($('#main'),`${serverWarnings(s)}${state.demo?`<div data-key="demo-banner" class="demo-banner">${icon('info')}<span>Demo workspace · sample servers, simulated actions.</span><span>No live connections</span></div>`:''}
@@ -372,11 +372,12 @@ function renderOnboard(){
     <form id="onboard-form" ${connection?`data-server="${e(connection.id)}"`:''}>
       <div class="form-grid">
         <label>Display name<input name="name" placeholder="Atlas" value="${e(connection?.name||'')}" required maxlength="80"></label>
-        <label>${fieldCaption('Hostname or IP','Python 3 is required. Docker hosts also need Docker and Compose v2.')}<input name="host" aria-label="Hostname or IP" placeholder="192.0.2.10" value="${e(connection?.host||'')}" required></label>
-        <label>SSH user<input name="username" placeholder="harbour" value="${e(connection?.username||'harbour')}" required pattern="[a-z_][a-z0-9_-]{0,63}"></label>
+        <label>${fieldCaption('Hostname or IP','Linux and macOS are detected automatically. Python 3.9+ is required. On macOS, enable Remote Login. Docker hosts also need a running Docker engine and Compose v2 accessible to the SSH user.')}<input name="host" aria-label="Hostname or IP" placeholder="192.0.2.10" value="${e(connection?.host||'')}" required></label>
+        <label>SSH user<input name="username" placeholder="harbour" value="${e(connection?.username||'harbour')}" required pattern="[A-Za-z_][A-Za-z0-9_.\\-]{0,63}"></label>
         <label>SSH port<input name="port" type="number" value="${connection?.port||22}" min="1" max="65535" required></label>
         <label class="full">${fieldCaption('Host fingerprint','Get fingerprint reads the server’s host key without logging in. Compare it through a trusted connection, or explicitly accept it on first connection. For an Ed25519 host key, the server-console command is: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256. Later fingerprint changes are rejected.')}<div class="fingerprint-input"><input name="fingerprint" aria-label="Host fingerprint" class="mono" value="${e(connection?.fingerprint||'')}" placeholder="SHA256:…" required pattern="SHA256:[A-Za-z0-9+/]{43}">${button('probe-fingerprint','Get fingerprint','search','',state.demo?'disabled':'')}</div></label>
       </div>
+      <p class="hint">Monitor Linux or macOS using either server type. On macOS, enable Remote Login and install Python 3.9+. For Docker, use the account that runs Docker Desktop or your Docker engine.</p>
       ${connection?'':`<label class="onboard-type">Server type<select name="server_type"><option value="docker">Docker host</option><option value="plain">Plain server · resources only</option></select></label>`}
       <div id="fingerprint-result" aria-live="polite"></div>
       <hr class="section-rule">

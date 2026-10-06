@@ -281,7 +281,7 @@ def test_ssh_latency_and_connection_classification(client,monkeypatch,failure,st
         def set_keepalive(self,value):pass
         def exec_command(self,command,timeout):
             commands.append(command)
-            stream=Stream(Channel(b'{"metrics": {}, "services": []}' if command=='python3 -' else b''))
+            stream=Stream(Channel(b'{"metrics": {}, "services": []}' if command==ssh.REMOTE_PYTHON else b''))
             return stream,stream,stream
         def close(self):closed.append(True)
     monkeypatch.setattr(ssh.paramiko,'SSHClient',FakeClient)
@@ -292,7 +292,7 @@ def test_ssh_latency_and_connection_classification(client,monkeypatch,failure,st
     else:
         result=ssh.request(server,{'operation':'snapshot'})
         assert result['latency_ms']>=0
-        assert commands==['true','python3 -']
+        assert commands==['true',ssh.REMOTE_PYTHON]
     assert closed==[True]
 
 

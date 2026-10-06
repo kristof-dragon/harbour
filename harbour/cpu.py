@@ -1,4 +1,4 @@
-"""CPU utilisation from consecutive, boot-scoped Linux counter readings."""
+"""CPU utilisation from consecutive, boot-scoped normalized host counters."""
 import math
 
 
@@ -6,7 +6,8 @@ def valid(sample):
     if not isinstance(sample, dict) or not isinstance(sample.get('boot_id'), str) or not sample['boot_id']:
         return False
     values = sample.get('values')
-    return (isinstance(values, list) and len(values) == 8
+    return (sample.get('source', 'linux') in ('linux', 'darwin')
+            and isinstance(values, list) and len(values) == 8
             and all(type(value) is int and value >= 0 for value in values)
             and type(sample.get('cores')) is int and sample['cores'] > 0
             and type(sample.get('uptime')) in (int, float)
@@ -17,7 +18,8 @@ def usage(previous, current):
     """Return (percent, elapsed seconds), or a missing reading requiring a baseline."""
     if not valid(previous) or not valid(current):
         return None, None
-    if previous['boot_id'] != current['boot_id'] or previous['cores'] != current['cores']:
+    if (previous['boot_id'] != current['boot_id'] or previous['cores'] != current['cores']
+            or previous.get('source', 'linux') != current.get('source', 'linux')):
         return None, None
     elapsed = current['uptime'] - previous['uptime']
     delta = [new - old for new, old in zip(current['values'], previous['values'])]
