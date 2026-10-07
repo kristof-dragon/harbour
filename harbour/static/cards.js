@@ -39,8 +39,19 @@ function layoutResourceCards(){
   const columns=Math.max(1,Math.floor((width+gap)/230)),medium=2*Math.floor((width-gap*(columns-1))/columns/2);
   const widths={small:width<390?Math.max(138,Math.floor((width-gap)/2)):Math.round(medium*.75),medium,large:medium*1.5};
   setCardStyle(grid,'gridTemplateColumns',`repeat(${width}, 1px)`);
-  let x=0,row=1;
-  for(const card of grid.children){const w=Math.min(width,widths[card.dataset.cardSize]||medium);if(x+w>width){row++;x=0;}setCardStyle(card,'width',w+'px');setCardStyle(card,'gridColumn',`${x+1} / span ${w}`);setCardStyle(card,'gridRow',String(row));x+=w+gap;}
+  let x=0,row=1,smallColumn=null;
+  for(const card of grid.children){
+    const small=card.dataset.cardSize==='small',w=Math.min(width,widths[card.dataset.cardSize]||medium);
+    let column,cardRow=row;
+    if(small&&smallColumn!==null){column=smallColumn;cardRow++;smallColumn=null;}
+    else{
+      if(x+w>width){row+=2;x=0;smallColumn=null;}
+      column=x;cardRow=row;x+=w+gap;
+      // Pair Small cards vertically within the current row of taller cards.
+      if(small)smallColumn=column;
+    }
+    setCardStyle(card,'width',w+'px');setCardStyle(card,'gridColumn',`${column+1} / span ${w}`);setCardStyle(card,'gridRow',`${cardRow} / span ${small?1:2}`);
+  }
   if(observedCardGrid!==grid){cardGridObserver?.disconnect();observedCardGrid=grid;cardGridObserver=new ResizeObserver(layoutResourceCards);cardGridObserver.observe(grid);}
 }
 async function saveCardPreferences(serverId,body){

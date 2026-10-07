@@ -412,11 +412,15 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  for(const key of ['load1','load5','load15'])assert.equal(await page.locator('[data-resource-setting="resource:'+key+'"] [data-card-size-value]').inputValue(),'small');
  await page.locator('#server-settings-form button[type=submit]').click();await page.waitForFunction(()=>!document.querySelector('#server-settings-form').dataset.busy);
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();assert.equal(await loadCard.getAttribute('data-card-size'),'small');
+ const rowGap=await grid.evaluate(el=>parseFloat(getComputedStyle(el).rowGap)),smallHeight=(medium.height-rowGap)/2;
+ assert.equal((await loadCard.boundingBox()).height,smallHeight);
+ assert.equal((await grid.locator('[data-resource-card="memory"]').boundingBox()).height,medium.height);
  // Invalid warning limits keep the popover open; hiding a card can be reversed in the overlay.
  const fanCard=grid.locator('[data-resource-card="resource:fan"]');await fanCard.locator('[data-action=resource-card-settings]').click();
  await page.locator('#resource-card-form [data-resource-option=warn]').check();await page.locator('#resource-card-form button[type=submit]').click();
  await page.locator('#resource-card-form .form-error').filter({hasText:'Set at least one warning limit'}).waitFor();
  await page.locator('#resource-card-form [data-resource-limit=high]').fill('4000');
+ await page.locator('#resource-card-form [data-action=card-settings-size][data-value=small]').click();
  await page.locator('#resource-card-form [data-resource-option=card]').uncheck();
  await page.locator('#resource-card-form button[type=submit]').click();await page.locator('#resource-card-form').waitFor({state:'detached'});assert.equal(await fanCard.count(),0);
  await page.getByRole('button',{name:'Server settings',exact:true}).click();
@@ -425,10 +429,16 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  await page.locator('#server-settings-form button[type=submit]').click();await page.waitForFunction(()=>!document.querySelector('#server-settings-form').dataset.busy);
  if(process.env.HARBOUR_TEST_CAPTURE){await page.locator('.server-settings-modal').evaluate(el=>el.scrollTop=0);await page.screenshot({path:'test-results/card-layout-overlay.png'});}
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();assert.equal(await fanCard.count(),1);
+ const firstSmall=await loadCard.boundingBox(),secondSmall=await fanCard.boundingBox(),nextMedium=await grid.locator('[data-resource-card="resource:power"]').boundingBox();
+ assert.equal(secondSmall.x,firstSmall.x);assert.equal(secondSmall.y,firstSmall.y+smallHeight+rowGap);
+ assert.equal(secondSmall.y+secondSmall.height-firstSmall.y,medium.height);
+ assert.equal(nextMedium.y,firstSmall.y);assert.equal(nextMedium.y+nextMedium.height,secondSmall.y+secondSmall.height);
+ if(process.env.HARBOUR_TEST_CAPTURE)await page.screenshot({path:'test-results/card-layout-mixed.png'});
  // Drag image follows the pointer, polling cannot replace it, and a failed save rolls back.
  const handle=await loadCard.locator('.resource-card-handle').boundingBox(),target=await cpuCard.boundingBox();
  await page.mouse.move(handle.x+handle.width/2,handle.y+handle.height/2);await page.mouse.down();await page.mouse.move(target.x+target.width/2,target.y+target.height/2,{steps:12});
  assert.equal(await page.locator('.resource-card-ghost').count(),1);assert.notEqual(await page.locator('.resource-card-ghost').evaluate(el=>getComputedStyle(el).boxShadow),'none');
+ assert.equal(await page.locator('.resource-card-ghost').evaluate(el=>el.offsetHeight),smallHeight);
  await page.evaluate(()=>load());assert.equal(await page.locator('.resource-card-ghost').count(),1);
  if(process.env.HARBOUR_TEST_CAPTURE)await page.screenshot({path:'test-results/card-layout-drag.png'});
  await page.mouse.up();await waitCards();assert.equal(await grid.locator(':scope>article').first().getAttribute('data-resource-card'),'load');
@@ -443,7 +453,15 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  await page.waitForTimeout(250);
  if(process.env.HARBOUR_TEST_CAPTURE){await page.evaluate(()=>document.querySelector('#toasts').style.visibility='hidden');await page.screenshot({path:'test-results/card-layout-large.png'});}
  await page.setViewportSize({width:390,height:844});await page.waitForTimeout(150);
- for(const size of ['small','medium','large']){await page.locator('[data-action=card-size-all][data-value='+size+']').click();await waitCards();assert.equal(await grid.locator(':scope>article').evaluateAll(els=>els.every(el=>el.getBoundingClientRect().right<=innerWidth)),true);}
+ for(const size of ['small','medium','large']){
+  await page.locator('[data-action=card-size-all][data-value='+size+']').click();await waitCards();
+  assert.equal(await grid.locator(':scope>article').evaluateAll(els=>els.every(el=>el.getBoundingClientRect().right<=innerWidth)),true);
+  assert.deepEqual(await grid.locator(':scope>article').evaluateAll(els=>[...new Set(els.map(el=>el.getBoundingClientRect().height))]),[size==='small'?smallHeight:medium.height]);
+  if(size==='small'){
+   assert.equal(await grid.locator(':scope>article').evaluateAll(els=>els.every(el=>[...el.querySelectorAll('.metric-label,.metric-value,.load-values')].every(n=>n.getBoundingClientRect().bottom<=el.getBoundingClientRect().bottom))),true);
+   if(process.env.HARBOUR_TEST_CAPTURE)await page.screenshot({path:'test-results/card-layout-small-mobile.png'});
+  }
+ }
  await cpuCard.locator('[data-action=resource-card-settings]').click();assert.equal(await page.locator('.resource-card-popover').evaluate(el=>el.getBoundingClientRect().right<=innerWidth&&el.getBoundingClientRect().left>=0),true);
  await page.waitForTimeout(250);
  if(process.env.HARBOUR_TEST_CAPTURE)await page.screenshot({path:'test-results/card-layout-mobile.png'});
@@ -452,7 +470,7 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  assert.equal(await page.locator('.resource-settings-wrap').evaluate(el=>el.scrollHeight===el.clientHeight),true);
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
  assert.ok(cardWrites.length>=8);
- console.log('PASS: equal-height 1.5x Large cards, individual and shared sizes, popover warning limits, overlay sync, hide/restore, shadow dragging, polling guard, keyboard ordering, reload persistence, save rollback, mobile fit');
+ console.log('PASS: stacked half-height Small cards, equal-height 1.5x Large cards, individual and shared sizes, popover warning limits, overlay sync, hide/restore, shadow dragging, polling guard, keyboard ordering, reload persistence, save rollback, mobile fit');
  }
  assert.deepEqual(errors,[]);assert.ok(requests>=4);
  console.log('PASS: changed-value rendering, desktop/mobile scroll, focus/caret, expanded panels, persistent animation, live progress/log scroll, task counts, collapsible filters, refresh-all, chart hover/touch/keyboard/missing values, container and Activity status colours, bulk notification dismissal, inline stack chips, combined service filters and matching-only bulk actions');
