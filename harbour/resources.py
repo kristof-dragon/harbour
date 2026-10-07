@@ -10,6 +10,16 @@ def preferences(server):
     return json.loads(server.get('resource_settings') or '{}')
 
 
+def card_layout(server):
+    return {'default_size': 'medium', 'sizes': {}, 'order': [],
+            **json.loads(server.get('card_layout') or '{}')}
+
+
+def card_ids(server):
+    return {'cpu', 'memory', 'disk', 'load', 'temperature'} | {
+        key for key, row in catalog(server).items() if row['group'] != 'load'}
+
+
 def hardware_id(sensor):
     identity = json.dumps([sensor['id'], sensor['unit'], sensor['source']], ensure_ascii=False, separators=(',', ':'))
     return 'resource:' + hashlib.sha256(identity.encode()).hexdigest()

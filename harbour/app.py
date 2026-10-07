@@ -496,7 +496,8 @@ def public_server(server, user):
             "updates": sum(s.get("update", {}).get("status") == "available" and not s["dismissed"] for s in services),
             **snapshot, "latency_ms": server["latency_ms"], "connection_status": server["connection_status"],
             "monitoring_enabled": bool(server["monitoring_enabled"]), "poll_seconds": interval,
-            "poll_override": server["poll_seconds"], "last_attempt": server["last_attempt"], "server_type": server["server_type"]}
+            "poll_override": server["poll_seconds"], "last_attempt": server["last_attempt"], "server_type": server["server_type"],
+            "card_layout": resources.card_layout(server)}
 
 
 @app.get("/api/dashboard")
@@ -604,11 +605,80 @@ def resource_config(server, values, thresholds):
     return config
 
 
+class CardLayoutInput(Input):
+    default_size: Literal['small', 'medium', 'large'] | None = None
+    sizes: dict[str, Literal['small', 'medium', 'large']] = Field(default_factory=dict, max_length=2004)
+    order: list[str] | None = Field(default=None, max_length=2004)
+    reset_sizes: bool = False
+
+
+def card_layout_config(server, value):
+    layout = resources.card_layout(server)
+    if value is None:
+        return layout
+    known = resources.card_ids(server)
+    if set(value.sizes) - known or value.order is not None and (
+            set(value.order) - known or len(set(value.order)) != len(value.order)):
+        raise HTTPException(400, 'Choose from the discovered resource cards')
+    if value.default_size is not None:
+        layout['default_size'] = value.default_size
+    layout['sizes'] = {**({} if value.reset_sizes else layout['sizes']), **value.sizes}
+    if value.order is not None:
+        # Retain hidden/missing identities when only visible cards are reordered.
+        layout['order'] = value.order + [key for key in layout['order'] if key not in value.order]
+    return layout
+
+
+def changed_resource_warnings(server, settings, thresholds):
+    old_thresholds = thresholds_for(server)
+    return {identity for identity, resource in resources.catalog(server).items()
+            if {k: v for k, v in resources.options(server, resource, old_thresholds).items() if k != 'card'} !=
+               {k: v for k, v in resources.options(server, resource, thresholds, settings).items() if k != 'card'}}
+
+
+def changed_volume_warnings(server, settings, thresholds):
+    old = thresholds_for(server)
+    limits_changed = any(old[key] != thresholds[key] for key in ('disk', 'disk_free_gb'))
+    mounts = set(settings) | {d['mount'] for d in json.loads(server['snapshot']).get('metrics', {}).get('disks', [])}
+    updated = {**server, 'volume_settings': json.dumps(settings)}
+    return {'disk:' + mount for mount in mounts if limits_changed or any(
+        volumes.options(server, mount)[key] != volumes.options(updated, mount)[key]
+        for key in ('monitor', 'warn'))}
+
+
+class CardPreferencesInput(Input):
+    layout: CardLayoutInput | None = None
+    resources: list[ResourceOption] | None = Field(default=None, max_length=2000)
+    volumes: list[VolumeOption] = Field(default_factory=list, max_length=500)
+
+
+@app.patch('/api/servers/{id_}/cards')
+def save_card_preferences(id_: str, body: CardPreferencesInput, user=Depends(admin)):
+    lock = server_lock(id_)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, 'Wait for the current server operation to finish, then save again')
+    try:
+        server = get_server(id_)
+        layout = card_layout_config(server, body.layout)
+        choices = resource_config(server, body.resources, thresholds_for(server))
+        disks = volume_config(server, body.volumes)
+        changed = changed_resource_warnings(server, choices, thresholds_for(server))
+        changed |= changed_volume_warnings(server, disks, thresholds_for(server))
+        with notifications.guard, store.db() as con:
+            con.execute('UPDATE servers SET card_layout=?,resource_settings=?,volume_settings=? WHERE id=?',
+                        (json.dumps(layout), json.dumps(choices), json.dumps(disks), id_))
+            notifications.invalidate(con, id_, changed)
+    finally:
+        lock.release()
+    return {'ok': True, 'card_layout': layout}
+
+
 class ServerSettingsInput(ServerTypeInput):
     name: str = Field(min_length=1, max_length=80)
     thresholds: Thresholds | None
     volumes: list[VolumeOption] = Field(max_length=500)
     resources: list[ResourceOption] | None = Field(default=None, max_length=2000)
+    card_layout: CardLayoutInput | None = None
     enabled: bool
     poll_seconds: int | None = Field(default=None, ge=15, le=3600)
 
@@ -623,16 +693,15 @@ def save_server_settings(id_: str, body: ServerSettingsInput, user=Depends(admin
         config = volume_config(server, body.volumes)
         next_thresholds = thresholds_for({**server, 'thresholds': body.thresholds.model_dump_json() if body.thresholds else None})
         resource_settings = resource_config(server, body.resources, next_thresholds)
+        layout = card_layout_config(server, body.card_layout)
         known = resources.catalog(server)
-        old_thresholds, old_resources = thresholds_for(server), resources.preferences(server)
-        changed = {identity for identity, resource in known.items()
-                   if {k: v for k, v in resources.options(server, resource, old_thresholds, old_resources).items() if k != 'card'} !=
-                   {k: v for k, v in resources.options(server, resource, next_thresholds, resource_settings).items() if k != 'card'}}
+        changed = changed_resource_warnings(server, resource_settings, next_thresholds)
+        changed |= changed_volume_warnings(server, config, next_thresholds)
         # One transaction prevents a rejected setting from leaving a partial save.
         with notifications.guard, store.db() as con:
-            con.execute('UPDATE servers SET name=?,thresholds=?,volume_settings=?,resource_settings=?,resource_catalog=?,monitoring_enabled=?,poll_seconds=?,server_type=? WHERE id=?',
+            con.execute('UPDATE servers SET name=?,thresholds=?,volume_settings=?,resource_settings=?,resource_catalog=?,monitoring_enabled=?,poll_seconds=?,server_type=?,card_layout=? WHERE id=?',
                         (body.name, body.thresholds.model_dump_json() if body.thresholds else None,
-                         json.dumps(config), json.dumps(resource_settings), json.dumps(known), int(body.enabled), body.poll_seconds, body.server_type, id_))
+                         json.dumps(config), json.dumps(resource_settings), json.dumps(known), int(body.enabled), body.poll_seconds, body.server_type, json.dumps(layout), id_))
             notifications.invalidate(con, id_, changed)
             if body.enabled and not server['monitoring_enabled']:
                 con.execute('UPDATE servers SET last_attempt=NULL WHERE id=?', (id_,))

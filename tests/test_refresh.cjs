@@ -11,6 +11,8 @@ let queued={...structuredClone(job),id:'queued',status:'queued',queue_position:1
 let dashboard={servers,thresholds,jobs:[queued,job]},requests=0,refreshAll=0,lastPlan=null,lastSettings=null;
 const history={from:now-3600,to:now,hours:1,resolution_seconds:60,poll_seconds:15,points:Array.from({length:61},(_,i)=>({time:now-3600+i*60,cpu:i===30?null:20+i/10,memory:40,disk:42,temperature:48,cpu_peak:30,temperature_peak:52,disks:[],samples:4,attempts:4})),disk_mounts:['/']};
 let telegram={enabled:false,chat_id:'',token_saved:false,demo:true,last_sent:null,last_error:'',next_attempt:0,rules:[],servers:servers.map(s=>({id:s.id,name:s.name,monitoring_enabled:true}))},telegramTests=0;
+let rejectCardSave=false;const cardWrites=[];
+const mergeLayout=(s,patch={})=>{const old=s.card_layout||{default_size:'medium',sizes:{},order:[]};s.card_layout={default_size:patch.default_size||old.default_size,sizes:{...(patch.reset_sizes?{}:old.sizes),...patch.sizes},order:patch.order||old.order};};
 const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'harbour/static',req.url==='/'?'index.html':req.url.replace('/static/',''));try{res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html');res.end(fs.readFileSync(file));}catch{res.writeHead(404).end();}});
 (async()=>{
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -26,9 +28,19 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  else if(url.pathname==='/api/me')data={id:'admin',name:'admin',role:'admin',csrf:'test'};
  else if(url.pathname==='/api/dashboard'){requests++;data=dashboard;}
  else if(url.pathname==='/api/jobs/task')data=job;
+ else if(url.pathname.endsWith('/cards')){
+  const body=route.request().postDataJSON(),s=dashboard.servers.find(s=>url.pathname.includes('/'+s.id+'/'));cardWrites.push(body);
+  if(rejectCardSave){rejectCardSave=false;await route.fulfill({status:409,json:{detail:'Server is busy; try again'}});return;}
+  if(body.resources?.some(r=>r.warn&&r.limit_mode==='custom'&&r.low==null&&r.high==null)){await route.fulfill({status:400,json:{detail:'Set at least one warning limit'}});return;}
+  mergeLayout(s,body.layout);
+  for(const config of body.resources||[]){const row=s.metrics.resources.find(r=>r.id===config.id);Object.assign(row,config);}
+  for(const config of body.volumes||[])Object.assign(s.metrics.disks.find(d=>d.mount===config.mount),config);
+  data={ok:true,card_layout:s.card_layout};
+ }
  else if(url.pathname.endsWith('/settings')){
   lastSettings=route.request().postDataJSON();const s=dashboard.servers.find(s=>url.pathname.includes('/'+s.id+'/'));
   for(const config of lastSettings.resources){const row=s.metrics.resources.find(r=>r.id===config.id);Object.assign(row,config);row.warning=!!(row.monitor&&row.warn&&row.value!=null&&(row.low!=null&&row.value<=row.low||row.high!=null&&row.value>=row.high));}
+  if(lastSettings.card_layout)mergeLayout(s,lastSettings.card_layout);
   s.name=lastSettings.name;data={ok:true,name:s.name};
  }
  else if(url.pathname.endsWith('/history'))data=history;
@@ -381,6 +393,67 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  assert.equal(await powerRow.locator('[data-resource-option=monitor]').isChecked(),false);
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
  console.log('PASS: discovered resource cards, per-resource history, Monitor/Warn/Card selection, editable limits, saved state, refresh stability, mobile scrolling');
+ { // Per-card layout is shared by the overview, popovers and server overlay.
+ for(const r of m.resources)Object.assign(r,{monitor:true,card:true,warn:false,limit_mode:'custom',low:null,high:null});
+ await page.setViewportSize({width:1440,height:1100});await page.evaluate(async()=>{document.documentElement.dataset.theme='dark';await load();});
+ const grid=page.locator('.resource-card-grid'),cpuCard=grid.locator('[data-resource-card="cpu"]'),loadCard=grid.locator('[data-resource-card="load"]');
+ const waitCards=()=>page.waitForFunction(()=>cardSaves.size===0);
+ await page.locator('[data-action=card-size-all][data-value=medium]').click();await waitCards();
+ const medium=await cpuCard.boundingBox();
+ await cpuCard.locator('[data-action=resource-card-settings]').click();
+ await page.locator('#resource-card-form [data-action=card-settings-size][data-value=large]').click();
+ await page.locator('#resource-card-form button[type=submit]').click();await page.locator('#resource-card-form').waitFor({state:'detached'});
+ const large=await cpuCard.boundingBox();assert.equal(large.height,medium.height);assert.equal(large.width,medium.width*1.5);
+ assert.equal(await loadCard.getAttribute('data-card-size'),'medium');
+ await page.evaluate(()=>load());assert.equal(await cpuCard.getAttribute('data-card-size'),'large');
+ await page.getByRole('button',{name:'Server settings',exact:true}).click();
+ assert.equal(await page.locator('[data-card-size-value="cpu"]').inputValue(),'large');
+ await page.locator('[data-resource-setting="resource:load1"] [data-value=small]').click();
+ for(const key of ['load1','load5','load15'])assert.equal(await page.locator('[data-resource-setting="resource:'+key+'"] [data-card-size-value]').inputValue(),'small');
+ await page.locator('#server-settings-form button[type=submit]').click();await page.waitForFunction(()=>!document.querySelector('#server-settings-form').dataset.busy);
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();assert.equal(await loadCard.getAttribute('data-card-size'),'small');
+ // Invalid warning limits keep the popover open; hiding a card can be reversed in the overlay.
+ const fanCard=grid.locator('[data-resource-card="resource:fan"]');await fanCard.locator('[data-action=resource-card-settings]').click();
+ await page.locator('#resource-card-form [data-resource-option=warn]').check();await page.locator('#resource-card-form button[type=submit]').click();
+ await page.locator('#resource-card-form .form-error').filter({hasText:'Set at least one warning limit'}).waitFor();
+ await page.locator('#resource-card-form [data-resource-limit=high]').fill('4000');
+ await page.locator('#resource-card-form [data-resource-option=card]').uncheck();
+ await page.locator('#resource-card-form button[type=submit]').click();await page.locator('#resource-card-form').waitFor({state:'detached'});assert.equal(await fanCard.count(),0);
+ await page.getByRole('button',{name:'Server settings',exact:true}).click();
+ assert.equal(await page.locator('[data-resource-setting="resource:fan"] [data-resource-limit=high]').inputValue(),'4000');
+ await page.locator('[data-resource-setting="resource:fan"] [data-resource-option=card]').check();
+ await page.locator('#server-settings-form button[type=submit]').click();await page.waitForFunction(()=>!document.querySelector('#server-settings-form').dataset.busy);
+ if(process.env.HARBOUR_TEST_CAPTURE){await page.locator('.server-settings-modal').evaluate(el=>el.scrollTop=0);await page.screenshot({path:'test-results/card-layout-overlay.png'});}
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();assert.equal(await fanCard.count(),1);
+ // Drag image follows the pointer, polling cannot replace it, and a failed save rolls back.
+ const handle=await loadCard.locator('.resource-card-handle').boundingBox(),target=await cpuCard.boundingBox();
+ await page.mouse.move(handle.x+handle.width/2,handle.y+handle.height/2);await page.mouse.down();await page.mouse.move(target.x+target.width/2,target.y+target.height/2,{steps:12});
+ assert.equal(await page.locator('.resource-card-ghost').count(),1);assert.notEqual(await page.locator('.resource-card-ghost').evaluate(el=>getComputedStyle(el).boxShadow),'none');
+ await page.evaluate(()=>load());assert.equal(await page.locator('.resource-card-ghost').count(),1);
+ if(process.env.HARBOUR_TEST_CAPTURE)await page.screenshot({path:'test-results/card-layout-drag.png'});
+ await page.mouse.up();await waitCards();assert.equal(await grid.locator(':scope>article').first().getAttribute('data-resource-card'),'load');
+ await page.reload();await grid.waitFor();assert.equal(await grid.locator(':scope>article').first().getAttribute('data-resource-card'),'load');
+ await loadCard.locator('.resource-card-handle').focus();await page.keyboard.press('ArrowRight');await waitCards();assert.equal(await grid.locator(':scope>article').nth(1).getAttribute('data-resource-card'),'load');
+ const savedOrder=await grid.locator(':scope>article').evaluateAll(els=>els.map(el=>el.dataset.resourceCard));rejectCardSave=true;
+ await loadCard.locator('.resource-card-handle').focus();await page.keyboard.press('ArrowRight');await waitCards();
+ assert.deepEqual(await grid.locator(':scope>article').evaluateAll(els=>els.map(el=>el.dataset.resourceCard)),savedOrder);
+ // Density changes keep order; mobile controls fit and whole-overlay scrolling is preserved.
+ await page.locator('[data-action=card-size-all][data-value=large]').click();await waitCards();assert.deepEqual(await grid.locator(':scope>article').evaluateAll(els=>els.map(el=>el.dataset.resourceCard)),savedOrder);
+ assert.equal(await loadCard.evaluate(el=>[...el.querySelectorAll('.metric-label,.resource-card-body,.resource-card-details')].every(n=>n.getBoundingClientRect().bottom<=el.getBoundingClientRect().bottom)),true);
+ await page.waitForTimeout(250);
+ if(process.env.HARBOUR_TEST_CAPTURE){await page.evaluate(()=>document.querySelector('#toasts').style.visibility='hidden');await page.screenshot({path:'test-results/card-layout-large.png'});}
+ await page.setViewportSize({width:390,height:844});await page.waitForTimeout(150);
+ for(const size of ['small','medium','large']){await page.locator('[data-action=card-size-all][data-value='+size+']').click();await waitCards();assert.equal(await grid.locator(':scope>article').evaluateAll(els=>els.every(el=>el.getBoundingClientRect().right<=innerWidth)),true);}
+ await cpuCard.locator('[data-action=resource-card-settings]').click();assert.equal(await page.locator('.resource-card-popover').evaluate(el=>el.getBoundingClientRect().right<=innerWidth&&el.getBoundingClientRect().left>=0),true);
+ await page.waitForTimeout(250);
+ if(process.env.HARBOUR_TEST_CAPTURE)await page.screenshot({path:'test-results/card-layout-mobile.png'});
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ await page.getByRole('button',{name:'Server settings',exact:true}).click();
+ assert.equal(await page.locator('.resource-settings-wrap').evaluate(el=>el.scrollHeight===el.clientHeight),true);
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ assert.ok(cardWrites.length>=8);
+ console.log('PASS: equal-height 1.5x Large cards, individual and shared sizes, popover warning limits, overlay sync, hide/restore, shadow dragging, polling guard, keyboard ordering, reload persistence, save rollback, mobile fit');
+ }
  assert.deepEqual(errors,[]);assert.ok(requests>=4);
  console.log('PASS: changed-value rendering, desktop/mobile scroll, focus/caret, expanded panels, persistent animation, live progress/log scroll, task counts, collapsible filters, refresh-all, chart hover/touch/keyboard/missing values, container and Activity status colours, bulk notification dismissal, inline stack chips, combined service filters and matching-only bulk actions');
  }finally{await browser.close();server.close();}

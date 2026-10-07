@@ -30,7 +30,7 @@ function patchViewChildren(parent,next){
 function patchViewNode(node,next){
   if(node.nodeType!==1){if(node.nodeValue!==next.nodeValue)node.nodeValue=next.nodeValue;return;}
   // Open details and tooltip associations belong to the current interaction.
-  const local=name=>(name==='open'&&node.tagName==='DETAILS')||name==='aria-describedby'||(name==='disabled'&&busyViewNodes.has(node));
+  const local=name=>(name==='open'&&node.tagName==='DETAILS')||name==='aria-describedby'||(name==='style'&&node.matches('.resource-card-grid,[data-resource-card]'))||(name==='disabled'&&busyViewNodes.has(node));
   for(const attr of [...node.attributes])if(!local(attr.name)&&!next.hasAttribute(attr.name))node.removeAttribute(attr.name);
   for(const attr of next.attributes)if(!local(attr.name)&&node.getAttribute(attr.name)!==attr.value)node.setAttribute(attr.name,attr.value);
   // Mini charts are updated independently after their history request completes.

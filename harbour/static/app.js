@@ -38,7 +38,6 @@ const paths = {
 const icon = (name, cls='') => `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[name] || paths.box}"/></svg>`;
 const state = {user:null, data:null, server:localStorage.getItem('harbour-server'), tab:'containers', open:new Set(), selected:new Set(), search:'', serviceFilters:{status:'all',updates:'all'}, notices:null, modal:null, mobile:false, lastJobs:new Map(), key:null, keyMode:'generate', demo:false, version:'', menuOpen:localStorage.getItem('harbour-menu-open')==='true', filtersOpen:localStorage.getItem('harbour-filters-open')!=='false', filters:{warnings:'all',status:'all',updates:'all'}, authMessage:'', securityTab:'policy', logOffset:0, totpSetup:null};
 document.documentElement.dataset.density = ['compact','normal','comfortable'].includes(localStorage.getItem('harbour-density')) ? localStorage.getItem('harbour-density') : 'normal';
-document.documentElement.dataset.resourceDensity = ['compact','normal','comfortable'].includes(localStorage.getItem('harbour-resource-density')) ? localStorage.getItem('harbour-resource-density') : 'normal';
 const storedTheme = localStorage.getItem('harbour-theme');
 const systemTheme=matchMedia('(prefers-color-scheme:dark)');
 let followSystem=localStorage.getItem('harbour-theme-mode')==='system'||(!localStorage.getItem('harbour-theme-mode')&&!storedTheme);
@@ -150,7 +149,7 @@ function renderSidebar(){
 }
 function visuals(){
   const densities=[['compact','Compact'],['normal','Normal'],['comfortable','Comfortable']];
-  modal('Visuals',`<div class="stack visuals-settings"><div class="visual-choice"><h3>${fieldCaption('Colour theme','System follows your device’s light / dark setting. The toolbar theme button selects a manual theme.')}</h3>${slidingControl('visual-theme','Colour theme',[['system','System'],['light','Light'],['dark','Dark']],followSystem?'system':document.documentElement.dataset.theme,'visual-choice','data-visual="theme"')}</div><div class="visual-choice"><h3>${fieldCaption('Server card density','Adjust spacing in the server list.')}</h3>${slidingControl('card-density','Server card density',densities,document.documentElement.dataset.density,'visual-choice','data-visual="density"')}</div><div class="visual-choice"><h3>${fieldCaption('Resource card density','Compact uses smaller cards and charts. Comfortable gives each resource more space.')}</h3>${slidingControl('resource-density','Resource card density',densities,document.documentElement.dataset.resourceDensity,'visual-choice','data-visual="resourceDensity"')}</div><p class="hint">Appearance preferences are saved in this browser.</p></div>`);
+  modal('Visuals',`<div class="stack visuals-settings"><div class="visual-choice"><h3>${fieldCaption('Colour theme','System follows your device’s light / dark setting. The toolbar theme button selects a manual theme.')}</h3>${slidingControl('visual-theme','Colour theme',[['system','System'],['light','Light'],['dark','Dark']],followSystem?'system':document.documentElement.dataset.theme,'visual-choice','data-visual="theme"')}</div><div class="visual-choice"><h3>${fieldCaption('Server card density','Adjust spacing in the server list.')}</h3>${slidingControl('card-density','Server card density',densities,document.documentElement.dataset.density,'visual-choice','data-visual="density"')}</div><p class="hint">Appearance preferences are saved in this browser.</p></div>`);
 }
 function renderTop(){
   const warns=state.data.servers.reduce((a,s)=>a+s.warnings.filter(w=>!w.dismissed).length,0), updates=state.data.servers.reduce((a,s)=>a+s.updates,0);
@@ -160,7 +159,7 @@ function metricCard(label,ico,value,unit,detail,aside,pct,warning=false,extra=''
   return `<article class="metric ${warning?'warning':''}"><div class="metric-label">${icon(ico)}${label}<span class="tag ${warning?'red':''}">${warning?'Attention':ico==='cpu'?'Live':ico==='memory'?'RAM':'Storage'}</span></div><div class="metric-number-row"><div class="metric-value">${value}<span>${unit}</span></div>${extra}</div><div class="meter ${warning?'warn':ico==='memory'?'memory':''}"><span style="width:${Math.max(0,Math.min(100,pct))}%"></span></div><div class="metric-bottom"><span>${detail}</span><span>${aside}</span></div></article>`;
 }
 function renderMain(){
-  if(!$('#main'))return;
+  if(!$('#main')||resourceDrag?.started)return;
   const s=current();
   if(!s){updateHTML($('#main'),`<div class="no-servers empty">${icon('server')}<h1>Your fleet starts here</h1><p>Add your first Linux or macOS server to see its resources and Docker services.</p>${admin()?button('onboard','Add your first server','plus','primary'):''}</div>`);return;}
   const m=s.metrics,isDocker=s.server_type!=='plain';
@@ -168,10 +167,10 @@ function renderMain(){
   updateHTML($('#main'),`${serverWarnings(s)}${state.demo?`<div data-key="demo-banner" class="demo-banner">${icon('info')}<span>Demo workspace · sample servers, simulated actions.</span><span>No live connections</span></div>`:''}
     <section data-key="server-header" class="server-header"><div class="server-heading"><div class="server-emblem">${icon('server')}</div><div><h1>${e(s.name)}</h1><div class="server-meta">${serverConnection(s,true)}</div></div></div>${m?`<div class="host-facts"><span title="Operating system"><small>OS</small><b>${e(m.os||'Unavailable')}</b></span><span title="Kernel"><small>Kernel</small><b class="mono">${e(m.kernel||'Pending')}</b></span><span title="Uptime at last check"><small>Uptime</small><b>${uptime(m.uptime)}</b></span><span title="Server timezone"><small>Timezone</small><b>${timezoneLabel(m.timezone)}</b></span></div>`:''}<div class="header-actions">${admin()?button('refresh','','refresh','small',`aria-label="Refresh server" title="Refresh server"`)+button('server-settings','','settings','small',`aria-label="Server settings" title="Server settings"`):''}</div></section>
     ${m?`<div data-key="overview-connection" class="overview-connection">${isDocker?`<span>${icon('box')}Docker ${e(m.docker||'Pending')}</span>`:'<span>Resource monitoring</span>'}<span>${icon('shield')}${state.demo?'Simulated SSH':'Pinned SSH'} · port ${s.port}</span><span>Poll every ${s.poll_seconds}s${!s.monitoring_enabled?' · paused':''}</span><span>${s.override?'Custom':'Global'} thresholds</span></div>`:''}
-    ${m?`    <div data-key="resource-heading" class="resource-heading"><h2>Resources</h2><div class="flex"><label>Recent history <select id="card-hours" aria-label="Resource card history hours">${hourOptions(cardHours)}</select></label>${button('history','Explore history','activity','small')}</div></div><section data-key="metrics:${e(s.id)}" class="metrics" aria-label="Server resource usage">${resourceCards(s)}</section>${hardwarePanel(s)}`:''}
+    ${m?`    <div data-key="resource-heading" class="resource-heading"><h2>Resources</h2><div class="flex">${admin()?cardLayoutControls(s):''}<label>Recent history <select id="card-hours" aria-label="Resource card history hours">${hourOptions(cardHours)}</select></label>${button('history','Explore history','activity','small')}</div></div><section data-key="metrics:${e(s.id)}" class="metrics resource-card-grid" aria-label="Server resource usage">${resourceCards(s)}</section>${hardwarePanel(s)}`:''}
     <nav data-key="server-tabs" class="tabs" aria-label="Server views">${(isDocker?['containers','storage','activity']:['storage','activity']).map(tab=>button('tab',tab[0].toUpperCase()+tab.slice(1)+(tab==='containers'?` <span class="tag">${s.services?.length||0}</span>`:''),'',view===tab?'active':'',`data-tab="${tab}"`)).join('')}<span class="tab-meta">Updated ${age(s.checked)}</span></nav><div id="server-view">${view==='containers'?renderContainers(s):view==='storage'?renderStorage(s):renderActivity(s)}</div>
 `);
-  if(m)loadCardHistory(s);
+  if(m){layoutResourceCards();loadCardHistory(s);}
 }
 function updateTag(s){
   const u=s.update||{},title=e(u.reason||u.error||'Checks the configured image tag, not newer version tags');
@@ -342,7 +341,7 @@ function finishDiscard(discard){
 }
 window.addEventListener('beforeunload',event=>{if(overlayDirty()){event.preventDefault();event.returnValue='';}});
 // Guard navigation between overlays as well as closing by X, Escape or backdrop.
-const overlayNavigation=new Set(['notification-settings','job','prune','visuals','global-settings','server-settings','onboard','edit-connection','account','users','remove-user','remove-server','monitoring','security','security-policy','security-log','mfa-begin','mfa-disable','mfa-recovery','warnings','updates','notifications','select-server','notice-server','logout']);
+const overlayNavigation=new Set(['resource-card-settings','notification-settings','job','prune','visuals','global-settings','server-settings','onboard','edit-connection','account','users','remove-user','remove-server','monitoring','security','security-policy','security-log','mfa-begin','mfa-disable','mfa-recovery','warnings','updates','notifications','select-server','notice-server','logout']);
 document.addEventListener('click',event=>{const action=event.target.closest('[data-action]')?.dataset.action;if(overlayNavigation.has(action)&&overlayDirty()){event.preventDefault();event.stopImmediatePropagation();const target=event.target.closest('[data-action]');requestDiscard(()=>target.click());}},true);
 let previousFocus=null;
 function modal(title,content,wide=false){
