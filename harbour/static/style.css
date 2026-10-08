@@ -661,6 +661,8 @@ body.mobile-panel-open{overflow:hidden}
 .resource-card-grid .sensor-details{flex-shrink:0;padding-top:3px;margin-top:3px;font-size:9px}.resource-card-grid .sensor-details[open]{position:absolute;top:100%;left:0;right:0;padding:10px;z-index:4;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow)}
 .resource-card-grid [data-card-size=large]:has(.sensor-details) .resource-card-details{padding-top:3px;margin-top:3px}
 .resource-card-dragging{opacity:.22;border-style:dashed!important}.resource-card-drop{outline:2px solid var(--accent);outline-offset:-2px;background:var(--hover)!important}
+.resource-card-slot{position:fixed;z-index:99;pointer-events:none;border:2px dashed var(--accent);border-radius:10px;background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.resource-card-slot.invalid{border-color:var(--red);background:color-mix(in srgb,var(--red) 12%,transparent)}
 .metric.resource-card-ghost{position:fixed;z-index:100;pointer-events:none;opacity:.97;box-shadow:0 20px 44px #0006,0 4px 12px #0004;border-color:var(--accent);transform:rotate(1.2deg) scale(1.025);transform-origin:50% 30%}
 .modal-backdrop.resource-popover-backdrop{background:transparent;backdrop-filter:none;padding:10px;display:block}
 .modal.resource-card-popover{position:absolute;width:min(350px,calc(100vw - 20px));padding:16px;max-height:calc(100dvh - 20px);box-shadow:0 12px 36px #0006}

@@ -11,7 +11,7 @@ def preferences(server):
 
 
 def card_layout(server):
-    return {'default_size': 'medium', 'sizes': {}, 'order': [],
+    return {'default_size': 'medium', 'sizes': {}, 'order': [], 'positions': {},
             **json.loads(server.get('card_layout') or '{}')}
 
 

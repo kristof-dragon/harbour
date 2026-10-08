@@ -12,7 +12,7 @@ let dashboard={servers,thresholds,jobs:[queued,job]},requests=0,refreshAll=0,las
 const history={from:now-3600,to:now,hours:1,resolution_seconds:60,poll_seconds:15,points:Array.from({length:61},(_,i)=>({time:now-3600+i*60,cpu:i===30?null:20+i/10,memory:40,disk:42,temperature:48,cpu_peak:30,temperature_peak:52,disks:[],samples:4,attempts:4})),disk_mounts:['/']};
 let telegram={enabled:false,chat_id:'',token_saved:false,demo:true,last_sent:null,last_error:'',next_attempt:0,rules:[],servers:servers.map(s=>({id:s.id,name:s.name,monitoring_enabled:true}))},telegramTests=0;
 let rejectCardSave=false;const cardWrites=[];
-const mergeLayout=(s,patch={})=>{const old=s.card_layout||{default_size:'medium',sizes:{},order:[]};s.card_layout={default_size:patch.default_size||old.default_size,sizes:{...(patch.reset_sizes?{}:old.sizes),...patch.sizes},order:patch.order||old.order};};
+const mergeLayout=(s,patch={})=>{const old=s.card_layout||{default_size:'medium',sizes:{},order:[]};s.card_layout={default_size:patch.default_size||old.default_size,sizes:{...(patch.reset_sizes?{}:old.sizes),...patch.sizes},order:patch.order||old.order,positions:{...old.positions,...patch.positions}};};
 const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'harbour/static',req.url==='/'?'index.html':req.url.replace('/static/',''));try{res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html');res.end(fs.readFileSync(file));}catch{res.writeHead(404).end();}});
 (async()=>{
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -429,24 +429,54 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  await page.locator('#server-settings-form button[type=submit]').click();await page.waitForFunction(()=>!document.querySelector('#server-settings-form').dataset.busy);
  if(process.env.HARBOUR_TEST_CAPTURE){await page.locator('.server-settings-modal').evaluate(el=>el.scrollTop=0);await page.screenshot({path:'test-results/card-layout-overlay.png'});}
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();assert.equal(await fanCard.count(),1);
- const firstSmall=await loadCard.boundingBox(),secondSmall=await fanCard.boundingBox(),nextMedium=await grid.locator('[data-resource-card="resource:power"]').boundingBox();
- assert.equal(secondSmall.x,firstSmall.x);assert.equal(secondSmall.y,firstSmall.y+smallHeight+rowGap);
- assert.equal(secondSmall.y+secondSmall.height-firstSmall.y,medium.height);
- assert.equal(nextMedium.y,firstSmall.y);assert.equal(nextMedium.y+nextMedium.height,secondSmall.y+secondSmall.height);
- if(process.env.HARBOUR_TEST_CAPTURE)await page.screenshot({path:'test-results/card-layout-mixed.png'});
- // Drag image follows the pointer, polling cannot replace it, and a failed save rolls back.
- const handle=await loadCard.locator('.resource-card-handle').boundingBox(),target=await cpuCard.boundingBox();
- await page.mouse.move(handle.x+handle.width/2,handle.y+handle.height/2);await page.mouse.down();await page.mouse.move(target.x+target.width/2,target.y+target.height/2,{steps:12});
+ // Small cards are independent by default; stacking happens only after an explicit drop.
+ const firstSmall=await loadCard.boundingBox(),secondSmall=await fanCard.boundingBox();
+ assert.equal(secondSmall.y,firstSmall.y);assert.ok(secondSmall.x>firstSmall.x);
+ const otherPositions=async()=>grid.locator(':scope>article:not([data-resource-card="resource:fan"])').evaluateAll(els=>els.map(el=>({id:el.dataset.resourceCard,x:el.getBoundingClientRect().x,y:el.getBoundingClientRect().y})));
+ const beforeMove=await otherPositions();
+ const handle=await fanCard.locator('.resource-card-handle').boundingBox();
+ const origin={x:handle.x+handle.width/2,y:handle.y+handle.height/2};
+ const drop={x:origin.x+firstSmall.x-secondSmall.x,y:origin.y+smallHeight+rowGap};
+ await page.mouse.move(origin.x,origin.y);await page.mouse.down();await page.mouse.move(drop.x,drop.y,{steps:12});
  assert.equal(await page.locator('.resource-card-ghost').count(),1);assert.notEqual(await page.locator('.resource-card-ghost').evaluate(el=>getComputedStyle(el).boxShadow),'none');
  assert.equal(await page.locator('.resource-card-ghost').evaluate(el=>el.offsetHeight),smallHeight);
+ assert.equal(await page.locator('.resource-card-slot.invalid').count(),0);
+ assert.equal((await page.locator('.resource-card-slot').boundingBox()).x,firstSmall.x);
  await page.evaluate(()=>load());assert.equal(await page.locator('.resource-card-ghost').count(),1);
  if(process.env.HARBOUR_TEST_CAPTURE)await page.screenshot({path:'test-results/card-layout-drag.png'});
- await page.mouse.up();await waitCards();assert.equal(await grid.locator(':scope>article').first().getAttribute('data-resource-card'),'load');
- await page.reload();await grid.waitFor();assert.equal(await grid.locator(':scope>article').first().getAttribute('data-resource-card'),'load');
- await loadCard.locator('.resource-card-handle').focus();await page.keyboard.press('ArrowRight');await waitCards();assert.equal(await grid.locator(':scope>article').nth(1).getAttribute('data-resource-card'),'load');
- const savedOrder=await grid.locator(':scope>article').evaluateAll(els=>els.map(el=>el.dataset.resourceCard));rejectCardSave=true;
- await loadCard.locator('.resource-card-handle').focus();await page.keyboard.press('ArrowRight');await waitCards();
- assert.deepEqual(await grid.locator(':scope>article').evaluateAll(els=>els.map(el=>el.dataset.resourceCard)),savedOrder);
+ await page.mouse.up();await waitCards();
+ assert.equal((await fanCard.boundingBox()).x,firstSmall.x);assert.equal((await fanCard.boundingBox()).y,firstSmall.y+smallHeight+rowGap);
+ assert.deepEqual(await otherPositions(),beforeMove);
+ await page.reload();await grid.waitFor();
+ assert.equal((await fanCard.boundingBox()).x,(await loadCard.boundingBox()).x);
+ assert.equal((await fanCard.boundingBox()).y-(await loadCard.boundingBox()).y,smallHeight+rowGap);
+ // Move just the lower card to an empty slot. Its former partner stays where it was.
+ const stacked=await fanCard.boundingBox(),loadBefore=await loadCard.boundingBox();
+ await fanCard.locator('.resource-card-handle').focus();await page.keyboard.press('ArrowRight');await waitCards();
+ const separated=await fanCard.boundingBox();assert.ok(separated.x>stacked.x);assert.equal(separated.y,stacked.y);
+ assert.deepEqual(await loadCard.boundingBox(),loadBefore);
+ await page.evaluate(()=>load());assert.deepEqual(await fanCard.boundingBox(),separated);
+ // An occupied slot cannot move another card; Escape cancels without saving.
+ const writesBefore=cardWrites.length;
+ const moving=await fanCard.locator('.resource-card-handle').boundingBox();
+ await page.mouse.move(moving.x+moving.width/2,moving.y+moving.height/2);await page.mouse.down();
+ await page.mouse.move(moving.x+moving.width/2+loadBefore.x-separated.x,moving.y+moving.height/2+loadBefore.y-separated.y,{steps:10});
+ assert.equal(await page.locator('.resource-card-slot.invalid').count(),1);
+ await page.mouse.up();assert.equal(cardWrites.length,writesBefore);assert.deepEqual(await fanCard.boundingBox(),separated);
+ await page.mouse.move(moving.x+moving.width/2,moving.y+moving.height/2);await page.mouse.down();await page.mouse.move(moving.x+moving.width/2+20,moving.y+moving.height/2+98,{steps:10});
+ await page.keyboard.press('Escape');await page.mouse.up();assert.equal(await page.locator('.resource-card-ghost,.resource-card-slot').count(),0);assert.equal(cardWrites.length,writesBefore);
+ rejectCardSave=true;await fanCard.locator('.resource-card-handle').focus();await page.keyboard.press('ArrowDown');await waitCards();
+ assert.deepEqual(await fanCard.boundingBox(),separated);
+ await page.reload();await grid.waitFor();assert.deepEqual(await fanCard.boundingBox(),separated);
+ if(process.env.HARBOUR_TEST_CAPTURE)await page.screenshot({path:'test-results/card-layout-independent.png'});
+ const savedOrder=await grid.locator(':scope>article').evaluateAll(els=>els.map(el=>el.dataset.resourceCard));
+ // Narrow screens reflow collisions without changing the saved desktop positions.
+ const desktopPositions=structuredClone(dashboard.servers[0].card_layout.positions);
+ await page.setViewportSize({width:390,height:844});await page.waitForTimeout(150);
+ assert.equal(await grid.locator(':scope>article').evaluateAll(els=>els.every((el,i)=>{const a=el.getBoundingClientRect();return a.right<=innerWidth&&els.slice(i+1).every(other=>{const b=other.getBoundingClientRect();return a.right<=b.left||b.right<=a.left||a.bottom<=b.top||b.bottom<=a.top;});})),true);
+ assert.deepEqual(dashboard.servers[0].card_layout.positions,desktopPositions);
+ await page.setViewportSize({width:1440,height:1100});await page.waitForTimeout(150);
+ assert.deepEqual(await fanCard.boundingBox(),separated);
  // Density changes keep order; mobile controls fit and whole-overlay scrolling is preserved.
  await page.locator('[data-action=card-size-all][data-value=large]').click();await waitCards();assert.deepEqual(await grid.locator(':scope>article').evaluateAll(els=>els.map(el=>el.dataset.resourceCard)),savedOrder);
  assert.equal(await loadCard.evaluate(el=>[...el.querySelectorAll('.metric-label,.resource-card-body,.resource-card-details')].every(n=>n.getBoundingClientRect().bottom<=el.getBoundingClientRect().bottom)),true);
@@ -470,7 +500,7 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  assert.equal(await page.locator('.resource-settings-wrap').evaluate(el=>el.scrollHeight===el.clientHeight),true);
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
  assert.ok(cardWrites.length>=8);
- console.log('PASS: stacked half-height Small cards, equal-height 1.5x Large cards, individual and shared sizes, popover warning limits, overlay sync, hide/restore, shadow dragging, polling guard, keyboard ordering, reload persistence, save rollback, mobile fit');
+ console.log('PASS: independent Small slots, optional stacking, empty-slot drop preview, saved positions, occupied-slot protection, cancellation, equal-height 1.5x Large cards, individual and shared sizes, popover warning limits, overlay sync, hide/restore, shadow dragging, polling guard, keyboard ordering, reload persistence, save rollback, mobile fit');
  }
  assert.deepEqual(errors,[]);assert.ok(requests>=4);
  console.log('PASS: changed-value rendering, desktop/mobile scroll, focus/caret, expanded panels, persistent animation, live progress/log scroll, task counts, collapsible filters, refresh-all, chart hover/touch/keyboard/missing values, container and Activity status colours, bulk notification dismissal, inline stack chips, combined service filters and matching-only bulk actions');

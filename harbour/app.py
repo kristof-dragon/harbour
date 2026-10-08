@@ -605,10 +605,16 @@ def resource_config(server, values, thresholds):
     return config
 
 
+class CardPositionInput(Input):
+    x: float = Field(ge=0, le=1)
+    row: int = Field(ge=0, le=4096, strict=True)
+
+
 class CardLayoutInput(Input):
     default_size: Literal['small', 'medium', 'large'] | None = None
     sizes: dict[str, Literal['small', 'medium', 'large']] = Field(default_factory=dict, max_length=2004)
     order: list[str] | None = Field(default=None, max_length=2004)
+    positions: dict[str, CardPositionInput] = Field(default_factory=dict, max_length=2004)
     reset_sizes: bool = False
 
 
@@ -617,12 +623,13 @@ def card_layout_config(server, value):
     if value is None:
         return layout
     known = resources.card_ids(server)
-    if set(value.sizes) - known or value.order is not None and (
+    if (set(value.sizes) | set(value.positions)) - known or value.order is not None and (
             set(value.order) - known or len(set(value.order)) != len(value.order)):
         raise HTTPException(400, 'Choose from the discovered resource cards')
     if value.default_size is not None:
         layout['default_size'] = value.default_size
     layout['sizes'] = {**({} if value.reset_sizes else layout['sizes']), **value.sizes}
+    layout['positions'] = {**layout['positions'], **{key: pos.model_dump() for key, pos in value.positions.items()}}
     if value.order is not None:
         # Retain hidden/missing identities when only visible cards are reordered.
         layout['order'] = value.order + [key for key in layout['order'] if key not in value.order]

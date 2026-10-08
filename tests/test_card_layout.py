@@ -17,9 +17,9 @@ def patch(client, **body):
 
 
 def test_layout_persists_and_overlay_shares_sizes_without_resetting_order(client):
-    assert dashboard(client)['card_layout'] == dict(default_size='medium', sizes={}, order=[])
+    assert dashboard(client)['card_layout'] == dict(default_size='medium', sizes={}, order=[], positions={})
     fan = next(r['id'] for r in dashboard(client)['metrics']['resources'] if r['unit'] == 'RPM')
-    expected = dict(default_size='small', sizes={'cpu': 'large', fan: 'medium'}, order=[fan, 'load', 'cpu'])
+    expected = dict(default_size='small', sizes={'cpu': 'large', fan: 'medium'}, order=[fan, 'load', 'cpu'], positions={fan: {'x': .5, 'row': 1}, 'cpu': {'x': 0, 'row': 0}})
     assert patch(client, layout=expected).status_code == 200
     store.initialize()
     assert dashboard(client)['card_layout'] == expected
@@ -27,8 +27,11 @@ def test_layout_persists_and_overlay_shares_sizes_without_resetting_order(client
     updated = dashboard(client)['card_layout']
     assert updated['order'] == expected['order'] and updated['sizes'][fan] == 'medium'
     assert updated['sizes']['cpu'] == 'medium'
+    assert updated['positions'] == expected['positions']
+    assert patch(client, layout={'positions': {'cpu': {'x': .25, 'row': 2}}}).status_code == 200
+    expected['positions']['cpu'] = {'x': .25, 'row': 2}
     assert patch(client, layout={'default_size': 'large', 'reset_sizes': True}).status_code == 200
-    assert dashboard(client)['card_layout'] == dict(default_size='large', sizes={}, order=expected['order'])
+    assert dashboard(client)['card_layout'] == dict(default_size='large', sizes={}, order=expected['order'], positions=expected['positions'])
     other = next(s for s in client.get('/api/dashboard').json()['servers'] if s['id'] != 'atlas')
     assert other['card_layout']['sizes'] == {} and other['card_layout']['default_size'] == 'medium'
 
@@ -36,6 +39,12 @@ def test_layout_persists_and_overlay_shares_sizes_without_resetting_order(client
 @pytest.mark.parametrize('layout,status', [
     ({'sizes': {'unknown': 'large'}}, 400), ({'order': ['cpu', 'cpu']}, 400),
     ({'order': ['unknown']}, 400), ({'sizes': {'cpu': 'huge'}}, 422),
+    ({'positions': {'unknown': {'x': 0, 'row': 0}}}, 400),
+    ({'positions': {'cpu': {'x': -1, 'row': 0}}}, 422),
+    ({'positions': {'cpu': {'x': 1.1, 'row': 0}}}, 422),
+    ({'positions': {'cpu': {'x': 0, 'row': -1}}}, 422),
+    ({'positions': {'cpu': {'x': 0, 'row': 4097}}}, 422),
+    ({'positions': {'cpu': {'x': 0, 'row': 1.5}}}, 422),
     ({'default_size': 'auto'}, 422), ({'sizes': {'cpu': None}}, 422)])
 def test_bad_layout_rejects_resource_changes_atomically(client, layout, status):
     before = server()
@@ -62,7 +71,7 @@ def test_visual_changes_do_not_rearm_alerts_and_monitor_changes_invalidate(clien
     assert patch(client, resources=[choice]).status_code == 200
     notifications.observe(server(), [dict(id=fan, title='Fan', detail='high')], now=1000)
     before = store.one("SELECT entities FROM notification_state WHERE kind='resource'")['entities']
-    assert patch(client, layout={'sizes': {fan: 'large'}, 'order': [fan]}, resources=[{**choice, 'card': False}]).status_code == 200
+    assert patch(client, layout={'sizes': {fan: 'large'}, 'order': [fan], 'positions': {fan: {'x': .5, 'row': 3}}}, resources=[{**choice, 'card': False}]).status_code == 200
     assert store.one("SELECT entities FROM notification_state WHERE kind='resource'")['entities'] == before
     assert patch(client, resources=[{**choice, 'warn': False}]).status_code == 200
     remaining = store.one("SELECT entities FROM notification_state WHERE kind='resource'")
@@ -82,7 +91,7 @@ def test_layout_migration_and_disappeared_sensor_preferences(client):
     with store.db() as con:
         con.execute('ALTER TABLE servers DROP COLUMN card_layout')
     store.initialize(); store.initialize()
-    assert dashboard(client)['card_layout'] == dict(default_size='medium', sizes={}, order=[])
+    assert dashboard(client)['card_layout'] == dict(default_size='medium', sizes={}, order=[], positions={})
     assert not resources.preferences(server())['cpu']['card']
 
 
