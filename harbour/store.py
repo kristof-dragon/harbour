@@ -117,6 +117,8 @@ def initialize():
           PRIMARY KEY(server_id,kind),
           FOREIGN KEY(server_id,kind) REFERENCES notification_rules(server_id,kind) ON DELETE CASCADE);
         """)
+        from . import logins
+        logins.initialize(con)
         def add_columns(table, columns):
             existing = {r[1] for r in con.execute("PRAGMA table_info(" + table + ")")}
             for name, definition in columns.items():

@@ -80,7 +80,7 @@ async function load(initial=false){
     const next=await api('/dashboard');
     if(sequence!==dashboardSequence||state.user!==user||state.dragging)return;
     updateText($('#connection-status'),state.demo?'Demo workspace':'Background monitoring active');
-    if(!initial&&JSON.stringify(next)===JSON.stringify(state.data))return;
+    if(!initial&&JSON.stringify(next)===JSON.stringify(state.data)){if(state.tab==='logins'&&current())loadLogins(current());return;}
     state.data=next;
     if(!current()){state.server=state.data.servers[0]?.id;state.selected.clear();}
     for(const job of state.data.jobs){
@@ -168,9 +168,10 @@ function renderMain(){
     <section data-key="server-header" class="server-header"><div class="server-heading"><div class="server-emblem">${icon('server')}</div><div><h1>${e(s.name)}</h1><div class="server-meta">${serverConnection(s,true)}</div></div></div>${m?`<div class="host-facts"><span title="Operating system"><small>OS</small><b>${e(m.os||'Unavailable')}</b></span><span title="Kernel"><small>Kernel</small><b class="mono">${e(m.kernel||'Pending')}</b></span><span title="Uptime at last check"><small>Uptime</small><b>${uptime(m.uptime)}</b></span><span title="Server timezone"><small>Timezone</small><b>${timezoneLabel(m.timezone)}</b></span></div>`:''}<div class="header-actions">${admin()?button('refresh','','refresh','small',`aria-label="Refresh server" title="Refresh server"`)+button('server-settings','','settings','small',`aria-label="Server settings" title="Server settings"`):''}</div></section>
     ${m?`<div data-key="overview-connection" class="overview-connection">${isDocker?`<span>${icon('box')}Docker ${e(m.docker||'Pending')}</span>`:'<span>Resource monitoring</span>'}<span>${icon('shield')}${state.demo?'Simulated SSH':'Pinned SSH'} · port ${s.port}</span><span>Poll every ${s.poll_seconds}s${!s.monitoring_enabled?' · paused':''}</span><span>${s.override?'Custom':'Global'} thresholds</span></div>`:''}
     ${m?`    <div data-key="resource-heading" class="resource-heading"><h2>Resources</h2><div class="flex">${admin()?cardLayoutControls(s):''}<label>Recent history <select id="card-hours" aria-label="Resource card history hours">${hourOptions(cardHours)}</select></label>${button('history','Explore history','activity','small')}</div></div><section data-key="metrics:${e(s.id)}" class="metrics resource-card-grid" aria-label="Server resource usage">${resourceCards(s)}</section>${hardwarePanel(s)}`:''}
-    <nav data-key="server-tabs" class="tabs" aria-label="Server views">${(isDocker?['containers','storage','activity']:['storage','activity']).map(tab=>button('tab',tab[0].toUpperCase()+tab.slice(1)+(tab==='containers'?` <span class="tag">${s.services?.length||0}</span>`:''),'',view===tab?'active':'',`data-tab="${tab}"`)).join('')}<span class="tab-meta">Updated ${age(s.checked)}</span></nav><div id="server-view">${view==='containers'?renderContainers(s):view==='storage'?renderStorage(s):renderActivity(s)}</div>
+    <nav data-key="server-tabs" class="tabs" aria-label="Server views">${(isDocker?['containers','storage','activity','logins']:['storage','activity','logins']).map(tab=>button('tab',tab[0].toUpperCase()+tab.slice(1)+(tab==='containers'?` <span class="tag">${s.services?.length||0}</span>`:''),'',view===tab?'active':'',`data-tab="${tab}"`)).join('')}<span class="tab-meta">Updated ${age(s.checked)}</span></nav><div id="server-view">${view==='containers'?renderContainers(s):view==='storage'?renderStorage(s):view==='logins'?renderLogins(s):renderActivity(s)}</div>
 `);
   if(m){layoutResourceCards();loadCardHistory(s);}
+  if(view==='logins')loadLogins(s);
 }
 function updateTag(s){
   const u=s.update||{},title=e(u.reason||u.error||'Checks the configured image tag, not newer version tags');
@@ -414,7 +415,7 @@ document.addEventListener('click',async event=>{
   if(event.target.matches('input[type=checkbox]')){event.stopPropagation();return;}
   if(event.target.classList.contains('modal-backdrop')||event.target.classList.contains('drawer-backdrop')){closeOverlay();return;}
   const el=event.target.closest('[data-action]');if(!el)return;
-  const a=el.dataset.action;if(el.disabled)return;
+  const a=el.dataset.action;if(el.disabled||a.startsWith('login-'))return;
   try {
     if(a==='keep-editing'){finishDiscard(false);return;}
     if(a==='discard-changes'){finishDiscard(true);return;}
@@ -476,6 +477,7 @@ document.addEventListener('click',async event=>{
   finally{busyViewNodes.delete(el);if(el.isConnected)el.disabled=false;if(a==='dismiss-all'&&state.notices)renderNotices();}
 });
 document.addEventListener('submit',async event=>{
+  if(event.target.id==='login-filter')return;
   event.preventDefault();const form=event.target;if(form.dataset.busy)return;const data=Object.fromEntries(new FormData(form));const submit=$('[type=submit]',form);const restoreForm=busyOnboarding(form);$('.form-error',form).textContent='';
   try{
     if(monitorForms.has(form.id)){await handleMonitorForm(form,data);return;}

@@ -86,7 +86,9 @@ def install_host(tmp_path):
                         transport.start_server(server=Host())
                         while transport.is_active() and not stop.wait(.01):
                             pass
-                    except (EOFError, paramiko.SSHException):
+                    except (EOFError, paramiko.SSHException, ConnectionResetError):
+                        # The fingerprint-mismatch check intentionally closes
+                        # before authentication; macOS can report a TCP reset.
                         pass
         thread = threading.Thread(target=serve, daemon=True)
         thread.start()

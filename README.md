@@ -19,6 +19,27 @@ For Nginx Proxy Manager on a separate instance, choose setup option **2**. In NP
 
 Open your configured URL and sign in. Use **Menu → Add server** to connect a Linux or macOS host with Python 3.9+. The OS is detected automatically. Choose **Docker host** (also requires Docker, Compose v2 and an SSH account with Docker access) or **Plain server** for resource monitoring. Fetch and accept its host fingerprint, then generate or import an SSH key and install it from the form using a one-time password, or copy it manually. Optional password login is available after acknowledging its warning. Use **Server settings → Edit SSH connection** to switch authentication methods or replace keys without deleting the server.
 
+### Login and authentication history
+
+**Server → Logins** is available on both Docker and Plain server entries. It shows
+successful and failed authentication, usernames, methods, source IP/port, SSH key
+and certificate fingerprints when recorded, and session events. Expand a row for
+source evidence and event/capture/collection/acknowledgement timestamps. Filter by
+result, user, IP or key, and optionally hide records matching the Harbour key.
+
+Install the permanent host collector once using **Logins → Collector setup**.
+The downloadable bundle includes an installer for Linux systemd and macOS
+launchd. Unlike resource monitoring, collector installation needs administrator
+privileges. Routine probes use the existing SSH account and a restricted local
+socket. Events queue locally during disconnection, and are acknowledged only
+after Harbour has saved them. Harbour keeps received events for 90 days.
+
+Linux reads the journal or an authentication log. macOS log-only coverage is
+limited; the optional native helper adds OS authentication and graphical-session
+events, and requires Apple-approved Endpoint Security signing and Full Disk
+Access. Source failures, partial coverage and local queue losses are visible in
+the tab. See [collector installation, coverage and lifecycle details](harbour/LOGIN_COLLECTOR.md).
+
 ### Monitoring macOS
 
 Both Intel and Apple silicon Macs use the same setup:

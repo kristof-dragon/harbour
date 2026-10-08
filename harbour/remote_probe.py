@@ -911,11 +911,49 @@ def plan(services, action, targets):
     return commands
 
 
+def login_events(acknowledgement=None):
+    """Bounded local exchange; never needs sudo or an extra SSH connection."""
+    import socket
+    def exchange(ack):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(3)
+            deadline = time.monotonic() + 3
+            connection.connect('/var/run/harbour-logins/collector.sock')
+            connection.sendall(json.dumps({'operation': 'exchange', 'acknowledgement': ack}).encode() + b'\n')
+            data = bytearray()
+            while not data.endswith(b'\n'):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('Collector exchange timed out')
+                connection.settimeout(remaining)
+                chunk = connection.recv(65536)
+                if not chunk:
+                    raise ValueError('Collector response was incomplete')
+                data.extend(chunk)
+                if len(data) > 1500000:
+                    raise ValueError('Collector response exceeded the size limit')
+            return json.loads(data)
+    try:
+        result = exchange(acknowledgement)
+        if result.get('error') == 'Invalid acknowledgement' and acknowledgement:
+            result = exchange(None)
+            result['ack_warning'] = 'Previous acknowledgement was rejected; collector may have been replaced.'
+        if result.get('error'):
+            raise ValueError(result['error'])
+        return result
+    except FileNotFoundError:
+        return {'state': 'not_installed', 'detail': 'Install the Harbour login collector on this host to record authentication events.'}
+    except PermissionError:
+        return {'state': 'permission_denied', 'detail': 'This SSH account cannot read the login collector socket. Check the installed reader account.'}
+    except Exception as exc:
+        return {'state': 'error', 'detail': str(exc)[:500]}
+
+
 def handle(request, emit=None):
     operation = request["operation"]
     if operation == 'resources':
         # No Docker commands: resource polling must also work during daemon operations.
-        return {'metrics': metrics(docker=False)}
+        return {'metrics': metrics(docker=False), 'logins': login_events(request.get('logins_ack'))}
     docker = request.get("server_type", "docker") == "docker"
     if not docker and operation != "snapshot":
         raise ValueError("Docker operations are disabled for plain servers")

@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from . import __version__, auth, cpu, demo, history, notifications, polling, remote_probe, resources, ssh, store, volumes
+from . import __version__, auth, cpu, demo, history, logins, notifications, polling, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
 
 pool = ThreadPoolExecutor(max_workers=4)
@@ -163,7 +163,7 @@ def poll_resources(server, lock, cancel=None, background=False, raise_errors=Fal
             if result.get('metrics'):
                 result['metrics']['timezone'] = demo.demo_timezone(id_)
         else:
-            result = ssh.request(server, {'operation': 'resources'}, **({'cancel': cancel} if cancel else {}))
+            result = ssh.request(server, logins.payload(id_, connection_signature(server)), **({'cancel': cancel} if cancel else {}))
         with store.db() as con:
             con.execute('BEGIN IMMEDIATE')
             row = con.execute('SELECT * FROM servers WHERE id=?', (id_,)).fetchone()
@@ -195,6 +195,12 @@ def poll_resources(server, lock, cancel=None, background=False, raise_errors=Fal
             history.record(id_, metrics, result.get('latency_ms'), up=True, now=now, connection=con)
         clear_resolved_warning_dismissals(id_)
         observe_notifications(id_)
+        # Login collection failures are independent of resource/host health.
+        try:
+            logins.collect(server, result.get('logins'), connection_signature(server), valid)
+        except Exception:
+            import logging
+            logging.exception('Login history persistence failed for server %s; batch will be retried', id_)
     except ssh.Cancelled:
         pass
     except Exception as exc:
@@ -290,6 +296,7 @@ def retention_loop():
     while not stop.is_set():
         try:
             history.compact()
+            logins.compact()
             store.execute("DELETE FROM auth_log WHERE created<?", (time.time()-90*86400,))
             store.execute("DELETE FROM mfa_pending WHERE expires<?", (time.time(),))
             store.execute("DELETE FROM ip_bans WHERE until<?", (time.time(),))
@@ -312,6 +319,7 @@ async def lifespan(app):
     if store.DEMO:
         demo.seed()
         demo.seed_history()
+        logins.seed_demo()
     stop.clear()
     scheduler_wake.clear()
     with scheduler_guard:
@@ -338,6 +346,7 @@ async def lifespan(app):
 app = FastAPI(title="Harbour", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(auth.router)
 app.include_router(history.router)
+app.include_router(logins.router)
 app.include_router(notifications.router)
 
 
@@ -977,8 +986,7 @@ class ActionInput(Input):
 
 
 def connection_signature(server):
-    values = {k: server[k] for k in ('host', 'port', 'username', 'fingerprint', 'auth_method', 'key_id', 'password_encrypted', 'server_type')}
-    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
+    return logins.connection_signature(server)
 
 
 def build_plan(server, body):
