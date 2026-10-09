@@ -24,7 +24,11 @@ Open your configured URL and sign in. Use **Menu → Add server** to connect a L
 Resource checks reuse a pinned SSH connection and a session-bound Python reader.
 Hosts without an installed recorder are sampled only when Harbour requests a
 reading. Installing **Server settings → Install recorder** automatically enables
-durable local sampling for that host. Harbour fetches the recorder's private
+durable local sampling for that host. Setup offers **Push to host**, **Push &
+extract**, and **Push & install**. Uploads land in the SSH user's home directory;
+only installation needs sudo, with a one-time password prompt and live output.
+Setup uses its own SSH connection so polling continues. The same controls are
+available in **Logins → Collector setup**. Harbour fetches the recorder's private
 socket through the same SSH connection; no additional network port is opened.
 An unavailable installed recorder produces a warning and remote-probe fallback.
 

@@ -94,6 +94,7 @@ async function load(initial=false){
 }
 
 function renderLogin(){
+  document.dispatchEvent(new Event('harbour:overlay-close'));
   state.mobile=false;document.body.classList.remove('mobile-panel-open');
   state.modal=null;state.notices=null;$('#overlay').innerHTML='';
   $('#app').innerHTML=`<main class="login-page"><section class="login-identity"><div class="brand"><img src="/static/favicon.svg" alt="">Harbour</div><div class="login-copy"><h1>A home for<br>your <span>servers.</span></h1><p>Keep an eye on your infrastructure.<br>Give every container a little attention.</p><div class="login-features"><span>${icon('activity')}Live monitoring</span><span>${icon('layers')}Compose aware</span><span>${icon('shield')}Secure access</span></div></div><div class="login-bottom">Your infrastructure. Your control.</div></section><section class="login-form-wrap"><form class="login-form" id="login-form"><h2>Welcome aboard</h2><p>Sign in to your server workspace.</p>${state.authMessage?`<p class="auth-message" role="status">${e(state.authMessage)}</p>`:''}<label>Username<input name="name" autocomplete="username" required autofocus></label><label>Password<input name="password" type="password" autocomplete="current-password" required></label><label>Authenticator or recovery code <small class="muted">if enabled</small><input name="code" autocomplete="one-time-code" maxlength="80" placeholder="6-digit code or recovery code"></label><div class="form-error" role="alert"></div><button class="primary" type="submit">Sign in ${icon('shield')}</button>${state.demo?`<div class="demo-entry"><p class="muted">Take a look around with sample servers. All actions are simulated.</p>${button('demo-login','Explore the demo','play')}</div>`:''}</form></section></main>`;
@@ -346,6 +347,7 @@ const overlayNavigation=new Set(['recorder-setup','recorder-remove','boot-histor
 document.addEventListener('click',event=>{const action=event.target.closest('[data-action]')?.dataset.action;if(overlayNavigation.has(action)&&overlayDirty()){event.preventDefault();event.stopImmediatePropagation();const target=event.target.closest('[data-action]');requestDiscard(()=>target.click());}},true);
 let previousFocus=null;
 function modal(title,content,wide=false){
+  document.dispatchEvent(new Event('harbour:overlay-close'));
   if(state.mobile)setMobilePanel(false);
   if(!state.modal)previousFocus=document.activeElement;
   state.modal=title;state.notices=null;
@@ -353,7 +355,7 @@ function modal(title,content,wide=false){
   $('input,button,select,textarea',$('.modal'))?.focus();
   queueMicrotask(()=>document.querySelectorAll('#overlay form').forEach(markFormSaved));
 }
-function closeOverlay(force=false){if(!force&&overlayDirty()){requestDiscard(()=>closeOverlay(true));return false;}hideHelpTooltip();state.modal=null;state.notices=null;$('#overlay').innerHTML='';previousFocus?.focus();return true;}
+function closeOverlay(force=false){if(!force&&overlayDirty()){requestDiscard(()=>closeOverlay(true));return false;}document.dispatchEvent(new Event('harbour:overlay-close'));hideHelpTooltip();state.modal=null;state.notices=null;$('#overlay').innerHTML='';previousFocus?.focus();return true;}
 const formError = message => {const el=$('.form-error',$('#overlay'))||$('.form-error');if(el)el.textContent=message;else toast(message,true);};
 function thresholdFields(t){return `<div class="form-grid"><label>CPU warning (%)<input name="cpu" type="number" min="1" max="100" step="0.1" value="${t.cpu}" required></label><label>Memory warning (%)<input name="memory" type="number" min="1" max="100" step="0.1" value="${t.memory}" required></label><label>Disk warning (%)<input name="disk" type="number" min="1" max="100" step="0.1" value="${t.disk}" required></label><label>Disk free-space warning (GB)<input name="disk_free_gb" type="number" min="0" max="1000000" step="0.1" value="${t.disk_free_gb}" required></label><label>Temperature warning (°C)<input name="temperature" type="number" min="1" max="180" step="0.1" value="${t.temperature??80}" required></label></div>`;}
 function settings(server=false){
@@ -477,7 +479,7 @@ document.addEventListener('click',async event=>{
   finally{busyViewNodes.delete(el);if(el.isConnected)el.disabled=false;if(a==='dismiss-all'&&state.notices)renderNotices();}
 });
 document.addEventListener('submit',async event=>{
-  if(event.target.id==='login-filter')return;
+  if(event.target.id==='login-filter'||event.target.matches('.collector-sudo-form'))return;
   event.preventDefault();const form=event.target;if(form.dataset.busy)return;const data=Object.fromEntries(new FormData(form));const submit=$('[type=submit]',form);const restoreForm=busyOnboarding(form);$('.form-error',form).textContent='';
   try{
     if(monitorForms.has(form.id)){await handleMonitorForm(form,data);return;}

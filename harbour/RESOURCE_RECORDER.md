@@ -8,8 +8,33 @@ installed recorder samples independently or starts at boot.
 
 ## Install or upgrade
 
-In Server settings, choose **Install recorder** and download the bundle. Extract
-it on the monitored Linux/macOS host. Use the same account Harbour uses for SSH:
+In Server settings, choose **Install recorder**. Administrators have three actions:
+
+- **Push to host** uploads a ZIP to the saved SSH user's home directory.
+- **Push & extract** also extracts it into a new folder in that home directory.
+- **Push & install** uploads, extracts, and runs the installer with sudo. Enter
+  the sudo password in the setup dialog when the remote script requests it.
+  Root and passwordless sudo do not need a password prompt.
+
+Each upload has a unique name, so previous files remain intact. The dialog shows
+the full archive/folder paths, transfer progress, installer output, and final
+result as they arrive. Push and extraction need no sudo. Installation needs
+administrator privileges to register the service; the recorder runs as the SSH
+user with the saved recorder sample interval. Sudo must permit the installer.
+Hosts requiring an interactive TTY or additional authentication should use the
+manual installation below.
+
+Setup opens a separate pinned SSH connection with the host's saved credentials;
+the persistent resource-polling connection continues independently. The sudo
+password is used only for the active prompt, never saved or added to logs. A
+prompt times out after two minutes; the entire operation is limited to fifteen
+minutes. Closing the dialog or stopping setup closes that SSH connection.
+Completed steps and uploaded files remain; inspect the host before retrying an
+interrupted installation. Only one setup/server operation runs on a host at a
+time. Demo mode cannot push or install.
+
+Alternatively, download and extract the bundle on the monitored Linux/macOS
+host. Use the same account Harbour uses for SSH:
 
 ```sh
 python3 resource_install.py --reader harbour --dry-run

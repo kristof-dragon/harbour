@@ -7,9 +7,24 @@ The Python collector uses only the standard library and Python 3.9 or newer.
 
 ## Installation on each monitored host
 
-Download **Logins → Collector setup → Download collector bundle**, copy it to the
-host, and extract it. Alternatively, use the files in this repository's `harbour/`
-directory. Replace `harbour` below with the SSH account configured in Harbour:
+In **Logins → Collector setup**, use **Push to host** to upload the bundle into
+the saved SSH user's home directory, **Push & extract** to also unpack it into a
+new folder there, or **Push & install** to run the installer with sudo. Each push
+uses unique archive/folder names. Upload and extraction do not require sudo;
+installation registers a root service and does require administrator access.
+
+The dialog streams paths, progress, installer output, and the result over a
+separate pinned SSH connection while normal polling continues. Enter a sudo
+password only when the remote script requests one; it is used for that prompt
+and never saved or logged. Root and passwordless sudo need no prompt. Closing
+the dialog/stopping setup closes its connection; completed steps and uploaded
+files remain. Check the host after an interrupted installation. Prompts time out
+after two minutes and setup after fifteen minutes. Hosts whose sudo policy
+requires a TTY or extra authentication should use manual installation.
+
+Alternatively, download **Download collector bundle**, copy it to the host, and
+extract it, or use the files in this repository's `harbour/` directory. Replace
+`harbour` below with the SSH account configured in Harbour:
 
 ```sh
 python3 collector_install.py --reader harbour --dry-run
@@ -173,7 +188,8 @@ sudo launchctl bootout system/one.harbour.logins
 
 Remove the service definition and installed script directory only after stopping
 the service. Remove the database separately only when its retained evidence is
-no longer needed. No remote installation/removal is performed by Harbour itself.
+no longer needed. Remote installation is available through Collector setup;
+removal remains a manual host-side operation.
 
 ## Validation scope
 

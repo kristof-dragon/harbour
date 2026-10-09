@@ -1,11 +1,8 @@
 """Recorder delivery checkpoints and durable observations of host boots."""
 import hashlib
-import io
 import json
 import math
 import time
-import zipfile
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
@@ -103,11 +100,8 @@ def observe_boot(con, server, metrics, received_at=None):
 
 @router.get('/api/resource-recorder/download')
 def download(user=Depends(admin)):
-    archive = io.BytesIO()
-    with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
-        for name in ('resource_agent.py', 'resource_install.py', 'remote_probe.py', 'cpu.py', 'RESOURCE_RECORDER.md'):
-            bundle.writestr(name, Path(__file__).with_name(name).read_bytes())
-    return Response(archive.getvalue(), media_type='application/zip', headers={
+    from .collector_bundle import build
+    return Response(build('resources'), media_type='application/zip', headers={
         'Content-Disposition': 'attachment; filename="harbour-resource-recorder.zip"', 'Cache-Control': 'no-store'})
 
 

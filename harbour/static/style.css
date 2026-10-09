@@ -707,5 +707,11 @@ body.mobile-panel-open{overflow:hidden}
 .login-event-detail dt { font-size:11px;opacity:.65; }
 .login-event-detail dd { margin:4px 0 0;font-size:12px;overflow-wrap:anywhere; }
 .login-event-detail pre { white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px; }
+.collector-setup { border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0; }
+.collector-actions { display:flex;flex-wrap:wrap;gap:8px; }
+.collector-output { max-height:280px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;padding:12px;border:1px solid var(--line);border-radius:8px; }
+.collector-sudo-form { display:grid;gap:12px; }
+.collector-sudo-form input { width:100%; }
+.collector-status { overflow-wrap:anywhere; }
 @media(max-width:1000px){.login-table-heading{display:none}.login-event summary{grid-template-columns:1fr 100px 1fr}.login-event summary>.icon{display:none}.login-fingerprint{white-space:normal}.login-status .between,.logins-view>.between{flex-wrap:wrap;gap:10px}}
 @media(max-width:500px){.login-event summary{grid-template-columns:1fr 1fr}.login-filters>*{max-width:100%}.login-status{padding:12px}.login-event-detail dl{grid-template-columns:1fr}.login-filters label:first-child{width:100%}}

@@ -21,15 +21,9 @@ def connection_signature(server):
 
 @router.get('/api/login-collector/download')
 def collector_download(user=Depends(admin)):
-    import io
-    import zipfile
-    from pathlib import Path
+    from .collector_bundle import build
     from fastapi.responses import Response
-    archive = io.BytesIO()
-    with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
-        for name in ('login_agent.py', 'collector_install.py', 'login_events.m', 'login_events.entitlements', 'LOGIN_COLLECTOR.md'):
-            bundle.writestr(name, Path(__file__).with_name(name).read_bytes())
-    return Response(archive.getvalue(), media_type='application/zip', headers={
+    return Response(build('logins'), media_type='application/zip', headers={
         'Content-Disposition': 'attachment; filename="harbour-login-collector.zip"', 'Cache-Control': 'no-store'})
 
 

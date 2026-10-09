@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from . import __version__, auth, cpu, demo, history, logins, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
+from . import __version__, auth, collector_setup, cpu, demo, history, logins, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
 
 pool = ThreadPoolExecutor(max_workers=4)
@@ -355,6 +355,7 @@ async def lifespan(app):
         yield
     finally:
         stop.set()
+        collector_setup.close_all()
         scheduler_wake.set()
         thread.join()
         resource_workers.close()
@@ -369,6 +370,7 @@ app.include_router(auth.router)
 app.include_router(history.router)
 app.include_router(logins.router)
 app.include_router(recording.router)
+app.include_router(collector_setup.router)
 app.include_router(notifications.router)
 
 
