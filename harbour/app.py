@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from . import __version__, auth, cpu, demo, history, logins, notifications, polling, remote_probe, resources, ssh, store, volumes
+from . import __version__, auth, cpu, demo, history, logins, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
 
 pool = ThreadPoolExecutor(max_workers=4)
@@ -171,7 +171,18 @@ def poll_resources(server, lock, cancel=None, background=False, raise_errors=Fal
                 return
             snapshot = json.loads(row['snapshot'])
             metrics = result['metrics']
-            if 'cpu_counters' in metrics:
+            now = time.time()
+            delivery = result.get('recording', {})
+            local = delivery.get('mode') == 'local'
+            for sample in recording.accept(con, dict(row), result):
+                recording.observe_boot(con, dict(row), sample, now)
+                sample.pop('cpu_counters', None)
+                history.record(id_, sample, now=sample['measured_at'], connection=con, attempt=False)
+            recording.observe_boot(con, dict(row), metrics, now)
+            if local:
+                metrics.pop('cpu_counters', None)
+                snapshot.pop('_cpu_baseline', None)
+            elif 'cpu_counters' in metrics:
                 counters = metrics.pop('cpu_counters')
                 baseline = snapshot.get('_cpu_baseline', {})
                 signature = connection_signature(dict(row))
@@ -185,14 +196,21 @@ def poll_resources(server, lock, cancel=None, background=False, raise_errors=Fal
             con.execute('UPDATE servers SET resource_catalog=? WHERE id=?',
                         (json.dumps(resources.catalog(dict(row), metrics)), id_))
             snapshot['metrics'] = metrics
+            if delivery:
+                snapshot['recording'] = {k: v for k, v in delivery.items() if k != 'acknowledgement'}
+                snapshot['recording']['collected_at'] = now
             if row['server_type'] == 'plain':
                 snapshot['services'] = []
             snapshot['latency_ms'] = result.get('latency_ms')
             snapshot['history'] = (snapshot.get('history', []) + [metrics['cpu']])[-48:]
-            now = time.time()
             con.execute("UPDATE servers SET snapshot=?,error=NULL,checked=?,latency_ms=?,connection_status='up' WHERE id=?",
                         (json.dumps(snapshot), now, result.get('latency_ms'), id_))
-            history.record(id_, metrics, result.get('latency_ms'), up=True, now=now, connection=con)
+            if not local:
+                history.record(id_, metrics, result.get('latency_ms'), up=True, now=metrics.get('measured_at', now), connection=con)
+            else:
+                # A recovered local sample is not evidence that SSH was reachable
+                # at its capture time. Record this transport check separately.
+                history.record(id_, latency_ms=result.get('latency_ms'), up=True, now=now, connection=con)
         clear_resolved_warning_dismissals(id_)
         observe_notifications(id_)
         # Login collection failures are independent of resource/host health.
@@ -240,6 +258,7 @@ def poll_due():
         if resource_workers is None:
             resource_workers = polling.ServerWorkers(run_resource_worker)
         servers = store.rows('SELECT * FROM servers')
+        ssh.sync_resources(servers)
         interval = history.policy()['poll_seconds']
         resource_workers.sync({s['id']: (connection_signature(s), bool(s['monitoring_enabled']), s['poll_seconds'] or interval) for s in servers})
         for id_ in inventory_attempts.keys() - {s['id'] for s in servers}:
@@ -259,7 +278,7 @@ def poll_due():
         with scheduler_guard:
             last = inventory_attempts.get(server['id'], server['last_attempt'] or 0)
         inventory_due = (server['server_type'] == 'docker' and server['monitoring_enabled']
-                         and time.time() - last >= (server['poll_seconds'] or interval))
+                         and time.time() - last >= server.get('inventory_seconds', 300))
         if inventory_due or details_due:
             lock = server_lock(server['id'])
             if not lock.acquire(blocking=False):
@@ -297,6 +316,7 @@ def retention_loop():
         try:
             history.compact()
             logins.compact()
+            recording.prune()
             store.execute("DELETE FROM auth_log WHERE created<?", (time.time()-90*86400,))
             store.execute("DELETE FROM mfa_pending WHERE expires<?", (time.time(),))
             store.execute("DELETE FROM ip_bans WHERE until<?", (time.time(),))
@@ -339,6 +359,7 @@ async def lifespan(app):
         thread.join()
         resource_workers.close()
         resource_workers = None
+        ssh.close_resources()
         retention.join(timeout=15)
         telegram.join(timeout=15)
 
@@ -347,6 +368,7 @@ app = FastAPI(title="Harbour", version=__version__, lifespan=lifespan, docs_url=
 app.include_router(auth.router)
 app.include_router(history.router)
 app.include_router(logins.router)
+app.include_router(recording.router)
 app.include_router(notifications.router)
 
 
@@ -413,7 +435,14 @@ def server_warnings(server, snapshot, threshold):
     if server["server_type"] == "docker" and snapshot.get("docker_error") and not server['error']:
         warnings.append({"id": "docker", "title": "Docker inventory check failed", "detail": snapshot["docker_error"]})
     interval = server["poll_seconds"] or history.policy()["poll_seconds"]
-    stale = not server["checked"] or time.time() - server["checked"] > max(120, interval*2 + 15)
+    measured = snapshot.get('metrics', {}).get('measured_at') or server['checked']
+    interval = max(interval, snapshot.get('recording', {}).get('sample_seconds', 0))
+    stale = not measured or time.time() - measured > max(120, interval*2 + 15)
+    recorder = snapshot.get('recording', {})
+    if recorder.get('mode') == 'fallback':
+        warnings.append({'id': 'recorder', 'title': 'Local recorder unavailable', 'detail': recorder.get('detail') or 'Using remote probes until the recorder is available.'})
+    if recorder.get('dropped'):
+        warnings.append({'id': 'recorder-loss', 'title': 'Recorder history gap', 'detail': str(recorder['dropped']) + ' uncollected samples were removed from the bounded local queue.'})
     if server["error"]:
         warnings.append({"id": "connection", "title": "Server down" if server["connection_status"] == "down" else "Monitoring check failed", "detail": server["error"]})
     elif stale and server["monitoring_enabled"]:
@@ -444,8 +473,10 @@ def observe_notifications(server_id, successful=True):
         snapshot = json.loads(server['snapshot'])
         warnings = server_warnings(server, snapshot, thresholds_for(server))[0] if successful else []
         unavailable = resources.unavailable(server, snapshot.get('metrics', {}), thresholds_for(server))
-        notifications.observe(server, warnings, successful, now=server['checked'] if successful else None,
-                              unavailable=unavailable)
+        metrics = snapshot.get('metrics', {})
+        notifications.observe(server, warnings, successful,
+                              now=(metrics.get('measured_at') or server['checked']) if successful else None,
+                              unavailable=unavailable, sample_times={'disk': metrics.get('disk_measured_at')})
     except Exception:
         # Notification storage must never turn a successful resource poll into a failure.
         import logging
@@ -506,6 +537,7 @@ def public_server(server, user):
             **snapshot, "latency_ms": server["latency_ms"], "connection_status": server["connection_status"],
             "monitoring_enabled": bool(server["monitoring_enabled"]), "poll_seconds": interval,
             "poll_override": server["poll_seconds"], "last_attempt": server["last_attempt"], "server_type": server["server_type"],
+            "record_seconds": server['record_seconds'], "disk_seconds": server['disk_seconds'], "inventory_seconds": server['inventory_seconds'],
             "card_layout": resources.card_layout(server)}
 
 
@@ -697,6 +729,9 @@ class ServerSettingsInput(ServerTypeInput):
     card_layout: CardLayoutInput | None = None
     enabled: bool
     poll_seconds: int | None = Field(default=None, ge=15, le=3600)
+    record_seconds: int | None = Field(default=None, ge=15, le=3600)
+    disk_seconds: int | None = Field(default=None, ge=15, le=3600)
+    inventory_seconds: int | None = Field(default=None, ge=30, le=3600)
 
 
 @app.put('/api/servers/{id_}/settings')
@@ -715,6 +750,9 @@ def save_server_settings(id_: str, body: ServerSettingsInput, user=Depends(admin
         changed |= changed_volume_warnings(server, config, next_thresholds)
         # One transaction prevents a rejected setting from leaving a partial save.
         with notifications.guard, store.db() as con:
+            con.execute('UPDATE servers SET record_seconds=?,disk_seconds=?,inventory_seconds=? WHERE id=?',
+                        (body.record_seconds or server['record_seconds'], body.disk_seconds or server['disk_seconds'],
+                         body.inventory_seconds or server['inventory_seconds'], id_))
             con.execute('UPDATE servers SET name=?,thresholds=?,volume_settings=?,resource_settings=?,resource_catalog=?,monitoring_enabled=?,poll_seconds=?,server_type=?,card_layout=? WHERE id=?',
                         (body.name, body.thresholds.model_dump_json() if body.thresholds else None,
                          json.dumps(config), json.dumps(resource_settings), json.dumps(known), int(body.enabled), body.poll_seconds, body.server_type, json.dumps(layout), id_))

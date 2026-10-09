@@ -279,7 +279,13 @@ def test_ssh_cancellation_closes_active_connection_without_health_error(client, 
     monkeypatch.setattr(ssh,'stored_key',lambda id_:object())
     entered, closed = threading.Event(), threading.Event()
     class Channel:
+        closed = False
+        def recv_ready(self): return False
+        def recv_stderr_ready(self): return False
         def exit_status_ready(self): entered.set(); return False
+    class Input:
+        def write(self, data): pass
+        def flush(self): pass
     class Connection:
         def set_missing_host_key_policy(self,policy): pass
         def connect(self,*args,**kwargs): pass
@@ -287,7 +293,7 @@ def test_ssh_cancellation_closes_active_connection_without_health_error(client, 
         def set_keepalive(self,interval): pass
         def close(self): closed.set()
         def exec_command(self,*args,**kwargs):
-            return None,type('Reply',(),{'channel':Channel()})(),None
+            return Input(),type('Reply',(),{'channel':Channel()})(),None
     monkeypatch.setattr(ssh.paramiko,'SSHClient',Connection)
     cancel=ssh.Cancellation(); errors=[]
     def run():

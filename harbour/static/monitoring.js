@@ -140,14 +140,14 @@ function chartSVG(data,keys,{mini=false}={}){
     }
     grid+=`<text x="${left}" y="15">${sensor?e(seriesMeta.sensor.unit):loads?'Load average':percents?'Utilisation (%)':''}</text>${temps?`<text x="${right}" y="15" text-anchor="end">Temperature (°C)</text>`:''}`;
   }
-  const pollGap=(data.poll_seconds||current()?.poll_seconds||60)*3.5;
-  const legacyGap=Math.max(data.resolution_seconds*1.75,pollGap);
   const lines=keys.map(key=>{
+    const pollGap=(key==='disk'?Math.max(data.disk_seconds||0,data.sample_seconds||data.poll_seconds||60):(data.sample_seconds||data.poll_seconds||current()?.poll_seconds||60))*3.5;
+    const legacyGap=Math.max(data.resolution_seconds*1.75,pollGap);
     let segments=[],segment=[],previous=null,previousTimed=false;
     for(const p of data.points){
       const value=mini?p[key]:graphValue(p,key);
       if(value==null)continue;
-      const first=p.sample_first??p.time,last=p.sample_last??p.time;
+      const first=(key==='disk'?p.disk_sample_first:p.sample_first)??p.time,last=(key==='disk'?p.disk_sample_last:p.sample_last)??p.time;
       if(previous!=null&&first-previous>(p.sample_first!=null&&previousTimed?pollGap:legacyGap)){if(segment.length)segments.push(segment);segment=[];}
       segment.push([x(p.time),y(value,key)]);
       previous=last;previousTimed=p.sample_last!=null;
@@ -257,9 +257,10 @@ function serverSettings(s){
       <section class="settings-section"><div class="settings-section-heading"><h3>${fieldCaption('Warning thresholds','Global inherits the workspace limits. Custom sets limits for this server. Disk warnings trigger on either usage or free space for volumes with Warn enabled. CPU uses the average between successful polls; memory uses the latest reading. CPU temperature uses package / SoC sensors; other device sensors warn separately.')}</h3><input type="hidden" name="threshold_mode" value="${mode}">${slidingControl('threshold-mode','Threshold source',[['global','Global'],['custom','Custom']],mode,'settings-choice','data-field="threshold_mode"')}</div>
       <div class="threshold-row">${fields.map(([key,label,min,max])=>`<label>${label}<input name="${key}" type="number" min="${min}" max="${max}" step="0.1" value="${s.thresholds[key]}" required ${s.override?'':'disabled'}></label>`).join('')}</div></section>
       <section class="settings-section settings-checks"><div class="settings-type"><h3>${fieldCaption('Server type','Plain servers collect resources only. Docker hosts also discover containers, check images and support Docker actions.')}</h3><input type="hidden" name="server_type" value="${s.server_type}">${slidingControl('settings-server-type','Server type',[['docker','Docker host'],['plain','Plain server']],s.server_type,'settings-choice','data-field="server_type"')}</div>
-      <label class="settings-poll">${fieldCaption('Poll interval (s)','Leave blank to inherit the global interval. Checks never overlap on a host; pausing keeps history and permits manual refresh.')}<input aria-label="Polling interval (seconds)" name="poll_seconds" type="number" min="15" max="3600" placeholder="Global" title="Current effective interval: ${s.poll_seconds}s" value="${s.poll_override??''}"></label><label class="check-line settings-enabled"><input name="enabled" type="checkbox" ${s.monitoring_enabled?'checked':''}>Monitoring enabled</label></section>
+      <label class="settings-poll">${fieldCaption('Probe / collection interval (s)','Leave blank to inherit the global interval. Without a recorder this samples the host; with a recorder it fetches queued samples. Checks never overlap.')}<input aria-label="Polling interval (seconds)" name="poll_seconds" type="number" min="15" max="3600" placeholder="Global" title="Current effective interval: ${s.poll_seconds}s" value="${s.poll_override??''}"></label><label class="check-line settings-enabled"><input name="enabled" type="checkbox" ${s.monitoring_enabled?'checked':''}>Monitoring enabled</label></section>
       <section class="settings-section settings-card-layout"><div class="settings-section-heading"><h3>Resource card sizes</h3><input type="hidden" name="card_default_size" value="${cardLayout(s).default_size||'medium'}"><input type="hidden" name="card_reset_sizes" value="0">${slidingControl('overlay-resource-sizes','Set all card sizes',[['small','Small'],['medium','Medium'],['large','Large']],cardLayoutCommonSize(s),'overlay-card-size')}</div><p class="hint">Set all sizes here, or choose a size beside each resource. Large keeps Medium’s height and is 1.5× wider. Load periods share one card.</p></section><section class="settings-section settings-resources"><div class="settings-section-heading"><h3>${fieldCaption('Resources','Monitor records future history. Warn checks the low and high limits, including equality. Use in cards displays the resource. Turning off Monitor also turns off Warn and Use in cards. Inherited limits follow the CPU, memory and temperature thresholds above; other sensors require custom limits. Blank limits are off. Missing values never count as zero; existing history is retained.')}</h3></div>${resourceSettingsTable(s)}</section>
       <section class="settings-section settings-volumes"><div class="settings-section-heading"><h3>${fieldCaption('Volumes','Monitor stores this volume’s history. Warn enables disk thresholds. Use in cards selects the disk in the resource card and sidebar; if several are selected, the highest percentage is shown. Existing history is retained when monitoring is disabled. Capacities use decimal GB.')}</h3><div class="disk-card-size"><span>Disk card size</span>${cardSizeField(s,'disk')}</div></div>${volumeSettingsTable(s)}</section>
+      ${recordingSettings(s)}
       <div class="form-error" role="alert"></div><div class="form-actions settings-save">${button('remove-server','Remove server','trash','danger ghost small',`title="Remove from Harbour; services on the host are unaffected"`)}<button class="primary" type="submit">Save</button></div>
     </form>`);
   const form=$('#server-settings-form'),header=$('.modal-header');
@@ -306,7 +307,7 @@ async function handleMonitorForm(form,data){
     const invalid=resources.find(r=>r.warn&&r.limit_mode==='custom'&&(r.low==null&&r.high==null||r.low!=null&&r.high!=null&&r.low>=r.high));
     if(invalid)throw new Error('Set a low or high warning limit, with the low limit less than the high limit.');
     const thresholds=data.threshold_mode==='global'?null:Object.fromEntries(['cpu','memory','disk','disk_free_gb','temperature'].map(key=>[key,Number(data[key])]));
-    const saved=await api(`/servers/${form.dataset.id}/settings`,'PUT',{name:data.name,server_type:data.server_type,thresholds,volumes,resources,card_layout:overlayCardLayout(form),enabled:data.enabled==='on',poll_seconds:data.poll_seconds?Number(data.poll_seconds):null});
+    const saved=await api(`/servers/${form.dataset.id}/settings`,'PUT',{name:data.name,server_type:data.server_type,thresholds,volumes,resources,card_layout:overlayCardLayout(form),enabled:data.enabled==='on',poll_seconds:data.poll_seconds?Number(data.poll_seconds):null,record_seconds:Number(data.record_seconds),disk_seconds:Number(data.disk_seconds),inventory_seconds:Number(data.inventory_seconds)});
     form.elements.name.value=saved.name;form.elements.name.hidden=true;$('.server-settings-name',form).textContent=saved.name;$('.server-settings-name',form).hidden=false;$('[data-action=edit-server-name]',form).hidden=false;
     markFormSaved(form);cardCache.clear();state.selected.clear();await load();toast('Server settings saved');
   }

@@ -22,6 +22,8 @@ def policy():
 
 def empty():
     return {"attempts": 0, "up": 0, "n": 0, "cpu_n": 0, "cpu_sum": 0, "cpu_max": 0,
+            "cpu_duration_n": 0, "cpu_seconds_sum": 0, "cpu_weighted_sum": 0,
+            "uptime_n": 0, "uptime_sum": 0, "uptime_max": 0,
             **{key + suffix: 0 for key in LOAD_KEYS for suffix in ("_n", "_sum", "_max")},
             "memory_n": 0, "memory_sum": 0, "memory_max": 0, "memory_used_sum": 0, "memory_total_sum": 0,
             "latency_n": 0, "latency_sum": 0, "latency_max": 0, "disks": {},
@@ -59,9 +61,9 @@ def merge(left, right):
     return value
 
 
-def sample_payload(metrics=None, latency_ms=None, up=False):
+def sample_payload(metrics=None, latency_ms=None, up=False, attempt=True):
     sample = empty()
-    sample.update(attempts=1, up=int(up))
+    sample.update(attempts=int(attempt), up=int(up and attempt))
     if latency_ms is not None:
         sample.update(latency_n=1, latency_sum=latency_ms, latency_max=latency_ms)
     if metrics:
@@ -73,11 +75,17 @@ def sample_payload(metrics=None, latency_ms=None, up=False):
         value = metrics.get('cpu')
         if isinstance(value, (int, float)) and math.isfinite(value) and 0 <= value <= 100:
             sample.update(cpu_n=1, cpu_sum=value, cpu_max=value)
+            duration = metrics.get('cpu_sample_seconds')
+            if resources.finite(duration) and duration > 0:
+                sample.update(cpu_duration_n=1, cpu_seconds_sum=duration, cpu_weighted_sum=value * duration)
+        uptime = metrics.get('uptime')
+        if resources.finite(uptime) and uptime >= 0:
+            sample.update(uptime_n=1, uptime_sum=uptime, uptime_max=uptime)
         for key in LOAD_KEYS:
             value = metrics.get(key)
             if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
                 sample.update({key + "_n": 1, key + "_sum": value, key + "_max": value})
-        for disk in metrics["disks"]:
+        for disk in metrics["disks"] if metrics.get('disks_sampled', True) else []:
             sample["disks"][disk["mount"]] = {"n": 1, "percent_sum": disk["percent"], "percent_max": disk["percent"],
                 "used_sum": disk["used"], "used_max": disk["used"], "total_sum": disk["total"],
                 "free_sum": disk["free"], "free_min": disk["free"]}
@@ -105,7 +113,7 @@ def put(con, server_id, bucket, resolution, payload):
     con.execute("INSERT OR REPLACE INTO resource_history VALUES (?,?,?,?)", (server_id, bucket, resolution, json.dumps(payload)))
 
 
-def record(server_id, metrics=None, latency_ms=None, up=False, now=None, connection=None):
+def record(server_id, metrics=None, latency_ms=None, up=False, now=None, connection=None, attempt=True):
     now = time.time() if now is None else now
     resolution = policy()["week1_minutes"] * 60
     bucket = int(now // resolution * resolution)
@@ -118,10 +126,10 @@ def record(server_id, metrics=None, latency_ms=None, up=False, now=None, connect
         if metrics and server:
             metrics = resources.filter_history(dict(server), metrics)
             metrics = {**metrics, "disks": [d for d in metrics["disks"] if volumes.options(dict(server), d["mount"])["monitor"]]}
-        payload = sample_payload(metrics, latency_ms, up)
+        payload = sample_payload(metrics, latency_ms, up, attempt)
         if metrics:
             payload.update(sample_first_min=now, sample_last_max=now)
-            for collection in ('sensors', 'hardware'):
+            for collection in ('disks', 'sensors', 'hardware'):
                 for sensor in payload[collection].values():
                     sensor.update(sample_first_min=now, sample_last_max=now)
         put(con, server_id, bucket, resolution, payload)
@@ -188,13 +196,20 @@ def series(server_id, hours, now=None, requested_resolution=0, disk_mount=None):
         package = data["sensors"].get(selected)
         disks = [{"mount": mount, "percent": d["percent_sum"]/d["n"], "peak": d["percent_max"],
                   "used_gb": d["used_sum"]/d["n"]/1e9, "free_gb": d["free_sum"]/d["n"]/1e9,
+                  "sample_first": d.get('sample_first_min'), "sample_last": d.get('sample_last_max'),
                   "min_free_gb": d["free_min"]/1e9} for mount, d in data["disks"].items()]
         card_disks = [d for d in disks if d["mount"] == disk_mount] if disk_mount else [d for d in disks if server and volumes.options(server, d["mount"])["monitor"] and volumes.options(server, d["mount"])["card"]]
-        points.append({"time": bucket, "sample_first": data.get("sample_first_min"), "sample_last": data.get("sample_last_max"), "cpu": data["cpu_sum"]/cn if cn else None, "cpu_peak": data["cpu_max"] if cn else None,
+        average_cpu = (data['cpu_weighted_sum'] / data['cpu_seconds_sum'] if data['cpu_duration_n'] == cn and data['cpu_seconds_sum'] > 0
+                       else data['cpu_sum'] / cn if cn else None)
+        points.append({"time": bucket, "sample_first": data.get("sample_first_min"), "sample_last": data.get("sample_last_max"), "cpu": average_cpu, "cpu_peak": data["cpu_max"] if cn else None,
+                       "uptime": data['uptime_sum'] / data['uptime_n'] if data['uptime_n'] else None,
+                       "uptime_peak": data['uptime_max'] if data['uptime_n'] else None,
                        **{key: data[key + "_sum"]/data[key + "_n"] if data[key + "_n"] else None for key in LOAD_KEYS},
                        **{key + "_peak": data[key + "_max"] if data[key + "_n"] else None for key in LOAD_KEYS},
                        "memory": data["memory_sum"]/mn if mn else None, "memory_peak": data["memory_max"] if mn else None,
                        "disk": max((d["percent"] for d in card_disks), default=None), "disk_peak": max((d["peak"] for d in card_disks), default=None),
+                       "disk_sample_first": min((d['sample_first'] for d in card_disks if d['sample_first'] is not None), default=None),
+                       "disk_sample_last": max((d['sample_last'] for d in card_disks if d['sample_last'] is not None), default=None),
                        "disks": disks, "latency_ms": data["latency_sum"]/ln if ln else None,
                        "temperature": package["sum"]/package["n"] if package else None,
                        "temperature_peak": package["celsius_max"] if package else None,
@@ -209,6 +224,9 @@ def series(server_id, hours, now=None, requested_resolution=0, disk_mount=None):
             "retention_days": p["retention_days"], "demo": store.DEMO, "requested_resolution": requested_resolution,
             "temperature_source": known.get(selected, {}).get("label"), "temperature_sensor_id": selected,
             "poll_seconds": (server["poll_seconds"] or p["poll_seconds"]) if server else p["poll_seconds"],
+            "sample_seconds": (server['record_seconds'] if json.loads(server['snapshot']).get('recording', {}).get('mode') == 'local'
+                               else server['poll_seconds'] or p['poll_seconds']) if server else p['poll_seconds'],
+            "disk_seconds": server['disk_seconds'] if server else 300,
             "disk_mount": disk_mount, "disk_mounts": sorted({mount for data in grouped.values() for mount in data["disks"]})}
 
 

@@ -19,6 +19,32 @@ For Nginx Proxy Manager on a separate instance, choose setup option **2**. In NP
 
 Open your configured URL and sign in. Use **Menu → Add server** to connect a Linux or macOS host with Python 3.9+. The OS is detected automatically. Choose **Docker host** (also requires Docker, Compose v2 and an SSH account with Docker access) or **Plain server** for resource monitoring. Fetch and accept its host fingerprint, then generate or import an SSH key and install it from the form using a one-time password, or copy it manually. Optional password login is available after acknowledging its warning. Use **Server settings → Edit SSH connection** to switch authentication methods or replace keys without deleting the server.
 
+### Resource recording and reboot tracking
+
+Resource checks reuse a pinned SSH connection and a session-bound Python reader.
+Hosts without an installed recorder are sampled only when Harbour requests a
+reading. Installing **Server settings → Install recorder** automatically enables
+durable local sampling for that host. Harbour fetches the recorder's private
+socket through the same SSH connection; no additional network port is opened.
+An unavailable installed recorder produces a warning and remote-probe fallback.
+
+Server settings now separate the probe/collection interval, local sample interval
+(60 seconds by default), disk capacity interval (300 seconds) and Docker inventory
+interval (300 seconds). Cached disk readings retain their measurement time and
+are not repeatedly added to history. Collected batches keep their source times;
+retries are deduplicated and acknowledged only after storage. Alerts use the
+latest collected reading, so longer collection intervals delay alert detection.
+
+**Boot history**, beside Uptime, records distinct host boot identities, including
+boots recovered from queued samples. Restarting the recorder does not count as a
+host reboot. Uptime is retained in resource history. Remote probes cannot detect
+every reboot between checks.
+
+**Remove recorder** provides host-side removal instructions. Removal retains the
+local queue unless `--purge-data` is explicitly supplied and returns Harbour to
+remote probing. Removing a server entry alone does not uninstall host services.
+See [resource recorder installation, retention and off-boarding](harbour/RESOURCE_RECORDER.md).
+
 ### Login and authentication history
 
 **Server → Logins** is available on both Docker and Plain server entries. It shows
@@ -29,7 +55,7 @@ result, user, IP or key, and optionally hide records matching the Harbour key.
 
 Install the permanent host collector once using **Logins → Collector setup**.
 The downloadable bundle includes an installer for Linux systemd and macOS
-launchd. Unlike resource monitoring, collector installation needs administrator
+launchd. Like resource-recorder installation, login-collector installation needs administrator
 privileges. Routine probes use the existing SSH account and a restricted local
 socket. Events queue locally during disconnection, and are acknowledged only
 after Harbour has saved them. Harbour keeps received events for 90 days.
@@ -106,7 +132,7 @@ For Telegram alerts, open **Menu → Notifications**, save your bot token and Ch
 
 The resource overview shows current **1-, 5-, and 15-minute load averages** together with a three-line history chart. Open **Explore history → Load average** in Resource tabs to inspect them, or use the combined, side-by-side and table views. Selected load periods are recorded at the normal polling interval, with averages and peaks preserved through history consolidation. Optional warning limits are configured per period in Resources. Load history starts with the first successful poll after the update; earlier records have no load values.
 
-**CPU usage averages the interval between successful resource polls**, using the difference in Linux CPU counters or macOS Mach CPU counters. The CPU card shows the actual averaging period, including missed polls. Harbour saves the baseline across its own restarts; the first reading after an upgrade, remote reboot, connection change or counter reset waits for the next poll while other resources remain available. CPU warnings use this interval average, and recorded CPU peaks are the highest interval averages, not momentary spikes. Existing history keeps its original readings. Monitoring overhead remains part of real CPU usage, spread across the measured interval.
+**CPU usage averages the interval between successful resource samples**, using the difference in Linux CPU counters or macOS Mach CPU counters. The CPU card shows the actual averaging period, including missed polls. The recorder saves its own baseline in local mode; Harbour saves the remote-probe baseline across its restarts; the first reading after an upgrade, remote reboot, connection change or counter reset waits for the next poll while other resources remain available. CPU warnings use this interval average, and recorded CPU peaks are the highest interval averages, not momentary spikes. Existing history keeps its original readings. Monitoring overhead remains part of real CPU usage, spread across the measured interval.
 
 To update, keep your existing `.env` and data volume:
 

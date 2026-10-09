@@ -208,15 +208,16 @@ def inventory():
     return services
 
 
-def metrics(docker=True):
+def metrics(docker=True, collection=None):
     if sys.platform == 'darwin':
-        return macos_metrics(docker)
+        return macos_metrics(docker, collection) if collection is not None else macos_metrics(docker)
     if sys.platform.startswith('linux'):
-        return linux_metrics(docker)
+        return linux_metrics(docker, collection) if collection is not None else linux_metrics(docker)
     raise RuntimeError('Unsupported host OS: Harbour monitors Linux and macOS hosts.')
 
 
-def linux_metrics(docker=True):
+def linux_metrics(docker=True, collection=None):
+    collection = collection or {}
     with open("/proc/stat") as f:
         # guest/guest_nice are already included in user/nice; only use the
         # first eight counters. Harbour keeps the baseline between polls.
@@ -236,16 +237,22 @@ def linux_metrics(docker=True):
         load = os.getloadavg()
     except OSError:
         load = (None, None, None)
-    with open("/proc/meminfo") as f:
-        mem = {line.split(":")[0]: int(line.split()[1]) * 1024 for line in f}
+    mem = {'MemTotal': 1, 'MemAvailable': 1}
+    if collection.get('memory', True):
+        with open("/proc/meminfo") as f:
+            mem = {line.split(":")[0]: int(line.split()[1]) * 1024 for line in f}
     total = mem["MemTotal"]
     available = mem.get("MemAvailable", mem.get("MemFree", 0))
     disks = []
     seen = set()
-    with open("/proc/mounts") as f:
-        mounts = [line.split()[:3] for line in f]
+    mounts = []
+    if collection.get('disks', True):
+        with open("/proc/mounts") as f:
+            mounts = [line.split()[:3] for line in f]
     for device, escaped_mount, fs in mounts:
         mount = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), escaped_mount)
+        if not collection.get('disks', True) or mount in collection.get('excluded_disks', []):
+            continue
         if mount != "/" and (fs not in {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "nfs", "nfs4", "cifs"} or mount.startswith(("/var/lib/docker/", "/snap/"))):
             continue
         try:
@@ -269,12 +276,13 @@ def linux_metrics(docker=True):
                     os_name = line.strip().split("=", 1)[1].strip('"')
     except OSError:
         pass
-    return {"cpu": None, "cpu_counters": counters,
+    return {"cpu": None, "cpu_counters": counters, "boot_id": boot_id,
             **dict(zip(("load1", "load5", "load15"), load)),
             "cores": cores, "memory": {"total": total, "used": total - available,
             "percent": round(100 * (total - available) / total, 1)}, "disks": disks,
             "uptime": uptime, "os": os_name, "kernel": os.uname().release,
-            "temperature": temperatures(), **linux_hardware(), "timezone": timezone_info(),
+            "temperature": temperatures(excluded=collection['excluded_temperatures']) if collection.get('excluded_temperatures') else temperatures(),
+            **(linux_hardware(excluded=collection['excluded_hardware']) if collection.get('excluded_hardware') else linux_hardware()), "timezone": timezone_info(),
             "docker": run(["docker", "version", "--format", "{{.Server.Version}}"]).strip() if docker else None}
 
 
@@ -317,7 +325,7 @@ def macos_memory(total, output):
     return {'total': total, 'used': used, 'percent': round(100 * used / total, 1)}
 
 
-def macos_disks():
+def macos_disks(excluded=()):
     mounts = []
     for line in run(['/sbin/mount'], timeout=5).splitlines():
         match = re.match(r'^.+? on (.+) \(([^, )]+)(?:, (.*))?\)$', line)
@@ -335,7 +343,7 @@ def macos_disks():
                 or path.startswith(('/System/Volumes/', '/Volumes/.timemachine/', '/Library/Developer/CoreSimulator/'))
                 or 'nobrowse' in flags):
             continue
-        if mount in seen:
+        if mount in seen or mount in excluded:
             continue
         try:
             stat = os.statvfs(path)
@@ -354,15 +362,16 @@ def macos_disks():
     return disks
 
 
-def macos_metrics(docker=True):
-    boot = run(['/usr/sbin/sysctl', '-n', 'kern.boottime'], timeout=5)
+def macos_metrics(docker=True, collection=None):
+    collection = collection or {}
+    boot = collection.get('boot_time') or run(['/usr/sbin/sysctl', '-n', 'kern.boottime'], timeout=5)
     match = re.search(r'sec\s*=\s*(\d+),\s*usec\s*=\s*(\d+)', boot)
     if not match:
         raise RuntimeError('macOS boot time is unavailable')
     uptime = max(0, time.time() - int(match[1]) - int(match[2]) / 1_000_000)
     boot_id = 'darwin:btime:' + match[1] + ':' + match[2]
     try:
-        session = run(['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'], timeout=5).strip()
+        session = collection.get('boot_session') or run(['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'], timeout=5).strip()
         if session:
             boot_id = 'darwin:' + session
     except (OSError, RuntimeError, subprocess.TimeoutExpired):
@@ -376,20 +385,23 @@ def macos_metrics(docker=True):
                     'boot_id': boot_id, 'uptime': uptime, 'cores': cores}
     except (OSError, AttributeError, ValueError):
         pass  # Keep other resources usable when CPU statistics are unavailable.
-    total = int(run(['/usr/sbin/sysctl', '-n', 'hw.memsize'], timeout=5).strip())
-    memory = macos_memory(total, run(['/usr/bin/vm_stat'], timeout=5))
+    total = collection.get('memory_total') or int(run(['/usr/sbin/sysctl', '-n', 'hw.memsize'], timeout=5).strip())
+    memory = macos_memory(total, run(['/usr/bin/vm_stat'], timeout=5)) if collection.get('memory', True) else {'total': total, 'used': 0, 'percent': None}
     try:
-        version = run(['/usr/bin/sw_vers', '-productVersion'], timeout=5).strip()
+        version = collection.get('os_version') or run(['/usr/bin/sw_vers', '-productVersion'], timeout=5).strip()
     except (OSError, RuntimeError, subprocess.TimeoutExpired):
         version = ''
     try:
         load = os.getloadavg()
     except OSError:
         load = (None, None, None)
-    return {'cpu': None, 'cpu_counters': counters, 'cores': cores, 'memory': memory,
-            **dict(zip(('load1', 'load5', 'load15'), load)), 'disks': macos_disks(),
+    collection.update(boot_time=boot, boot_session=boot_id.removeprefix('darwin:'), memory_total=total, os_version=version)
+    return {'cpu': None, 'cpu_counters': counters, 'boot_id': boot_id, 'cores': cores, 'memory': memory,
+            **dict(zip(('load1', 'load5', 'load15'), load)), 'disks': macos_disks(collection.get('excluded_disks', [])) if collection.get('disks', True) else [],
             'uptime': uptime, 'os': ('macOS ' + version).strip(), 'kernel': os.uname().release,
-            **macos_hardware(), 'timezone': timezone_info(),
+            **(macos_hardware(collection.get('excluded_temperatures', []) + collection.get('excluded_hardware', []))
+               if collection.get('excluded_temperatures') or collection.get('excluded_hardware') else macos_hardware()),
+            'timezone': timezone_info(),
             'docker': run(['docker', 'version', '--format', '{{.Server.Version}}']).strip() if docker else None}
 
 
@@ -428,7 +440,7 @@ def temperature_summary(sensors):
             "package_label": package["label"] if package else None, "package_count": len(packages)}
 
 
-def temperatures(root="/sys"):
+def temperatures(root="/sys", excluded=()):
     """Read existing kernel sensor interfaces only; never load drivers or write sysfs."""
     sensors = []
     def read(path):
@@ -443,6 +455,8 @@ def temperatures(root="/sys"):
             continue
         for path in sorted(hw.glob("temp*_input")):
             stem = path.name.removesuffix("_input")
+            if chip + ':' + hw.name + ':' + stem in excluded:
+                continue
             if read(hw / (stem + "_fault")) == "1" or read(hw / (stem + "_enable")) == "0":
                 continue
             try:
@@ -458,6 +472,8 @@ def temperatures(root="/sys"):
     # A zone can also be exposed via hwmon; retain just one copy of that type.
     chips = {s["label"].split(" · ")[0].lower().replace("-", "_") for s in sensors}
     for zone in sorted(Path(root).glob("class/thermal/thermal_zone*")):
+        if zone.name in excluded:
+            continue
         try:
             value = float(read(zone / "temp")) / 1000
             label = read(zone / "type") or zone.name
@@ -493,7 +509,7 @@ def hardware_reading(identity, label, value, unit, source):
     return {'id': identity, 'label': label, 'value': round(value, 4), 'unit': unit, 'source': source}
 
 
-def linux_hardware(root='/sys'):
+def linux_hardware(root='/sys', excluded=()):
     """Optional read-only kernel interfaces; missing permissions never fail a poll."""
     readings, batteries = [], []
     root = Path(root)
@@ -513,6 +529,8 @@ def linux_hardware(root='/sys'):
             pass
         for prefix, attribute, divisor, unit in specs:
             for path in sorted(hw.glob(prefix + '*_' + attribute)):
+                if 'hwmon:' + physical + ':' + chip + ':' + path.name in excluded:
+                    continue
                 if not re.fullmatch(prefix + r'\d+_' + attribute, path.name):
                     continue
                 stem = path.name.rsplit('_', 1)[0]
@@ -551,6 +569,8 @@ def linux_hardware(root='/sys'):
                  ('charge_full_design', 1e6, 'Ah', 'design charge')]
         values = {}
         for attribute, divisor, unit, label in specs:
+            if 'battery:' + name + ':' + attribute in excluded:
+                continue
             value = sensor_number(sensor_text(device / attribute))
             if value is None or (attribute == 'capacity' and not 0 <= value <= 100):
                 continue
@@ -569,6 +589,8 @@ def linux_hardware(root='/sys'):
     # as watts. Interval power needs a separately validated sampling strategy.
     seen = set()
     for path in sorted(root.glob('class/powercap/*/energy_uj')):
+        if 'powercap:' + path.parent.name + ':energy' in excluded:
+            continue
         resolved = str(path.resolve())
         if resolved in seen:
             continue
@@ -672,11 +694,13 @@ class MacSMC:
         return smc_decode(type_, data)
 
 
-def macos_smc(chip=''):
+def macos_smc(chip='', excluded=()):
     temps, readings = [], []
     client = MacSMC()
     try:
         def read(key):
+            if 'smc:' + key in excluded:
+                return None
             try:
                 return sensor_number(client.read(key))
             except (OSError, ValueError, UnicodeError):
@@ -759,19 +783,19 @@ def macos_battery():
     return readings, batteries
 
 
-def macos_hardware():
+def macos_hardware(excluded=()):
     temps, readings, batteries = [], [], []
     try:
         chip = run(['/usr/sbin/sysctl', '-n', 'machdep.cpu.brand_string'], timeout=3).strip()
     except (OSError, RuntimeError, subprocess.TimeoutExpired):
         chip = ''
     try:
-        temps, readings = macos_smc(chip)
+        temps, readings = macos_smc(chip, excluded) if excluded else macos_smc(chip)
     except (OSError, ValueError, AttributeError):
         pass
     try:
         battery_readings, batteries = macos_battery()
-        readings.extend(battery_readings)
+        readings.extend(r for r in battery_readings if r['id'] not in excluded)
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         pass
     return {'temperature': temperature_summary(temps), 'hardware': readings, 'batteries': batteries}
@@ -947,6 +971,98 @@ def login_events(acknowledgement=None):
         return {'state': 'permission_denied', 'detail': 'This SSH account cannot read the login collector socket. Check the installed reader account.'}
     except Exception as exc:
         return {'state': 'error', 'detail': str(exc)[:500]}
+
+
+class ResourceSampler:
+    """Session/local-service cache. Only explicit requests cause SSH-mode samples."""
+    def __init__(self):
+        self.options = None
+        self.disks = []
+        self.disk_at = None
+        self.disk_due = 0
+        self.platform_cache = {}
+
+    def sample(self, options=None):
+        options = options or {}
+        if self.options != options:
+            self.options = json.loads(json.dumps(options))
+            self.disk_due = 0
+        now, tick = time.time(), time.monotonic()
+        disk_seconds = options.get('disk_seconds', 300)
+        disk_due = tick >= self.disk_due
+        collection = {**self.platform_cache, **options, 'disks': disk_due}
+        result = metrics(docker=False, collection=collection)
+        self.platform_cache = {k: collection[k] for k in ('boot_time', 'boot_session', 'memory_total', 'os_version') if k in collection}
+        if disk_due:
+            self.disks, self.disk_at = result['disks'], now
+            self.disk_due = tick + max(15, min(3600, disk_seconds))
+        result['disks'] = self.disks
+        result['measured_at'] = now
+        result['disk_measured_at'] = self.disk_at
+        result['disks_sampled'] = disk_due
+        result['boot_id'] = result.get('boot_id') or (result.get('cpu_counters') or {}).get('boot_id')
+        result['boot_at'] = now - result['uptime']
+        return result
+
+
+resource_sampler = ResourceSampler()
+
+
+def recorder_exchange(request):
+    """Private Unix socket carried inside the existing pinned SSH session."""
+    import socket
+    try:
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(5)
+            path = ('/Library/Application Support/HarbourResources/recorder.sock' if sys.platform == 'darwin'
+                    else '/var/run/harbour-resources/recorder.sock')
+            connection.connect(path)
+            message = {'acknowledgement': request.get('recorder_ack'), 'settings': request.get('collection', {})}
+            connection.sendall(json.dumps(message).encode() + b'\n')
+            data = bytearray()
+            while not data.endswith(b'\n'):
+                chunk = connection.recv(65536)
+                if not chunk or len(data) + len(chunk) > 6_000_000:
+                    raise ValueError('Incomplete or oversized recorder response')
+                data.extend(chunk)
+            result = json.loads(data)
+            if not isinstance(result, dict) or result.get('protocol') != 1 or result.get('error'):
+                raise ValueError('Recorder protocol unavailable')
+            return result
+    except (FileNotFoundError, ConnectionRefusedError):
+        installed = Path('/usr/local/libexec/harbour-resources/installed.json').exists()
+        return {'mode': 'fallback' if installed else 'remote', 'state': 'unavailable' if installed else 'not_installed'}
+    except (OSError, ValueError):
+        return {'mode': 'fallback', 'state': 'error', 'detail': 'Local recorder could not be read; using remote probes.'}
+
+
+def resource_response(request):
+    recorded = recorder_exchange(request)
+    latest = recorded.pop('latest', None)
+    samples = recorded.pop('samples', [])
+    if latest and time.time() - latest.get('measured_at', 0) <= max(120, recorded.get('sample_seconds', 60) * 2 + 15):
+        result = {'metrics': latest, 'samples': samples, 'recording': {**recorded, 'mode': 'local'}}
+    else:
+        if recorded.get('protocol') == 1:
+            recorded.update(mode='fallback', state='stale', detail='Recorder has no fresh sample; using remote probes.')
+        result = {'metrics': resource_sampler.sample(request.get('collection')), 'samples': samples, 'recording': recorded}
+    result['logins'] = login_events(request.get('logins_ack'))
+    return result
+
+
+def serve_resources():
+    # A session-bound probe, not an installed daemon. EOF closes it; no detached
+    # children or background sampler remain after SSH disconnects.
+    for line in iter(lambda: sys.stdin.buffer.readline(262145), b''):
+        try:
+            if len(line) > 262144:
+                break
+            request = json.loads(line)
+            print(json.dumps({'ready': True}), flush=True)
+            result = resource_response(request)
+        except Exception as exc:
+            result = {'error': str(exc)[:1000]}
+        print(json.dumps(result, allow_nan=False), flush=True)
 
 
 def handle(request, emit=None):

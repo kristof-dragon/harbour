@@ -117,8 +117,9 @@ def initialize():
           PRIMARY KEY(server_id,kind),
           FOREIGN KEY(server_id,kind) REFERENCES notification_rules(server_id,kind) ON DELETE CASCADE);
         """)
-        from . import logins
+        from . import logins, recording
         logins.initialize(con)
+        recording.initialize(con)
         def add_columns(table, columns):
             existing = {r[1] for r in con.execute("PRAGMA table_info(" + table + ")")}
             for name, definition in columns.items():
@@ -132,6 +133,8 @@ def initialize():
             "auth_method": "TEXT NOT NULL DEFAULT 'key'", "password_encrypted": "TEXT", "server_type": "TEXT NOT NULL DEFAULT 'docker'",
             "resource_settings": "TEXT NOT NULL DEFAULT '{}'", "resource_catalog": "TEXT NOT NULL DEFAULT '{}'",
             "card_layout": "TEXT NOT NULL DEFAULT '{}'",
+            "record_seconds": "INTEGER NOT NULL DEFAULT 60", "disk_seconds": "INTEGER NOT NULL DEFAULT 300",
+            "inventory_seconds": "INTEGER NOT NULL DEFAULT 300",
             "volume_settings": "TEXT NOT NULL DEFAULT '{}'", "sort_order": "INTEGER NOT NULL DEFAULT 0"})
         old_sessions = add_columns("sessions", {"created": "REAL NOT NULL DEFAULT 0",
             "last_activity": "REAL NOT NULL DEFAULT 0", "address": "TEXT NOT NULL DEFAULT ''",

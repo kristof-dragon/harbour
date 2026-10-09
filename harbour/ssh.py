@@ -18,13 +18,13 @@ DISABLED_ALGORITHMS = {"pubkeys": ["ssh-rsa"], "keys": ["ssh-rsa"]}
 # Fixed code only: no host, credential or browser-supplied value enters the shell.
 # macOS SSH sessions omit Homebrew and Docker Desktop from PATH. Prefer installed
 # Python over Apple's development-tools stub and expose Docker credential helpers.
-REMOTE_PYTHON = '/bin/sh -c ' + shlex.quote('''
+REMOTE_ENV = '''
 if [ "$(uname -s)" = Darwin ]; then
     PATH="/opt/homebrew/bin:/usr/local/bin:$PATH:$HOME/.docker/bin:/Applications/Docker.app/Contents/Resources/bin"
     export PATH
 fi
-exec python3 -
-'''.strip())
+'''.strip()
+REMOTE_PYTHON = '/bin/sh -c ' + shlex.quote(REMOTE_ENV + '\nexec python3 -')
 
 
 def host_fingerprint(key):
@@ -240,6 +240,8 @@ class ProgressFrames:
 def request(server, payload, on_event=None, cancel=None):
     if store.DEMO:
         raise RuntimeError("SSH is disabled in demo mode")
+    if payload.get('operation') == 'resources':
+        return resource_request(server, payload, cancel)
     client = None
     credential = {}
     connected, latency_ms = False, None
@@ -322,3 +324,133 @@ def request(server, payload, on_event=None, cancel=None):
             client.close()
         if cancel:
             cancel.unbind()
+
+
+resource_sessions = {}
+resource_sessions_lock = threading.RLock()
+
+
+class ResourceSession:
+    """One pinned monitoring connection and one session-bound reader per host."""
+    def __init__(self, signature):
+        self.signature = signature
+        self.lock = threading.Lock()
+        self.client = self.channel = self.stdin = None
+        self.buffer = bytearray()
+        self.retired = threading.Event()
+
+    def close(self):
+        client, self.client = self.client, None
+        if client:
+            client.close()
+
+    def start(self, server, cancel):
+        credential = ({'password': store.cipher().decrypt(server['password_encrypted'].encode()).decode()}
+                      if server.get('auth_method') == 'password' else {'pkey': stored_key(server['key_id'])})
+        self.client = connect(server, **credential, **({'cancel': cancel} if cancel else {}))
+        if self.retired.is_set():
+            self.close()
+            raise Cancelled('Monitoring connection retired')
+        if cancel:
+            cancel.bind(self.close); cancel.check()
+        self.client.get_transport().set_keepalive(30)
+        source = Path(__file__).with_name('remote_probe.py').read_bytes()
+        bootstrap = "import sys;exec(compile(sys.stdin.buffer.read(%d),'<harbour-probe>','exec'));serve_resources()" % len(source)
+        command = '/bin/sh -c ' + shlex.quote(REMOTE_ENV + '\nexec python3 -u -c ' + shlex.quote(bootstrap))
+        self.stdin, stdout, _ = self.client.exec_command(command, timeout=15)
+        self.channel = stdout.channel
+        self.buffer = bytearray()
+        self.stdin.write(source); self.stdin.flush()
+
+    def exchange(self, server, payload, cancel):
+        while not self.lock.acquire(timeout=.1):
+            if cancel:
+                cancel.check()
+        try:
+            if self.retired.is_set():
+                raise Cancelled('Monitoring connection retired')
+            if cancel:
+                cancel.check(); cancel.bind(self.close)
+            if not self.client or not self.client.get_transport() or not self.client.get_transport().is_active() or self.channel.closed:
+                self.close(); self.start(server, cancel)
+            begin = time.monotonic()
+            self.stdin.write(json.dumps(payload) + '\n'); self.stdin.flush()
+            latency, received = None, 0
+            while time.monotonic() - begin < 90:
+                if cancel:
+                    cancel.check()
+                if self.channel.recv_ready():
+                    chunk = self.channel.recv(65536)
+                    self.buffer.extend(chunk); received += len(chunk)
+                    if received > 8_000_000:
+                        raise RuntimeError('Resource response exceeded 8 MB')
+                if self.channel.recv_stderr_ready():
+                    self.channel.recv_stderr(65536)  # Never expose remote stderr/credentials.
+                while b'\n' in self.buffer:
+                    line, _, rest = self.buffer.partition(b'\n')
+                    self.buffer = bytearray(rest)
+                    result = json.loads(line)
+                    if result == {'ready': True}:
+                        latency = round((time.monotonic() - begin) * 1000, 1)
+                        continue
+                    if not isinstance(result, dict) or 'error' in result:
+                        raise ProbeError('Remote resource collection failed', 'up', latency)
+                    result['latency_ms'] = latency
+                    return result
+                if self.channel.exit_status_ready() and not self.channel.recv_ready():
+                    raise RuntimeError('SSH resource reader ended; it will reconnect on the next check')
+                time.sleep(.01)
+            raise TimeoutError('Resource collection timed out')
+        except Exception:
+            self.close()
+            raise
+        finally:
+            if cancel:
+                cancel.unbind()
+            self.lock.release()
+
+
+def resource_request(server, payload, cancel=None):
+    from . import logins, recording
+    signature = logins.connection_signature(server)
+    with resource_sessions_lock:
+        session = resource_sessions.get(server['id'])
+        if session and session.signature != signature:
+            session.retired.set(); session.close(); session = None
+        if session is None:
+            session = resource_sessions[server['id']] = ResourceSession(signature)
+    try:
+        return session.exchange(server, recording.payload(server, payload), cancel)
+    except Cancelled:
+        raise
+    except ProbeError:
+        raise
+    except Exception as exc:
+        if cancel and cancel.is_set():
+            raise Cancelled('Resource check cancelled') from None
+        if isinstance(exc, HostKeyMismatch):
+            message = str(exc)
+        else:
+            message = 'Resource monitoring connection failed. Check SSH access and the host recorder/probe.'
+        raise ProbeError(message, 'down' if isinstance(exc, (OSError, TimeoutError)) else 'unknown') from None
+
+
+def close_resources(id_=None):
+    with resource_sessions_lock:
+        ids = list(resource_sessions) if id_ is None else [id_]
+        for key in ids:
+            session = resource_sessions.pop(key, None)
+            if session:
+                session.retired.set()
+                session.close()
+
+
+def sync_resources(servers):
+    from .logins import connection_signature
+    active = {s['id']: s for s in servers}
+    with resource_sessions_lock:
+        for id_, session in list(resource_sessions.items()):
+            server = active.get(id_)
+            if (not server or connection_signature(server) != session.signature
+                    or not server['monitoring_enabled'] and not session.lock.locked()):
+                close_resources(id_)

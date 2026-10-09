@@ -120,7 +120,17 @@ def invalidate(con, server_id, identities):
             con.execute('DELETE FROM notification_state WHERE server_id=? AND kind=?', (server_id, row['kind']))
 
 
-def observe(server, warnings, successful=True, now=None, unavailable=()):
+def observation_interval(server, kind):
+    interval = server['poll_seconds'] or history.policy()['poll_seconds']
+    snapshot = json.loads(server.get('snapshot') or '{}')
+    if snapshot.get('recording', {}).get('mode') == 'local':
+        interval = max(interval, server.get('record_seconds', 60))
+    if kind == 'disk':
+        interval = max(interval, server.get('disk_seconds', 300))
+    return interval
+
+
+def observe(server, warnings, successful=True, now=None, unavailable=(), sample_times=None):
     """Called once per resource sample. No network access on the poll worker."""
     now = time.time() if now is None else now
     with guard, store.db() as con:
@@ -129,7 +139,9 @@ def observe(server, warnings, successful=True, now=None, unavailable=()):
             con.execute('DELETE FROM notification_state WHERE server_id=?', (server['id'],))
             return
         rules = con.execute('SELECT * FROM notification_rules WHERE server_id=? AND enabled=1', (server['id'],)).fetchall()
+        default_now = now
         for rule in rules:
+            now = (sample_times or {}).get(rule['kind']) or default_now
             key = (server['id'], rule['kind'])
             row = con.execute('SELECT * FROM notification_state WHERE server_id=? AND kind=?', key).fetchone()
             entities = json.loads(row['entities']) if row else {}
@@ -146,7 +158,7 @@ def observe(server, warnings, successful=True, now=None, unavailable=()):
             if not matches and not missing:
                 con.execute('DELETE FROM notification_state WHERE server_id=? AND kind=?', key)
                 continue
-            max_gap = max(120, (server['poll_seconds'] or history.policy()['poll_seconds']) * 2 + 15)
+            max_gap = max(120, observation_interval(server, rule['kind']) * 2 + 15)
             continuous = row and 0 < now - row['checked'] <= max_gap
             updated = missing
             for id_, warning in matches.items():
@@ -227,9 +239,9 @@ def deliver_one(now=None):
             if not value['enabled'] or value['next_attempt'] > now:
                 return
             candidate = None
-            rows = store.rows('SELECT n.*,r.delay_seconds,r.repeat_seconds,s.name,s.monitoring_enabled,s.connection_status,s.checked AS server_checked,s.poll_seconds FROM notification_state n JOIN notification_rules r USING(server_id,kind) JOIN servers s ON s.id=n.server_id WHERE r.enabled=1 ORDER BY COALESCE(n.last_sent,0),n.checked,n.server_id,n.kind')
+            rows = store.rows('SELECT n.*,r.delay_seconds,r.repeat_seconds,s.name,s.monitoring_enabled,s.connection_status,s.checked AS server_checked,s.poll_seconds,s.record_seconds,s.disk_seconds,s.snapshot FROM notification_state n JOIN notification_rules r USING(server_id,kind) JOIN servers s ON s.id=n.server_id WHERE r.enabled=1 ORDER BY COALESCE(n.last_sent,0),n.checked,n.server_id,n.kind')
             for row in rows:
-                max_age = max(120, (row['poll_seconds'] or history.policy()['poll_seconds']) * 2 + 15)
+                max_age = max(120, observation_interval(row, row['kind']) * 2 + 15)
                 if not row['monitoring_enabled'] or row['connection_status'] != 'up' or not row['checked'] or now-row['checked'] > max_age:
                     continue
                 entities = json.loads(row['entities'])
