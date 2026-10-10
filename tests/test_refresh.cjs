@@ -307,9 +307,9 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
   assert.equal(await page.locator('#service-search').count(),type==='docker'?1:0);
  }
  await page.evaluate(()=>onboard());
- assert.match(await page.locator('#onboard-form').textContent(),/Monitor Linux or macOS using either server type/);
- assert.match(await page.locator('#onboard-form').textContent(),/Remote Login/);
- assert.equal(await page.locator('[name="server_type"] option').count(),2);
+ assert.match(await page.locator('#onboard-form').textContent(),/Docker and Plain server types support Linux\/macOS/);
+ assert.match(await page.getByRole('button',{name:'Hostname or IP help',exact:true}).getAttribute('data-help'),/Remote Login/);
+ assert.equal(await page.locator('[name="server_type"] option').count(),3);
  await page.locator('[name="username"]').fill('Mac.User');
  assert.equal(await page.locator('[name="username"]').evaluate(el=>el.checkValidity()),true);
  await page.locator('[name="username"]').fill('user;id');

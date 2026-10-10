@@ -45,6 +45,8 @@ def install_host(tmp_path):
                 try:
                     if command == b'true':
                         channel.send_exit_status(0)
+                    elif command == b'test -f /etc/openwrt_release':
+                        channel.send_exit_status(1)
                     else:
                         assert command == ssh.REMOTE_PYTHON.encode()
                         channel.settimeout(5)

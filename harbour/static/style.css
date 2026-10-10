@@ -715,3 +715,22 @@ body.mobile-panel-open{overflow:hidden}
 .collector-status { overflow-wrap:anywhere; }
 @media(max-width:1000px){.login-table-heading{display:none}.login-event summary{grid-template-columns:1fr 100px 1fr}.login-event summary>.icon{display:none}.login-fingerprint{white-space:normal}.login-status .between,.logins-view>.between{flex-wrap:wrap;gap:10px}}
 @media(max-width:500px){.login-event summary{grid-template-columns:1fr 1fr}.login-filters>*{max-width:100%}.login-status{padding:12px}.login-event-detail dl{grid-template-columns:1fr}.login-filters label:first-child{width:100%}}
+/* OpenWRT diagnostics share a common time axis and preserve missing samples. */
+.network-view { padding: 22px 0; min-width:0; }
+.network-view > .between > .flex { flex-wrap:wrap; }
+.network-view > .between { flex-wrap: wrap; gap: 12px; }
+.network-capabilities,.network-legend { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+.network-table { overflow:auto; margin:16px 0 24px; }
+.network-table table { width:100%; border-collapse:collapse; font-size:13px; }
+.network-table th,.network-table td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
+.network-charts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+.network-chart { min-width:0; padding:16px; border:1px solid var(--line); border-radius:12px; }
+.network-chart h3 { margin:0; font-size:14px; }
+.network-chart svg { width:100%; color:var(--muted); }
+.network-chart svg text { fill:currentColor; font-size:14px; }
+.network-legend { font-size:11px; }
+.network-legend span { display:flex; align-items:center; gap:5px; }
+.network-legend i { width:8px; height:8px; border-radius:50%; }
+.network-view pre { max-height:280px; overflow:auto; padding:12px; font-size:12px; }
+#network-settings-form textarea { width:100%; font:inherit; padding:10px; }
+@media(max-width:900px) { .network-charts { grid-template-columns:1fr; } }

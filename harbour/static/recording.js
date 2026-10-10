@@ -1,8 +1,10 @@
 'use strict';
 function recordingLabel(s){
+  if(s.server_type==='openwrt')return 'Read-only OpenWRT probes';
   return s.recording?.mode==='local'?'Local recorder':s.recording?.mode==='fallback'?'Remote probes · recorder unavailable':s.recording?.mode==='remote'?'Remote probes':'Collection mode pending';
 }
 function recordingSettings(s){
+  if(s.server_type==='openwrt')return `<section class="settings-section"><h3>OpenWRT collection</h3><p>Read-only router probes. Configure fast local recording in the Network tab. Router installation and configuration changes are disabled.</p>${['record_seconds','disk_seconds','inventory_seconds'].map(k=>`<input type="hidden" name="${k}" value="${s[k]||60}">`).join('')}</section>`;
   return `<section class="settings-section"><div class="settings-section-heading"><h3>Resource collection</h3><span class="tag">${e(recordingLabel(s))}</span></div>
     <p class="hint">Installing the recorder on this host enables local recording automatically. Both modes use the existing SSH connection. Pausing monitoring pauses transfer; an installed recorder keeps recording.</p>
     <div class="threshold-row"><label>Recorder sample interval (s)<input name="record_seconds" aria-label="Recorder sample interval (seconds)" type="number" min="15" max="3600" required value="${s.record_seconds||60}"></label><label>Disk capacity interval (s)<input name="disk_seconds" aria-label="Disk capacity interval (seconds)" type="number" min="15" max="3600" required value="${s.disk_seconds||300}"></label><label>Docker inventory interval (s)<input name="inventory_seconds" aria-label="Docker inventory interval (seconds)" type="number" min="30" max="3600" required value="${s.inventory_seconds||300}"></label></div>
@@ -11,6 +13,7 @@ function recordingSettings(s){
 }
 const recorderShellArg=value=>"'"+String(value).replaceAll("'","'\"'\"'")+"'";
 function recorderSetup(s,remove=false){
+  if(s.server_type==='openwrt'){toast('OpenWRT is read-only; router installation is disabled.',true);return;}
   const install=`sudo python3 resource_install.py --reader ${recorderShellArg(s.username)}`;
   const uninstall='sudo python3 /usr/local/libexec/harbour-resources/resource_install.py --uninstall';
   modal(remove?'Remove resource recorder':'Install resource recorder',`<div class="stack"><p><b>${e(s.name)}</b> · ${e(recordingLabel(s))}</p>

@@ -12,7 +12,7 @@ function cardLayoutControls(s){return `<div class="card-layout-controls"><span>S
 function resourceCardIds(s){return [...new Set(['cpu','memory','disk','load',...(s.metrics?.resources||[]).map(resourceCardId)])];}
 function arrangeResourceMarkup(s,markup){
   const template=document.createElement('template');template.innerHTML=markup;
-  const articles=[...template.content.children],layout=cardLayout(s),primary=primaryResource(s);
+  const articles=[...template.content.children].filter(a=>s.server_type!=='openwrt'||!['metric:disk','metric:temperature'].includes(a.dataset.key)),layout=cardLayout(s),primary=primaryResource(s);
   for(const article of articles){
     const key=article.dataset.key,id=key==='metric:temperature'?(primary?.id||'temperature'):key.startsWith('metric:')?key.slice(7):key.slice(9);
     article.dataset.resourceCard=id;article.dataset.cardSize=resourceCardSize(s,id);

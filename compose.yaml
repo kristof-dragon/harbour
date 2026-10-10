@@ -28,5 +28,24 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+  network-recorder:
+    build: .
+    command: ["python", "-m", "harbour.network_recorder"]
+    environment:
+      HARBOUR_SECRET: ${HARBOUR_SECRET:?Set HARBOUR_SECRET in .env}
+      HARBOUR_DATA: /data
+    volumes:
+      - harbour-data:/data
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    sysctls:
+      net.ipv4.ping_group_range: "10001 10001"
+    depends_on:
+      harbour:
+        condition: service_healthy
 volumes:
   harbour-data:

@@ -19,6 +19,22 @@ For Nginx Proxy Manager on a separate instance, choose setup option **2**. In NP
 
 Open your configured URL and sign in. Use **Menu → Add server** to connect a Linux or macOS host with Python 3.9+. The OS is detected automatically. Choose **Docker host** (also requires Docker, Compose v2 and an SSH account with Docker access) or **Plain server** for resource monitoring. Fetch and accept its host fingerprint, then generate or import an SSH key and install it from the form using a one-time password, or copy it manually. Optional password login is available after acknowledging its warning. Use **Server settings → Edit SSH connection** to switch authentication methods or replace keys without deleting the server.
 
+### OpenWRT routers and network diagnostics
+
+Choose **OpenWRT** as the third server type for read-only router inspection.
+Harbour discovers the model, OpenWrt version, kernel and available probes without
+requiring Python on the router. Use an existing authorised SSH credential.
+Router configuration changes, key installation and host-collector installation
+are disabled for this type.
+
+When deployed on the on-site server, the separate `network-recorder` service
+records 250 ms–2 s ICMP probes alongside approximately one-second router CPU,
+interface, Wi-Fi and queue readings. Open **Network → Recording settings** to
+enable recording, choose targets/WAN interface and follow a calling device.
+Mark call degradation/recovery and export the surrounding raw evidence. The
+recorder continues during remote-access loss and web-container restarts.
+See [OpenWRT deployment, measurement limits and retention](harbour/OPENWRT.md).
+
 ### Resource recording and reboot tracking
 
 Resource checks reuse a pinned SSH connection and a session-bound Python reader.

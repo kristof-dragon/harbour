@@ -55,6 +55,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   fs.mkdirSync('test-results',{recursive:true});
   await page.screenshot({path:'test-results/recorder-remove-desktop.png'});
   await page.setViewportSize({width:390,height:844});
+  await page.waitForFunction(()=>document.documentElement.scrollWidth<=innerWidth);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
   await page.screenshot({path:'test-results/recorder-remove-mobile.png'});
   await page.getByRole('button',{name:'Close dialog',exact:true}).click();

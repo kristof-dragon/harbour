@@ -214,6 +214,8 @@ class SetupResponse(StreamingResponse):
 @router.post('/api/servers/{id_}/collector/{kind}')
 def start(id_: str, kind: Literal['resources', 'logins'], body: SetupInput, request: Request, user=Depends(auth.admin)):
     from .app import get_server, server_lock
+    if get_server(id_)['server_type'] == 'openwrt':
+        raise HTTPException(400, 'OpenWRT is read-only. Router collector installation is disabled.')
     if store.DEMO:
         raise HTTPException(400, 'Collector push and installation are disabled in demo mode')
     lock = server_lock(id_)
@@ -223,7 +225,10 @@ def start(id_: str, kind: Literal['resources', 'logins'], body: SetupInput, requ
         if not lock.acquire(blocking=False):
             raise HTTPException(409, 'Wait for the current host operation to finish')
         try:
-            op = Operation(get_server(id_), kind, body.action, user, lock)
+            server = get_server(id_)
+            if server['server_type'] == 'openwrt':
+                raise HTTPException(400, 'OpenWRT is read-only. Router collector installation is disabled.')
+            op = Operation(server, kind, body.action, user, lock)
             address = auth.client_ip(request)
             operations[op.id] = op
         except BaseException:

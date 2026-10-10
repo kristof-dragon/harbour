@@ -150,6 +150,8 @@ class KeyInstallError(RuntimeError):
 
 
 def install_key(server, key_id, password):
+    if server.get('server_type') == 'openwrt':
+        raise KeyInstallError('OpenWRT connections are read-only. Use an existing authorised credential.')
     if store.DEMO:
         raise KeyInstallError("Key installation is disabled in demo mode.")
     key = stored_key(key_id)
@@ -162,6 +164,16 @@ def install_key(server, key_id, password):
     except Exception:
         raise KeyInstallError("Could not establish an SSH connection to install the key. Check the address and port.") from None
     try:
+        # Even callers omitting server_type cannot install a key on OpenWrt.
+        _, target_check, _ = client.exec_command('test -f /etc/openwrt_release', timeout=10)
+        check_deadline = time.monotonic() + 10
+        while not target_check.channel.exit_status_ready():
+            if time.monotonic() > check_deadline:
+                raise KeyInstallError('Could not verify the target platform; key installation was not attempted.')
+            time.sleep(.01)
+        if target_check.channel.recv_exit_status() == 0:
+            raise KeyInstallError('OpenWRT connections are read-only. Use an existing authorised credential.')
+        target_check.channel.close()
         source = Path(__file__).with_name('remote_install_key.py').read_text()
         public = key.get_name() + ' ' + key.get_base64()
         source += '\nimport json\nprint(json.dumps(install_public_key(' + repr(public) + ')))\n'
@@ -186,6 +198,8 @@ def install_key(server, key_id, password):
         result = json.loads(output)
         if result.get('status') not in {'installed', 'present'}:
             raise RuntimeError()
+    except KeyInstallError:
+        raise
     except Exception:
         raise KeyInstallError("Key installation could not be confirmed. Check Python 3 and ~/.ssh permissions on the server; retrying will not duplicate the key.") from None
     finally:
@@ -240,6 +254,10 @@ class ProgressFrames:
 def request(server, payload, on_event=None, cancel=None):
     if store.DEMO:
         raise RuntimeError("SSH is disabled in demo mode")
+    if server.get('server_type') == 'openwrt':
+        if payload.get('operation') != 'resources':
+            raise ValueError('OpenWRT supports read-only resource and network diagnostics only')
+        return resource_request(server, payload, cancel)
     if payload.get('operation') == 'resources':
         return resource_request(server, payload, cancel)
     client = None
@@ -418,7 +436,11 @@ def resource_request(server, payload, cancel=None):
         if session and session.signature != signature:
             session.retired.set(); session.close(); session = None
         if session is None:
-            session = resource_sessions[server['id']] = ResourceSession(signature)
+            if server.get('server_type') == 'openwrt':
+                from .openwrt import Session
+                session = resource_sessions[server['id']] = Session(signature)
+            else:
+                session = resource_sessions[server['id']] = ResourceSession(signature)
     try:
         return session.exchange(server, recording.payload(server, payload), cancel)
     except Cancelled:

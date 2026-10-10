@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from . import __version__, auth, collector_setup, cpu, demo, history, logins, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
+from . import __version__, auth, collector_setup, cpu, demo, history, logins, network, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
 
 pool = ThreadPoolExecutor(max_workers=4)
@@ -92,7 +92,7 @@ def refresh_inventory(id_, updates=False):
     """Merge Docker inventory without overwriting independently sampled resources."""
     server = get_server(id_)
     try:
-        if server['server_type'] == 'plain':
+        if server['server_type'] != 'docker':
             result = {'services': [], 'docker': None}
         elif store.DEMO:
             result = json.loads(server['snapshot'])
@@ -199,7 +199,7 @@ def poll_resources(server, lock, cancel=None, background=False, raise_errors=Fal
             if delivery:
                 snapshot['recording'] = {k: v for k, v in delivery.items() if k != 'acknowledgement'}
                 snapshot['recording']['collected_at'] = now
-            if row['server_type'] == 'plain':
+            if row['server_type'] != 'docker':
                 snapshot['services'] = []
             snapshot['latency_ms'] = result.get('latency_ms')
             snapshot['history'] = (snapshot.get('history', []) + [metrics['cpu']])[-48:]
@@ -334,6 +334,7 @@ async def lifespan(app):
     global resource_workers
     auth.trusted_proxies()
     store.initialize()
+    network.initialize()
     with queue_guard:
         detail_refreshes.clear()
     if store.DEMO:
@@ -372,6 +373,7 @@ app.include_router(logins.router)
 app.include_router(recording.router)
 app.include_router(collector_setup.router)
 app.include_router(notifications.router)
+app.include_router(network.router)
 
 
 @app.exception_handler(RequestValidationError)
@@ -612,7 +614,7 @@ def save_volumes(id_: str, body: VolumeInput, user=Depends(admin)):
 
 
 class ServerTypeInput(Input):
-    server_type: Literal['docker', 'plain']
+    server_type: Literal['docker', 'plain', 'openwrt']
 
 
 class ResourceOption(Input):
@@ -762,9 +764,11 @@ def save_server_settings(id_: str, body: ServerSettingsInput, user=Depends(admin
             if body.enabled and not server['monitoring_enabled']:
                 con.execute('UPDATE servers SET last_attempt=NULL WHERE id=?', (id_,))
             if server['server_type'] != body.server_type:
-                snapshot = json.loads(server['snapshot'])
+                snapshot = {} if 'openwrt' in (server['server_type'], body.server_type) else json.loads(server['snapshot'])
                 snapshot['services'] = []
                 snapshot.get('metrics', {})['docker'] = None
+                if 'openwrt' in (server['server_type'], body.server_type):
+                    con.execute("UPDATE servers SET resource_catalog='{}' WHERE id=?", (id_,))
                 con.execute("UPDATE servers SET snapshot=?,error=NULL,checked=NULL,last_attempt=NULL,update_checked=0,connection_status='pending' WHERE id=?",
                             (json.dumps(snapshot), id_))
     finally:
@@ -781,9 +785,11 @@ def save_server_type(id_: str, body: ServerTypeInput, user=Depends(admin)):
     try:
         server = get_server(id_)
         if server['server_type'] != body.server_type:
-            snapshot = json.loads(server['snapshot'])
+            snapshot = {} if 'openwrt' in (server['server_type'], body.server_type) else json.loads(server['snapshot'])
             snapshot['services'] = []
             snapshot.get('metrics', {})['docker'] = None
+            if 'openwrt' in (server['server_type'], body.server_type):
+                store.execute("UPDATE servers SET resource_catalog='{}' WHERE id=?", (id_,))
             store.execute("UPDATE servers SET server_type=?,snapshot=?,error=NULL,checked=NULL,last_attempt=NULL,update_checked=0,connection_status='pending' WHERE id=?",
                           (body.server_type, json.dumps(snapshot), id_))
     finally:
@@ -899,6 +905,7 @@ class SSHLoginInput(SSHHostInput):
 
 
 class InstallKeyInput(SSHLoginInput):
+    server_type: Literal['docker', 'plain', 'openwrt'] = 'docker'
     key_id: str = Field(min_length=1, max_length=64)
     password: SecretStr = Field(min_length=1, max_length=1024)
 
@@ -908,6 +915,8 @@ key_installations = threading.BoundedSemaphore(4)
 
 @app.post('/api/ssh/install-key')
 def install_ssh_key(body: InstallKeyInput, request: Request, user=Depends(admin)):
+    if body.server_type == 'openwrt':
+        raise HTTPException(400, 'OpenWRT connections are read-only. Use an existing authorised credential.')
     if store.DEMO:
         raise HTTPException(400, 'Key installation is disabled in demo mode')
     if not store.one('SELECT 1 FROM ssh_keys WHERE id=?', (body.key_id,)):
@@ -934,7 +943,7 @@ class ServerInput(SSHLoginInput):
     key_id: str | None = Field(default=None, min_length=1, max_length=64)
     password: SecretStr | None = Field(default=None, min_length=1, max_length=1024)
     password_auth_confirmed: bool = False
-    server_type: Literal['docker', 'plain'] = 'docker'
+    server_type: Literal['docker', 'plain', 'openwrt'] = 'docker'
 
 
 def connection_credential(body, existing=None):

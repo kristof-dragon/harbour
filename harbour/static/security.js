@@ -78,6 +78,7 @@ function updateKeyTiers(){
 }
 function keyOutput(){
   const existing=state.connection?.key?.id===state.key.id;
+  if(onboardOpenWrt())return '<p class="hint">OpenWRT is read-only. Import a key already authorised on this router, or use existing password access.</p>';
   return `<div class="key-output"><div class="between"><span class="tag green">${icon('check')}${existing?'Current SSH key':'Key ready'}</span>${help('Key installation','Install this public key in the selected SSH account’s ~/.ssh/authorized_keys using its password. Existing keys are preserved; duplicates are skipped. The host fingerprint is checked before password authentication. A fresh key-only connection verifies installation.')}</div><div class="key-install-row"><label>${fieldCaption('One-time SSH password','Used only for this installation, never saved. The server must allow password authentication.')}<input name="install_password" aria-label="One-time SSH password" type="password" autocomplete="off" maxlength="1024"></label>${button('install-key','Install key on server','key','small',state.demo?'disabled':'')}</div><div id="key-install-result" aria-live="polite"></div><details class="manual-key"><summary>Manual installation</summary><code class="code-block">restrict ${e(state.key.public_key)}</code><div class="flex">${button('copy-key','Copy public key','copy','small')}${help('Manual installation','Add this line to ~/.ssh/authorized_keys for the selected account. The restrict option disables forwarding and interactive terminals while allowing Harbour’s commands.')}</div></details></div>`;
 }
 function updatePasswordRequirement(){
@@ -103,6 +104,7 @@ function busyOnboarding(form){
   return ()=>{delete form.dataset.busy;controls.forEach(([el,disabled])=>el.disabled=disabled);};
 }
 async function installOnboardKey(){
+  if(onboardOpenWrt())throw new Error('OpenWRT is read-only. Key installation is disabled.');
   const form=$('#onboard-form'),password=$('[name=install_password]',form),output=$('#key-install-result');
   for(const name of ['host','port','username','fingerprint'])if(!$(`[name=${name}]`,form).reportValidity())return;
   if(!password.value)throw new Error('Enter the SSH account password to install the key.');
