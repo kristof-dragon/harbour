@@ -202,53 +202,44 @@ def test_network_permissions_and_invalid_settings(client,monkeypatch):
     assert client.post('/api/servers/atlas/network/markers',json={'label':'test'}).status_code==403
 
 
-def test_slow_router_does_not_block_fast_probes_and_shutdown_cancels(client,monkeypatch):
-    server,signature,revision=enable(client,monkeypatch)
-    started=threading.Event()
-    def slow_router(self,server,payload=None,cancel=None):
+def test_slow_router_collection_shutdown_cancels(client, monkeypatch):
+    from harbour.network_collector import Collector
+    import queue
+    server, _, revision = enable(client, monkeypatch)
+    started = threading.Event()
+    def slow_router(self, server, payload=None, cancel=None):
         started.set()
-        while not cancel.is_set():time.sleep(.005)
+        while not cancel.is_set():
+            time.sleep(.005)
         raise ssh.Cancelled()
-    monkeypatch.setattr(openwrt.Session,'exchange',slow_router)
-    sent=[]
-    class LocalEcho:
-        def __init__(self,target,emit):self.target,self.emit=target,emit
-        def send(self,now,wall):
-            sent.append(wall)
-            self.emit({'at':wall,'kind':'probe','target':self.target,'source':'recorder','status':'reply','rtt_ms':12})
-        def receive(self,now):pass
-        def close(self):pass
-    monkeypatch.setattr(recorder,'Echo',LocalEcho)
-    settings=network.config('atlas')[0];settings['router_probes']=False
-    worker=recorder.Worker(server,settings,revision)
+    monkeypatch.setattr(openwrt.Session, 'exchange', slow_router)
+    settings = network.config('atlas')[0]
+    settings['router_probes'] = False
+    collector = Collector(server, settings, 'example-run', queue.Queue(16), threading.Event())
     try:
         assert started.wait(1)
-        deadline=time.monotonic()+2
-        while len(sent)<3 and time.monotonic()<deadline:time.sleep(.01)
-        assert len(sent)>=3
-        worker.flush()
-        assert len(network.samples('atlas',time.time()-5,time.time())[0])>=3
-        assert worker.threads[1].is_alive()
     finally:
-        worker.close()
-    assert not any(t.is_alive() for t in worker.threads)
+        collector.close()
+    assert not any(t.is_alive() for t in collector.threads)
 
 
-def test_recorder_restart_keeps_rows_and_distinct_run_configuration(client,monkeypatch):
-    server,signature,revision=enable(client,monkeypatch)
-    monkeypatch.setattr(recorder.Worker,'start_thread',lambda *args:None)
-    settings=network.config('atlas')[0]
-    first=recorder.Worker(server,settings,revision)
-    first.emit({'at':time.time(),'kind':'probe','target':'1.1.1.1','status':'reply','rtt_ms':4})
-    first.close()
-    second=recorder.Worker(server,settings,revision)
-    second.emit({'at':time.time(),'kind':'gap','detail':'Recorder resumed'})
-    second.close()
-    rows,_=network.samples('atlas',time.time()-5,time.time())
-    assert len(rows)==2 and len({r['run_id'] for r in rows})==2
-    assert len(network.run_metadata('atlas',rows))==2
+def test_recorder_restart_keeps_rows_and_distinct_run_configuration(client, monkeypatch):
+    from harbour.network_storage import commit
+    server, signature, revision = enable(client, monkeypatch)
+    monkeypatch.setattr(recorder.Worker, 'start', lambda *args: None)
+    settings = network.config('atlas')[0]
+    for kind in ('probe', 'gap'):
+        worker = recorder.Worker(None, server, settings, revision)
+        worker.buffer.append(json.dumps({'at':time.time(), 'kind':kind, 'run_id':worker.run_id,
+            'target':'192.0.2.10', 'status':'reply', 'rtt_ms':4}).encode())
+        assert commit(worker.job())
+        worker.retire()
+    rows, _ = network.samples('atlas', time.time()-5, time.time())
+    assert len([r for r in rows if r['kind'] != 'recorder_health']) == 2
+    assert len({r['run_id'] for r in rows}) == 2
+    assert len(network.run_metadata('atlas', rows)) == 2
     network.initialize()
-    assert len(network.samples('atlas',time.time()-5,time.time())[0])==2
+    assert len(network.samples('atlas', time.time()-5, time.time())[0]) == 4
 
 
 def test_storage_limits_keep_latest_raw_samples(client,monkeypatch):

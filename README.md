@@ -33,6 +33,10 @@ interface, Wi-Fi and queue readings. Open **Network → Recording settings** to
 enable recording, choose targets/WAN interface and follow a calling device.
 Mark call degradation/recovery and export the surrounding raw evidence. The
 recorder continues during remote-access loss and web-container restarts.
+Probes, router collection, database writes and archives run in separate processes.
+A configurable 128 MiB RAM buffer per router absorbs storage delays, with live
+backlog/loss reporting and acknowledged writes. Linux receive timestamps separate
+late collection from network latency; uncertain readings remain labelled evidence.
 Retention is configurable per router. Defaults keep seven days / 1 GiB of raw
 history and automatically save compressed daily files for 90 days / 4 GiB on the
 on-site server. Download finished files from the Network view; row and size caps

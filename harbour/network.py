@@ -16,7 +16,7 @@ DEFAULTS = {'enabled': False, 'interval': 1.0, 'targets': ['1.1.1.1', '8.8.8.8']
             'router_probes': True, 'wan_device': '', 'client_mac': '', 'latency_limit_ms': 150.0,
             'retention_hours': 168, 'max_rows': 0, 'max_payload_mib': 1024,
             'archive_enabled': True, 'archive_retention_days': 90, 'archive_max_mib': 4096,
-            'incident_max_count': 200, 'incident_max_mib': 128}
+            'incident_max_count': 200, 'incident_max_mib': 128, 'buffer_mib': 128}
 
 
 def initialize():
@@ -45,6 +45,7 @@ def initialize():
         for table, name, definition in (
                 ('network_samples', 'archived', 'INTEGER NOT NULL DEFAULT 0'),
                 ('network_samples', 'payload_bytes', 'INTEGER NOT NULL DEFAULT 0'),
+                ('network_runs', 'written_through', 'INTEGER NOT NULL DEFAULT 0'),
                 ('network_events', 'archived_version', 'INTEGER NOT NULL DEFAULT -1')):
             if name not in {r['name'] for r in con.execute(f'PRAGMA table_info({table})')}:
                 con.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
@@ -79,6 +80,7 @@ class Settings(BaseModel):
     wan_device: str = Field(default='', max_length=32, pattern=r'^[A-Za-z0-9_.:@-]*$')
     client_mac: str = Field(default='', pattern=r'^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$|^$')
     latency_limit_ms: float = Field(default=150, ge=10, le=10000, allow_inf_nan=False)
+    buffer_mib: int = Field(default=128, ge=8, le=4096, strict=True)
     retention_hours: int = Field(default=168, ge=1, le=8760, strict=True)
     max_rows: int = Field(default=0, ge=0, le=100000000, strict=True)
     max_payload_mib: int = Field(default=1024, ge=0, le=1048576, strict=True)
@@ -118,6 +120,8 @@ def get(id_: str, user=Depends(authenticated)):
     status = json.loads(row['payload']) if row else {}
     status.update(updated=row['updated'] if row else None,
                   recorder_online=bool(row and time.time()-row['updated'] < 10))
+    from .network_runtime import read_status
+    status.update(read_status(id_))
     return {'settings': settings, 'revision': revision, 'status': status,
             'device': json.loads(server['snapshot']).get('metrics', {}).get('openwrt'),
             'events': store.rows('SELECT id,measured,label,automatic,complete FROM network_events WHERE server_id=? ORDER BY measured DESC LIMIT 50', (id_,)),
@@ -212,7 +216,7 @@ def run_metadata(id_, rows):
             store.rows('SELECT id,started,config,observer FROM network_runs WHERE server_id=?', (id_,)) if r['id'] in identities]
 
 
-def persist(id_, rows, status, signature, revision):
+def persist(id_, rows, status, signature, revision, run=None, through=0):
     """Never commit results belonging to a removed, paused or reconfigured target."""
     from .logins import connection_signature
     with store.db() as con:
@@ -223,23 +227,50 @@ def persist(id_, rows, status, signature, revision):
                 or connection_signature(dict(server)) != signature or not cfg or cfg['revision'] != revision
                 or not json.loads(cfg['config']).get('enabled')):
             return False
+        if run is not None:
+            con.execute('INSERT OR IGNORE INTO network_runs(id,server_id,started,config,observer) VALUES (?,?,?,?,?)',
+                        (run['id'], id_, run['started'], json.dumps(run['config']), run['observer']))
+            committed = con.execute('SELECT written_through FROM network_runs WHERE id=? AND server_id=?',
+                                    (run['id'], id_)).fetchone()
+            if committed is None:
+                return False
+            if through <= committed['written_through']:
+                rows = []
         values = []
         for r in rows:
             payload = json.dumps({k:v for k,v in r.items() if k not in ('at','kind','target')}, allow_nan=False)
             values.append((id_, r['at'], r['kind'], r.get('target', ''), payload, len(payload)))
         con.executemany('INSERT INTO network_samples(server_id,measured,kind,target,payload,payload_bytes) VALUES (?,?,?,?,?,?)', values)
+        if run is not None:
+            con.execute('UPDATE network_runs SET written_through=max(written_through,?) WHERE id=?', (through, run['id']))
+            # Commit incident detection with the batch, so a writer dying before
+            # acknowledgement cannot duplicate either samples or incident markers.
+            bad = [r for r in rows if r['kind'] == 'probe' and r.get('source') == 'recorder'
+                   and r.get('timing_quality') != 'uncertain'
+                   and (r.get('status') == 'timeout' or (r.get('rtt_ms') or 0) > run['config']['latency_limit_ms'])]
+            if bad:
+                measured = min(r['at'] for r in bad)
+                previous = con.execute('SELECT max(measured) FROM network_events WHERE server_id=? AND automatic=1', (id_,)).fetchone()[0]
+                if previous is None or measured-previous >= 300:
+                    con.execute('INSERT INTO network_events(id,server_id,measured,label,automatic) VALUES (?,?,?,?,1)',
+                                (uuid.uuid4().hex, id_, measured, 'Probe degradation — inspect correlated evidence'))
         con.execute('INSERT OR REPLACE INTO network_status VALUES (?,?,?)', (id_, time.time(), json.dumps(status)))
     return True
 
 
 def maintain(id_, stop=None):
     from . import network_archives
+    from .network_runtime import read_status
     now = time.time()
     server = store.one('SELECT snapshot FROM servers WHERE id=?', (id_,))
     if not server:
         return
     settings, _ = config(id_)
-    for event in store.rows('SELECT * FROM network_events WHERE server_id=? AND complete=0 AND measured<?', (id_, now-300)):
+    runtime = read_status(id_)
+    # A queued reading can still belong to an otherwise finished incident.
+    pending = runtime.get('writer_stalled') or runtime.get('oldest_unsaved_seconds', 0) > 2
+    events = [] if pending else store.rows('SELECT * FROM network_events WHERE server_id=? AND complete=0 AND measured<?', (id_, now-300))
+    for event in events:
         rows, truncated = samples(id_, event['measured']-120, event['measured']+300, 30000)
         archive = json.dumps({'samples': rows, 'truncated': truncated, 'runs': run_metadata(id_, rows),
                               'settings': config(id_)[0], 'device': json.loads(server['snapshot']).get('metrics', {}).get('openwrt', {}).get('board')})

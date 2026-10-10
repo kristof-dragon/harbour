@@ -48,9 +48,32 @@ Open **Network → Recording settings**:
 The recorder continues with the browser closed, during remote-access/WAN loss,
 and through a restart of the web container alone. Restarting the recorder,
 recreating the whole stack, or losing server power creates a measurement gap.
-SQLite receives approximately one-second batches; a process/power failure can
-lose the uncommitted batch. Storage errors retain a bounded in-memory queue and
-report discarded readings. No missing interval is reconstructed.
+Each monitored router has independent ping and router-collection processes.
+Separate writer and archive processes handle SQLite, incident serialization,
+compression and retention. A bounded RAM buffer in the supervisor keeps encoded
+readings until the writer acknowledges their committed sequence. A writer restart
+retries unacknowledged batches without duplicating readings or incident markers,
+even if their raw rows have already been archived and pruned.
+
+**Memory buffer** defaults to **128 MiB per router**, adjustable from 8 to 4096 MiB
+in Recording settings without restarting probes. This bounds buffered payload,
+not total process memory: objects, interpreter overhead and small bounded transfer
+queues are additional. Capacity is allocated as readings arrive, not reserved in
+advance. Normal writes happen about once a second. A larger buffer increases
+outage tolerance, not normal RTT accuracy or the normal unsaved window.
+
+If storage stalls, probing continues until the buffer is full, after which new
+readings are discarded and counted. Lowering a limit retains queued readings and
+rejects arrivals until space is available. The UI shows buffer usage, oldest
+unsaved age, writer delays and losses. A private Unix socket in the shared data
+volume supplies live status independently of database writes. Historical buffer
+health is included in incident exports as `recorder_health` rows.
+
+Normal shutdown stops collection and allows up to 30 seconds to drain buffered
+readings. Compose grants 45 seconds for shutdown. A forced stop, supervisor crash
+or power failure loses unsaved RAM contents; normally about a second, potentially
+more during storage trouble. Shutdown reports remaining uncommitted readings if
+storage cannot recover in time. No missing interval is reconstructed.
 
 The recorder can also run as `python3 -m harbour.network_recorder` on the same
 Linux host, with the same `HARBOUR_DATA` and `HARBOUR_SECRET` as the web service.
@@ -62,13 +85,29 @@ target for this diagnostics recorder; macOS host monitoring remains unchanged.
 
 ## Measurement interpretation
 
-- Recorder probes are concurrent, use monotonic RTT timing and keep individual
-  sequence numbers. Their reply deadline is 2 seconds. Late replies are retained
-  separately from deadline misses; duplicates/foreign tokens are ignored.
+- Recorder probes retain individual sequence numbers and a two-second deadline.
+  On supported Linux kernels, software receive timestamps distinguish packet
+  arrival from the time the recorder reads the socket. Scheduling uses a
+  monotonic clock; clock-offset changes invalidate mixed-clock RTT calculations.
+  The send timestamp is still application-side, so send-call duration is recorded
+  and slow sends invalidate latency. These are not hardware wire timestamps.
+- Exports preserve `timing_quality`, `observed_rtt_ms`, `received_at`,
+  `reader_delay_ms`, `send_lateness_ms` and `send_duration_ms`. Kernel receive
+  timestamps remove delayed-reader inflation. If unavailable, healthy
+  application timing is labelled `userspace`. Delayed fallback measurements or
+  clock changes are `uncertain`: retained as observations, excluded from RTT
+  charts and automatic latency alerts. Unanswered probes across an observation
+  gap are `unobserved`, separately counted from confirmed deadline misses.
+- Reads are drained before deadlines are evaluated. A reply timestamped before
+  its deadline is not a timeout just because it was read late. Genuine late
+  arrivals retain their timeout and late reply. Duplicates/foreign tokens are
+  ignored. Missed send slots are skipped rather than replayed in catch-up bursts.
+  Process isolation cannot prevent whole-host CPU starvation, suspension, kernel
+  receive delays, or buffer overflow; these remain observable limitations.
 - Router probes use a one-second reply wait and approximately one-second
   cadence per target over reused SSH connections. A remote-command error is a
   gap, not a timeout. Router telemetry, logs and fast recorder probes have
-  independent workers, so a slow router command cannot block packet sampling.
+  separate processes, so a slow router command does not share the ping interpreter.
 - Router telemetry is read approximately every second. CPU/softirq, interface
   traffic/errors and client retry/failure deltas are boot-scoped. New baselines,
   reconnects and counter resets produce unavailable rates. Actual sample
@@ -95,6 +134,7 @@ The defaults, including after upgrading an existing entry, are:
 
 | Storage | Default limits |
 | --- | --- |
+| Unsaved readings in RAM | 128 MiB encoded payload per router |
 | Raw readings in the database | 7 days / 1 GiB of JSON payload; no row cap |
 | Compressed daily files | 90 days / 4 GiB of finished files |
 | Incident exports in the database | 200 incidents / 128 MiB of JSON payload |
@@ -175,3 +215,12 @@ configuration changes, persistence, permissions and browser flows. Loopback
 tests validate unprivileged ICMP in an isolated Linux container. Actual router
 driver output, SSH permissions and sampling overhead still require on-site
 deployment validation; no live router has been accessed or altered by this work.
+
+## Recorder validation
+
+`tests/test_network_pipeline.py` exercises timestamp quality, clock changes,
+full buffers, nonblocking IPC, commit acknowledgement retries, and stale settings.
+`tests/network_process_check.py` additionally exercises actual Linux datagram
+ICMP timestamps, stopped and killed child processes, live buffer status, settings
+changes and shutdown. Run that integration check in a disposable container with
+`--network none`; it uses loopback and documentation addresses, never a site.

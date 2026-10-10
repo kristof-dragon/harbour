@@ -103,7 +103,7 @@ def test_daily_rollover_download_and_delayed_measurement(client, monkeypatch):
     clock(monkeypatch, day+3600)
     old_samples = readings(signature, revision, at=day-86400)
     event = network.mark('atlas', 'Example incident', measured=day-3600)
-    store.execute('INSERT INTO network_runs VALUES (?,?,?,?,?)', ('example-run', 'atlas', day, '{}', 'example-observer'))
+    store.execute('INSERT INTO network_runs(id,server_id,started,config,observer) VALUES (?,?,?,?,?)', ('example-run', 'atlas', day, '{}', 'example-observer'))
     readings(signature, revision, at=day+1, count=1, run_id='example-run')
     network.maintain('atlas')
     first = store.one('SELECT * FROM network_archives')
@@ -253,32 +253,17 @@ def test_deleting_server_cleans_only_managed_files(client, monkeypatch):
     assert unrelated.is_file()
 
 
-def test_slow_maintenance_does_not_block_recorder_flush(client, monkeypatch):
-    enable(client, monkeypatch)
-    stop, entered = threading.Event(), threading.Event()
-    flushed = []
-    def slow(id_, cancel=None):
-        entered.set()
-        stop.wait(5)
-    class Worker:
-        def __init__(self, server, settings, revision):
-            self.revision = revision
-            self.signature = recorder.logins.connection_signature(server)
-        def flush(self):
-            flushed.append(time.monotonic())
-            if len(flushed) == 2:
-                stop.set()
-        def close(self):
-            pass
-    monkeypatch.setattr(network, 'maintain', slow)
-    monkeypatch.setattr(recorder, 'Worker', Worker)
-    thread = threading.Thread(target=recorder.run, args=(stop,))
-    thread.start()
-    try:
-        assert entered.wait(1)
-        thread.join(3)
-        assert not thread.is_alive() and len(flushed) == 2
-        assert flushed[1]-flushed[0] < 2
-    finally:
-        stop.set()
-        thread.join(5)
+def test_backlog_defers_incident_sealing(client, monkeypatch):
+    from harbour import network_runtime
+    _, signature, revision = enable(client, monkeypatch)
+    at = time.time()-400
+    readings(signature, revision, at=at)
+    event = network.mark('atlas', 'Example incident', measured=at)
+    monkeypatch.setattr(network_runtime, 'read_status', lambda _: {'oldest_unsaved_seconds':30})
+    network.maintain('atlas')
+    assert not store.one('SELECT complete FROM network_events WHERE id=?', (event,))['complete']
+    readings(signature, revision, at=at+1)
+    monkeypatch.setattr(network_runtime, 'read_status', lambda _: {'oldest_unsaved_seconds':0})
+    network.maintain('atlas')
+    assert store.one('SELECT complete FROM network_events WHERE id=?', (event,))['complete']
+    assert len(client.get('/api/servers/atlas/network/export/'+event).json()['samples']) == 6

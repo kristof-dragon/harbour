@@ -30,6 +30,8 @@ services:
       retries: 3
   network-recorder:
     build: .
+    init: true
+    stop_grace_period: 45s
     command: ["python", "-m", "harbour.network_recorder"]
     environment:
       HARBOUR_SECRET: ${HARBOUR_SECRET:?Set HARBOUR_SECRET in .env}

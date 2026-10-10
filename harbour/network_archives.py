@@ -1,6 +1,6 @@
 """Durable, incremental gzip archives, sealed once per UTC day.
 
-Only the recorder's maintenance thread writes these files. SQLite checkpoints
+Only the recorder's archive process writes these files. SQLite checkpoints
 the fsynced file length together with the archived flags. After an interrupted
 append, retry truncates the uncommitted tail before writing it again. Multiple
 gzip members form one standard gzip stream; readers need only gzip + JSONL.
