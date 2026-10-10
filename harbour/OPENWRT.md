@@ -76,6 +76,10 @@ target for this diagnostics recorder; macOS host monitoring remains unchanged.
 - Main charts share recorder time. Router log lines retain their source timestamp
   but are indexed by receipt time. SSH buffering can delay telemetry/log delivery;
   its duration is recorded and is not displayed as an ICMP RTT.
+- Charts keep readable axes on desktop and mobile. Isolated readings appear as
+  dots; lines break across missing samples. Missing CPU/interface counter
+  baselines are not zero. The queue chart omits `noqueue`, `ingress` and `clsact`
+  entries; the full queue readout remains available below the charts.
 - ICMP RTT variation is not RTP/FaceTime jitter. These probes do not follow every
   media path or measure the other site's Wi-Fi. A timeout can reflect filtering
   or ICMP rate limiting. Client TX retries are from the router's perspective;
@@ -86,27 +90,81 @@ target for this diagnostics recorder; macOS host monitoring remains unchanged.
 
 ## Retention and incidents
 
-Raw readings retain up to **6 hours, 200,000 rows or 64 MiB of JSON payload per
-router**, whichever fills first. Trimming happens approximately once per minute.
+**Network → Recording settings** controls retention separately for each router.
+The defaults, including after upgrading an existing entry, are:
+
+| Storage | Default limits |
+| --- | --- |
+| Raw readings in the database | 7 days / 1 GiB of JSON payload; no row cap |
+| Compressed daily files | 90 days / 4 GiB of finished files |
+| Incident exports in the database | 200 incidents / 128 MiB of JSON payload |
+
+The first enabled limit reached applies. Raw history can be set from 1 hour to
+365 days; daily files from 1 to 3,650 days. Set a **row, count or size limit to 0**
+to remove that cap. Trimming happens approximately once per minute.
 SQLite pages/indexes/WAL add overhead, and allocated disk space can remain after
 pruning. The UI shows a two-minute window; raw data retains its original precision.
+Increasing retention cannot restore readings already deleted by an older version.
+
+### Automatic daily files
+
+Daily archiving is enabled by default. It runs in the independent recorder, with
+the browser closed. Files live in **`HARBOUR_DATA/network-archives/`**: with the
+standard Compose deployment this is `/data/network-archives/` inside the shared,
+persistent `harbour-data` volume. Native deployments use the same subdirectory of
+their configured data directory. No files or configuration are written to the router.
+
+The recorder appends compressed batches throughout the day **before pruning raw
+readings**, so even a one-hour raw-history setting can preserve a whole day's
+evidence. After midnight **UTC** it seals one `.jsonl.gz` file per router with data;
+the first day can be partial. This happens on the next maintenance sweep, or on
+restart if the recorder was stopped. Pausing recording does not prevent sealing.
+The current `.part` file is not offered as a finished download. Finished files
+appear under **Network → Daily compressed archives** with download links, sizes
+and sample counts. Retention applies to finished files; the growing current file
+is additional to the archive size cap.
+
+Archives contain newline-delimited JSON: a `header`, recording `context` records
+(settings, device and run metadata), individual `sample` records and `incident`
+markers, including completion updates. Each line is a complete JSON object.
+Standard gzip tools/Python's `gzip` reader decompress the full stream. Compression
+is lossless; its ratio depends on the observations and does not downsample them.
+The archive date is the UTC day readings were copied into that file. Delayed
+readings and upgrade backfills can belong to earlier measurement dates; every
+sample retains its original `at` timestamp and recorder run identity. An updated
+incident is identified by the same incident ID. `archive_sequence` numbers each
+sample uniquely within a file; raw database IDs may be reused after pruning.
+Files are local and not encrypted;
+they have owner-only permissions under Harbour's private data directory.
+
+Each append is flushed to disk before its database checkpoint is committed.
+Retries discard any uncommitted tail, preventing duplicate readings after an
+interrupted write. Compression and cleanup use a separate thread from recording.
+On an archive failure the UI shows an error and **unarchived samples are protected
+from trimming**, so database limits can be exceeded until archiving recovers.
+Disabling daily archiving explicitly removes that protection; existing finished
+files still follow their configured retention. Changing only retention settings
+does not restart the probe workers.
 
 A marker captures the **2 minutes before and 5 minutes after** its timestamp when
 those samples exist. After five minutes the recorder archives the window before
 pruning raw history. Exports made earlier contain the available samples. Automatic
 markers are limited to one per five minutes and indicate probe degradation, not
-a diagnosed root cause. The archive retains up to **20 incidents / 32 MiB** of
-JSON per router. Large windows can be truncated and are labelled accordingly.
+a diagnosed root cause. Incident count and payload limits are configurable
+separately from daily files. Large incident windows can be truncated and are
+labelled accordingly; daily files archive all persisted individual samples.
 Each sample has a recorder run identity; exported run metadata records the
 settings that actually applied, even across setting changes or restarts.
 
 Pausing server monitoring or disabling recording stops the diagnostics workers.
 Removing/changing a server invalidates in-flight writes. Removing the entry
-deletes its diagnostics history and never changes the router. Ordinary Harbour
+deletes its database diagnostics history; the recorder removes its managed local
+archive files on the next maintenance sweep. It never changes the router. Ordinary Harbour
 viewer accounts may inspect/export; only administrators configure recording or
 add markers. Logs are filtered to network/kernel events and obvious credential
 lines are omitted; incident exports can still contain local IPs, client MACs and
-hostnames, so inspect them before sharing publicly.
+hostnames, so inspect them before sharing publicly. Daily files contain the same
+local evidence and are excluded from Git by the repository's ignore rules.
 
 ## Validation boundary
 

@@ -5,7 +5,7 @@ import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import store
@@ -13,8 +13,10 @@ from .auth import admin, authenticated
 
 router = APIRouter(prefix='/api/servers/{id_}/network')
 DEFAULTS = {'enabled': False, 'interval': 1.0, 'targets': ['1.1.1.1', '8.8.8.8'],
-            'router_probes': True, 'wan_device': '', 'client_mac': '', 'latency_limit_ms': 150.0}
-MAX_ROWS, MAX_BYTES, RETENTION = 200000, 64 * 1024 * 1024, 6 * 3600
+            'router_probes': True, 'wan_device': '', 'client_mac': '', 'latency_limit_ms': 150.0,
+            'retention_hours': 168, 'max_rows': 0, 'max_payload_mib': 1024,
+            'archive_enabled': True, 'archive_retention_days': 90, 'archive_max_mib': 4096,
+            'incident_max_count': 200, 'incident_max_mib': 128}
 
 
 def initialize():
@@ -38,6 +40,20 @@ def initialize():
           id TEXT PRIMARY KEY, server_id TEXT REFERENCES servers(id) ON DELETE CASCADE,
           started REAL NOT NULL, config TEXT NOT NULL, observer TEXT NOT NULL);
         ''')
+        # Both the web service and the recorder may start against an older DB.
+        con.execute('BEGIN IMMEDIATE')
+        for table, name, definition in (
+                ('network_samples', 'archived', 'INTEGER NOT NULL DEFAULT 0'),
+                ('network_samples', 'payload_bytes', 'INTEGER NOT NULL DEFAULT 0'),
+                ('network_events', 'archived_version', 'INTEGER NOT NULL DEFAULT -1')):
+            if name not in {r['name'] for r in con.execute(f'PRAGMA table_info({table})')}:
+                con.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
+                if name == 'payload_bytes':
+                    con.execute('UPDATE network_samples SET payload_bytes=length(payload)')
+        con.execute('CREATE INDEX IF NOT EXISTS network_pending ON network_samples(server_id,archived,id)')
+        con.execute('CREATE INDEX IF NOT EXISTS network_sizes ON network_samples(server_id,measured,id,payload_bytes)')
+    from . import network_archives
+    network_archives.initialize()
 
 
 def host(id_):
@@ -63,6 +79,14 @@ class Settings(BaseModel):
     wan_device: str = Field(default='', max_length=32, pattern=r'^[A-Za-z0-9_.:@-]*$')
     client_mac: str = Field(default='', pattern=r'^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$|^$')
     latency_limit_ms: float = Field(default=150, ge=10, le=10000, allow_inf_nan=False)
+    retention_hours: int = Field(default=168, ge=1, le=8760, strict=True)
+    max_rows: int = Field(default=0, ge=0, le=100000000, strict=True)
+    max_payload_mib: int = Field(default=1024, ge=0, le=1048576, strict=True)
+    archive_enabled: bool = True
+    archive_retention_days: int = Field(default=90, ge=1, le=3650, strict=True)
+    archive_max_mib: int = Field(default=4096, ge=0, le=1048576, strict=True)
+    incident_max_count: int = Field(default=200, ge=0, le=10000, strict=True)
+    incident_max_mib: int = Field(default=128, ge=0, le=1048576, strict=True)
 
     @field_validator('interval')
     @classmethod
@@ -87,6 +111,7 @@ class Settings(BaseModel):
 
 @router.get('')
 def get(id_: str, user=Depends(authenticated)):
+    from . import network_archives
     server = host(id_)
     settings, revision = config(id_)
     row = store.one('SELECT * FROM network_status WHERE server_id=?', (id_,))
@@ -96,7 +121,20 @@ def get(id_: str, user=Depends(authenticated)):
     return {'settings': settings, 'revision': revision, 'status': status,
             'device': json.loads(server['snapshot']).get('metrics', {}).get('openwrt'),
             'events': store.rows('SELECT id,measured,label,automatic,complete FROM network_events WHERE server_id=? ORDER BY measured DESC LIMIT 50', (id_,)),
-            'retention': {'seconds': RETENTION, 'max_rows': MAX_ROWS, 'max_payload_bytes': MAX_BYTES}}
+            'retention': {'seconds': settings['retention_hours']*3600, 'max_rows': settings['max_rows'],
+                          'max_payload_bytes': settings['max_payload_mib']*1024*1024},
+            'archives': network_archives.summary(id_)}
+
+
+@router.get('/archives/{archive_id}')
+def download_archive(id_: str, archive_id: str, user=Depends(authenticated)):
+    from . import network_archives
+    host(id_)
+    row = store.one('SELECT * FROM network_archives WHERE id=? AND server_id=? AND complete=1', (archive_id, id_))
+    if not row or not network_archives.path(row).is_file():
+        raise HTTPException(404, 'Daily archive not found')
+    return FileResponse(network_archives.path(row), media_type='application/gzip',
+                        filename=network_archives.path(row).name)
 
 
 @router.put('')
@@ -104,7 +142,10 @@ def save(id_: str, body: Settings, user=Depends(admin)):
     host(id_)
     if store.DEMO:
         raise HTTPException(400, 'Live network recording is disabled in demo mode')
-    revision = uuid.uuid4().hex
+    previous, revision = config(id_)
+    probe_fields = ('enabled', 'interval', 'targets', 'router_probes', 'wan_device', 'client_mac', 'latency_limit_ms')
+    if not revision or any(previous[key] != getattr(body, key) for key in probe_fields):
+        revision = uuid.uuid4().hex
     store.execute('INSERT OR REPLACE INTO network_settings VALUES (?,?,?)',
                   (id_, body.model_dump_json(), revision))
     return {'ok': True}
@@ -182,32 +223,65 @@ def persist(id_, rows, status, signature, revision):
                 or connection_signature(dict(server)) != signature or not cfg or cfg['revision'] != revision
                 or not json.loads(cfg['config']).get('enabled')):
             return False
-        con.executemany('INSERT INTO network_samples(server_id,measured,kind,target,payload) VALUES (?,?,?,?,?)',
-                        [(id_, r['at'], r['kind'], r.get('target', ''), json.dumps({k:v for k,v in r.items() if k not in ('at','kind','target')}, allow_nan=False)) for r in rows])
+        values = []
+        for r in rows:
+            payload = json.dumps({k:v for k,v in r.items() if k not in ('at','kind','target')}, allow_nan=False)
+            values.append((id_, r['at'], r['kind'], r.get('target', ''), payload, len(payload)))
+        con.executemany('INSERT INTO network_samples(server_id,measured,kind,target,payload,payload_bytes) VALUES (?,?,?,?,?,?)', values)
         con.execute('INSERT OR REPLACE INTO network_status VALUES (?,?,?)', (id_, time.time(), json.dumps(status)))
     return True
 
 
-def maintain(id_):
+def maintain(id_, stop=None):
+    from . import network_archives
     now = time.time()
     server = store.one('SELECT snapshot FROM servers WHERE id=?', (id_,))
     if not server:
         return
+    settings, _ = config(id_)
     for event in store.rows('SELECT * FROM network_events WHERE server_id=? AND complete=0 AND measured<?', (id_, now-300)):
         rows, truncated = samples(id_, event['measured']-120, event['measured']+300, 30000)
         archive = json.dumps({'samples': rows, 'truncated': truncated, 'runs': run_metadata(id_, rows),
                               'settings': config(id_)[0], 'device': json.loads(server['snapshot']).get('metrics', {}).get('openwrt', {}).get('board')})
         store.execute('UPDATE network_events SET archive=?,complete=1 WHERE id=?', (archive, event['id']))
+    # Never prune an unarchived reading while daily archiving is enabled.
+    # Archive failures are visible and retried; they must not erase evidence.
+    network_archives.maintain(id_, settings, stop)
+    protected = 'AND archived=1' if settings['archive_enabled'] else ''
     with store.db() as con:
-        con.execute('DELETE FROM network_samples WHERE server_id=? AND measured<?', (id_, now-RETENTION))
-        # Bound retained payload as well as row count. Newest rows win; any
-        # collection/storage gaps remain visible in source timestamps.
-        con.execute('''DELETE FROM network_samples WHERE id IN (
-          SELECT id FROM (SELECT id, row_number() OVER (ORDER BY measured DESC,id DESC) AS n,
-          sum(length(payload)) OVER (ORDER BY measured DESC,id DESC) AS bytes
-          FROM network_samples WHERE server_id=?) WHERE n>? OR bytes>?)''', (id_, MAX_ROWS, MAX_BYTES))
+        con.execute(f'DELETE FROM network_samples WHERE server_id=? AND measured<? {protected}',
+                    (id_, now-settings['retention_hours']*3600))
+        if settings['max_rows']:
+            cutoff = con.execute('SELECT measured,id FROM network_samples WHERE server_id=? ORDER BY measured DESC,id DESC LIMIT 1 OFFSET ?',
+                                 (id_, settings['max_rows'])).fetchone()
+            if cutoff:
+                con.execute(f'DELETE FROM network_samples WHERE server_id=? AND (measured,id)<=(?,?) {protected}', (id_, *cutoff))
+    if settings['max_payload_mib']:
+        # Covering index reads avoid repeatedly loading every JSON payload.
+        excess = store.one('SELECT coalesce(sum(payload_bytes),0) AS n FROM network_samples WHERE server_id=?', (id_,))['n'] - settings['max_payload_mib']*1024*1024
+        while excess > 0 and not (stop and stop.is_set()):
+            oldest = store.rows(f'SELECT id,payload_bytes FROM network_samples WHERE server_id=? {protected} ORDER BY measured,id LIMIT 2000', (id_,))
+            if not oldest:
+                break
+            delete = []
+            for row in oldest:
+                delete.append((row['id'],))
+                excess -= row['payload_bytes']
+                if excess <= 0:
+                    break
+            with store.db() as con:
+                con.executemany('DELETE FROM network_samples WHERE id=?', delete)
+    with store.db() as con:
         con.execute('''DELETE FROM network_events WHERE id IN (
           SELECT id FROM (SELECT id,row_number() OVER (ORDER BY measured DESC) AS n,
           sum(length(coalesce(archive,''))) OVER (ORDER BY measured DESC) AS bytes
-          FROM network_events WHERE server_id=?) WHERE n>20 OR bytes>33554432)''', (id_,))
-        con.execute('DELETE FROM network_runs WHERE server_id=? AND started<? AND id NOT IN (SELECT id FROM network_runs WHERE server_id=? ORDER BY started DESC LIMIT 256)', (id_, now-RETENTION-600, id_))
+          FROM network_events WHERE server_id=?) WHERE (? > 0 AND n>?) OR (? > 0 AND bytes>?))
+          AND (?=0 OR archived_version=complete)''',
+                    (id_, settings['incident_max_count'], settings['incident_max_count'],
+                     settings['incident_max_mib'], settings['incident_max_mib']*1024*1024, int(settings['archive_enabled'])))
+        # Keep run context for every raw reading awaiting archive or inspection.
+        con.execute('''DELETE FROM network_runs WHERE server_id=? AND started<?
+          AND id NOT IN (SELECT id FROM network_runs WHERE server_id=? ORDER BY started DESC LIMIT 256)
+          AND id NOT IN (SELECT DISTINCT json_extract(payload,'$.run_id') FROM network_samples
+                        WHERE server_id=? AND json_extract(payload,'$.run_id') IS NOT NULL)''',
+                    (id_, now-settings['retention_hours']*3600-600, id_, id_))

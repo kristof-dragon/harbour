@@ -253,7 +253,9 @@ def test_recorder_restart_keeps_rows_and_distinct_run_configuration(client,monke
 
 def test_storage_limits_keep_latest_raw_samples(client,monkeypatch):
     server,signature,revision=enable(client,monkeypatch)
-    monkeypatch.setattr(network,'MAX_ROWS',3)
+    settings=network.config('atlas')[0]
+    settings['max_rows']=3
+    assert client.put('/api/servers/atlas/network',json=settings).status_code==200
     now=time.time()
     rows=[{'at':now-10+i,'kind':'probe','target':'1.1.1.1','status':'reply','rtt_ms':i} for i in range(10)]
     network.persist('atlas',rows,{},signature,revision)

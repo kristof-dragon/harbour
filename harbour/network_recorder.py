@@ -7,6 +7,7 @@ import collections
 import fcntl
 import ipaddress
 import json
+import logging
 import re
 import secrets
 import shlex
@@ -338,8 +339,25 @@ class Worker:
         self.flush()
 
 
+def maintenance(stop):
+    from . import network_archives
+    while not stop.is_set():
+        try:
+            if not store.DEMO:
+                for server in store.rows("SELECT id FROM servers WHERE server_type='openwrt' OR id IN (SELECT server_id FROM network_settings)"):
+                    if stop.is_set():
+                        break
+                    network.maintain(server['id'], stop)
+                network_archives.cleanup_removed()
+        except Exception:
+            logging.exception('Network history maintenance failed; will retry')
+        stop.wait(60)
+
+
 def run(stop):
-    workers, maintained = {}, 0
+    workers = {}
+    maintainer = threading.Thread(target=maintenance, args=(stop,), daemon=True)
+    maintainer.start()
     try:
         while not stop.is_set():
             active = {}
@@ -359,14 +377,12 @@ def run(stop):
                 if id_ not in workers:
                     workers[id_] = Worker(server, settings, revision)
                 workers[id_].flush()
-            if time.monotonic()-maintained > 60:
-                for server in store.rows("SELECT id FROM servers WHERE server_type='openwrt'"):
-                    network.maintain(server['id'])
-                maintained = time.monotonic()
             stop.wait(1)
     finally:
+        stop.set()
         for worker in workers.values():
             worker.close()
+        maintainer.join()
 
 
 def main():
