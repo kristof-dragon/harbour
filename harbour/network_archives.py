@@ -84,7 +84,8 @@ def append(row, readings, events, settings, server, now):
                 # SQLite can reuse raw row IDs after pruning an empty table.
                 line(compressed, {'type': 'sample', **sample, 'archive_sequence': ordinal})
             for event in events:
-                line(compressed, {'type': 'incident', **event})
+                line(compressed, {'type': 'incident', **event,
+                                  'trigger': json.loads(event['trigger']) if event.get('trigger') else None})
         raw.flush()
         os.fsync(raw.fileno())
         size = raw.tell()
@@ -150,7 +151,7 @@ def maintain(id_, settings, stop=None):
                     break
                 readings = store.rows('''SELECT id,measured,kind,target,payload FROM network_samples
                   WHERE server_id=? AND archived=0 ORDER BY id LIMIT ?''', (id_, BATCH_SIZE))
-                events = store.rows('''SELECT id,measured,label,automatic,complete FROM network_events
+                events = store.rows('''SELECT id,measured,label,automatic,complete,trigger FROM network_events
                   WHERE server_id=? AND archived_version!=complete ORDER BY measured,id LIMIT ?''', (id_, BATCH_SIZE))
                 if not readings and not events:
                     break

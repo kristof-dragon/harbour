@@ -31,7 +31,11 @@ When deployed on the on-site server, the separate `network-recorder` service
 records 250 ms–2 s ICMP probes alongside approximately one-second router CPU,
 interface, Wi-Fi and queue readings. Open **Network → Recording settings** to
 enable recording, choose targets/WAN interface and follow a calling device.
-Mark call degradation/recovery and export the surrounding raw evidence. The
+Mark call degradation/recovery and export the surrounding raw evidence. Use
+**Network → Incidents → Analyse** for a readable evidence report, or **Explore
+incident patterns** to compare retained incidents and download structured results.
+Analysis runs locally and separates observations, possible contributors and
+missing evidence; it does not claim a proven cause. The
 recorder continues during remote-access loss and web-container restarts.
 Probes, router collection, database writes and archives run in separate processes.
 A configurable 128 MiB RAM buffer per router absorbs storage delays, with live

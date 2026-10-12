@@ -12,6 +12,14 @@ const host={id:'router',name:'Example router',host:'192.0.2.2',port:22,username:
 const settings={enabled:true,interval:.25,targets:['1.1.1.1'],router_probes:true,wan_device:'wan',client_mac:'',latency_limit_ms:150,retention_hours:168,max_rows:0,max_payload_mib:1024,archive_enabled:true,archive_retention_days:90,archive_max_mib:4096,incident_max_count:200,incident_max_mib:128,buffer_mib:128};
 const archives={directory:'/data/network-archives',file_count:2,bytes:300000,files:[{id:'today',day:Math.floor(now/86400)*86400,sample_count:1000,size:100000,complete:0},{id:'yesterday',day:Math.floor(now/86400)*86400-86400,sample_count:2000,size:200000,complete:1}]};
 const rows=Array.from({length:120},(_,i)=>[{at:now-120+i,kind:'telemetry',metrics:{...host.metrics,openwrt:router}},{at:now-120+i,kind:'probe',source:'recorder',target:'1.1.1.1',status:i===60?'timeout':'reply',rtt_ms:i===60?null:20+i%10}]).flat();
+const incidentRows=rows.map(row=>({...row,run_id:'example-run'}));
+incidentRows.push({at:now-60,kind:'log',run_id:'example-run',line:'kernel: link down <img src=x onerror="window.incidentInjection=true">'});
+const incidentInput={schema:1,server_id:'router',server_name:'Example router',incident:{id:'event',measured:now-60,label:'Video degraded',automatic:1,complete:1},samples:incidentRows,settings,runs:[{id:'example-run',config:settings}]};
+const generated=require('node:child_process').spawnSync(process.env.HARBOUR_TEST_PYTHON||'.venv/bin/python',['-c','import json,sys; from harbour.incidents import analyze; print(json.dumps(analyze(json.load(sys.stdin))))'],{input:JSON.stringify(incidentInput),encoding:'utf8'});
+assert.equal(generated.status,0,generated.stderr);
+const incidentReport=JSON.parse(generated.stdout);
+const incidentReports=Array.from({length:23},(_,i)=>({...incidentReport,incident:{...incidentReport.incident,id:i?`event-${i}`:'event',measured:now-60-i*1000,automatic:i<21?1:0}}));
+let delayIncident=false,releaseIncident;
 let saved=null,markers=[];
 const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(),'harbour/static',req.url==='/'?'index.html':req.url.replace('/static/',''));res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html');res.end(fs.readFileSync(file));}catch{res.writeHead(404).end();}});
 (async()=>{
@@ -29,6 +37,13 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
    else if(url.pathname.endsWith('/history'))data={points:[],hours:6,from:now-21600,to:now,resolution_seconds:60,poll_seconds:60};
    else if(url.pathname.endsWith('/network/samples'))data={start:now-120,end:now,samples:rows,truncated:false};
    else if(url.pathname.endsWith('/network/markers')){markers.push(route.request().postDataJSON());data={id:'new-event'};}
+   else if(url.pathname.endsWith('/network/incidents')){
+    const kind=url.searchParams.get('kind'),reports=incidentReports.filter(r=>kind==='automatic'?r.incident.automatic:kind==='manual'?!r.incident.automatic:true);
+    data={reports,errors:[],total:reports.length,offset:0,limit:200,has_more:false,patterns:{incident_count:reports.length,window_clusters:reports.length,note:'Overlapping windows are grouped; these are marker counts, not outage rates.',patterns:reports.length?[{key:'finding:probe_degradation',title:'Recorder probe degradation',incidents:reports.length,window_clusters:reports.length,incident_ids:reports.map(r=>r.incident.id)}]:[]}};
+   }else if(url.pathname.includes('/network/incidents/')){
+    if(delayIncident)await new Promise(resolve=>{releaseIncident=resolve;});
+    data={...incidentReport,incident:{...incidentReport.incident,id:url.pathname.split('/').at(-1)}};
+   }
    else if(url.pathname.endsWith('/network')){
     if(method==='PUT'){saved=route.request().postDataJSON();Object.assign(settings,saved);data={ok:true};}
     else data={settings,archives,status:{state:'recording',recorder_online:true,observer:'onsite-server',probe_errors:{},buffer_bytes:1048576,buffer_limit_bytes:settings.buffer_mib*1048576,buffer_samples:12,oldest_unsaved_seconds:1.2,probe_online:true,router_collector_online:true,timestamp_modes:{example:'kernel_receive'}},device:router,events:[{id:'event',measured:now-60,label:'Video degraded',complete:1}]};
@@ -74,6 +89,56 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.equal(await page.getByRole('button',{name:'OpenWRT',exact:true}).count(),1);
   await page.getByRole('button',{name:'Close dialog',exact:true}).click();
   fs.mkdirSync('test-results',{recursive:true});
+  await page.getByRole('button',{name:'Analyse',exact:true}).click();
+  await page.locator('.incident-report').waitFor();
+  assert.match(await page.locator('.incident-summary').textContent(),/Root cause is not established/);
+  assert.match(await page.locator('.incident-report').textContent(),/reconstructed trigger/);
+  assert.equal(await page.locator('.incident-report img').count(),0);
+  assert.equal(await page.evaluate(()=>window.incidentInjection),undefined);
+  await page.locator('.incident-finding [data-action=incident-evidence]').first().click();
+  assert.equal(await page.locator('.incident-evidence[open]').count(),1);
+  assert.equal(await page.getByRole('link',{name:'Download analysis JSON'}).getAttribute('href'),'/api/servers/router/network/incidents/event?download=true');
+  await page.locator('.modal').evaluate(el=>el.scrollTop=0);
+  await page.screenshot({path:'test-results/incident-report-desktop.png'});
+  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+  await page.getByRole('button',{name:'Explore incident patterns',exact:true}).click();
+  await page.locator('.incident-overviews').waitFor();
+  assert.equal(await page.locator('.incident-overviews tbody tr').count(),20);
+  await page.getByRole('button',{name:'Next',exact:true}).click();
+  assert.equal(await page.locator('.incident-overviews tbody tr').count(),3);
+  await page.getByRole('button',{name:'Previous',exact:true}).click();
+  await page.locator('.incident-overviews [data-action=incident-open]').first().click();
+  await page.locator('.incident-report').waitFor();
+  await page.getByRole('button',{name:'Back to patterns'}).click();
+  await page.locator('#incident-filters [name=kind]').selectOption('manual');
+  await page.getByRole('button',{name:'Refresh analysis',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('.incident-overviews tbody tr').length===2);
+  assert.match(await page.getByRole('link',{name:'Download patterns JSON'}).getAttribute('href'),/kind=manual/);
+  await page.locator('#incident-filters [name=kind]').selectOption('all');
+  await page.getByRole('button',{name:'Refresh analysis',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('.incident-overviews tbody tr').length===20);
+  await page.screenshot({path:'test-results/incident-patterns-desktop.png'});
+  await page.setViewportSize({width:390,height:844});
+  await page.waitForTimeout(200);
+  await page.screenshot({path:'test-results/incident-patterns-mobile.png'});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.locator('.incident-overviews [data-action=incident-open]').first().click();
+  await page.locator('.incident-report').waitFor();
+  await page.screenshot({path:'test-results/incident-report-mobile.png'});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+  await page.setViewportSize({width:1440,height:1000});
+  delayIncident=true;
+  await page.getByRole('button',{name:'Analyse',exact:true}).click();
+  await page.locator('#incident-content [role=status]').waitFor();
+  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+  await page.getByRole('button',{name:'Recording settings',exact:true}).click();
+  for(let tries=0;!releaseIncident&&tries<30;tries++)await page.waitForTimeout(20);
+  assert.equal(typeof releaseIncident,'function');releaseIncident();delayIncident=false;
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator('#network-settings-form').count(),1);
+  assert.equal(await page.locator('.incident-report').count(),0);
+  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
   await page.screenshot({path:'test-results/openwrt-desktop.png',fullPage:true});
   await page.setViewportSize({width:390,height:844});
   await page.waitForTimeout(200);

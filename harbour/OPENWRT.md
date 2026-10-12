@@ -206,6 +206,151 @@ lines are omitted; incident exports can still contain local IPs, client MACs and
 hostnames, so inspect them before sharing publicly. Daily files contain the same
 local evidence and are excluded from Git by the repository's ignore rules.
 
+## Incident reports and pattern analysis
+
+Open **Network → Incidents → Analyse** for an individual incident, or **Explore
+incident patterns** to compare incidents. Viewer accounts can use both views and
+download the original evidence, individual analysis JSON and pattern summaries.
+Analysis runs on the Harbour server when requested; it does not contact an AI
+service, run extra probes, change the router or automatically repair anything.
+
+### What triggers an automatic incident?
+
+While recording and server monitoring are enabled, **one recorder-originated
+probe** is enough when it either:
+
+- Misses its **two-second reply deadline** (`status=timeout`), or
+- Has an RTT **strictly above** the latency limit for that recording run
+  (**150 ms by default**, configurable in Recording settings).
+
+Rows with `timing_quality=uncertain` are excluded. Unobserved probes normally
+have no usable RTT and do not trigger a marker. A usable late reply can also
+qualify on its RTT; its original timeout and late reply remain separate evidence
+for the same attempt. The trigger covers every recorder target, including the
+router reference IP when configured by using a literal IP as its SSH address.
+There is no sustained-duration requirement and no requirement for several targets
+to fail. Router-originated probes, CPU, queues, Wi-Fi and log messages do **not**
+independently trigger incidents. Manual degradation/recovery markers are always
+user observations, not automatically detected transitions.
+
+Detection happens when a batch is durably committed. It uses the earliest
+qualifying sample's original timestamp and allows at most one automatic marker
+per server every **300 seconds**. Continued degradation can produce another
+marker after that cooldown; these are not necessarily separate outages. Sample
+storage, run progress and marker creation share one transaction, so retrying a
+committed batch cannot create another marker.
+
+New markers save the exact triggering target, source, run, sequence, observation,
+RTT/timeout reason and threshold. Older markers are still supported: the report
+labels triggers reconstructed from evidence and shows when the original
+triggering sample or run configuration is unavailable. Changing the current
+threshold does not rewrite historical run thresholds.
+
+### What is captured?
+
+The saved window is **120 seconds before to 300 seconds after the marker**, up to
+30,000 rows. It contains the samples that actually exist, not guaranteed full
+coverage. Sealing a window means its saved evidence is frozen; it does not certify
+that every expected reading was collected.
+
+| Evidence | Captured information |
+| --- | --- |
+| Recorder ICMP | Targets, sequence, reply/timeout/late/unobserved status, RTT, send/receive timing and timing quality, at the configured 250 ms–2 s cadence |
+| Router ICMP | Optional probes to configured targets, approximately every second, with a one-second reply wait and chosen interface/routing policy |
+| Router telemetry | Approximately one-second CPU/core/softirq intervals, memory/load/uptime/boot identity, interface traffic/error/drop deltas, Wi-Fi clients/retries/failures/radio occupancy, software queues, conntrack count/limit, routes, policy rules and offload settings where available |
+| Router logs | Filtered network/kernel/hostapd/mt76/PPP/watchdog/memory messages, indexed by recorder receipt time with router source text preserved |
+| Collection health | Explicit collection gaps, buffer backlog, dropped-before-storage counters, collector availability and process restarts |
+| Context | Device information and recording-run settings/observer, plus incident metadata |
+
+No packet payloads, DNS tests, call media, application traces, ISP internal data or
+remote-site Wi-Fi measurements are captured. The chosen client MAC filters Wi-Fi
+analysis; raw evidence retains all reported stations. Missing tools, unavailable
+counters and absent baselines remain missing evidence.
+
+### How the analysis works
+
+The versioned parser consumes the same schema-1 JSON bundle as the original
+incident download. It sorts readings by capture time, removes replayed samples
+using producer identities (with a timestamp-scoped legacy fallback), and keeps
+late replies separate from new attempts. The report includes per-path counts,
+usable-reply p95/peak RTT, before/after comparisons, timeline, limitations and
+sample references back to the original `samples` array.
+
+Possible contributors require telemetry within **two seconds** of a qualifying
+recorder observation **in the same identified run**. Router path comparisons also
+require the same destination. Telemetry collected over more than two seconds or
+covering a counter interval longer than five seconds is excluded from those
+nearby-contributor rules. These are explicit triage heuristics:
+
+| Observation | Rule |
+| --- | --- |
+| CPU pressure | Total CPU or any core at least 90% |
+| Softirq pressure | Any core at least 50% softirq |
+| Memory pressure | Memory utilisation at least 90% |
+| Queue backlog | At least 64 KiB in a reported software queue; excludes noqueue/ingress/clsact |
+| Interface errors/drops | Positive valid interval delta, not a cumulative lifetime count |
+| Wi-Fi retries/failures | Positive TX failure delta, or retries/packets at least 25% with at least 10 packets; retries are not a loss percentage |
+| Busy radio | At least 85% channel busy time |
+| Conntrack pressure | Count at least 90% of maximum |
+
+Boot-identity changes and selected log events are shown as observations in the
+window. Logs are not assumed to be synchronised source-time events. Negative or
+missing interval deltas are not turned into failures. Quality notes flag open or
+truncated windows, missing run metadata, sparse coverage, uncertain probes,
+collection gaps, slow telemetry and recorder losses. Cumulative loss counters are
+only differenced within a run; an already nonzero first reading is not treated as
+new loss during this incident.
+
+Every finding includes its rule, supporting sample references and a suggested
+next check. The report deliberately leaves `root_cause=not_established`: coincident
+CPU load, retries or queue backlog is evidence for an investigation, not a causal
+proof. ICMP filtering, rate limiting, routing differences and recorder/container
+conditions remain alternatives. No unaffected control windows are compared, so
+frequency here cannot establish that a symptom is unique to incidents.
+
+### Patterns and exports for further investigation
+
+The explorer filters all/automatic/manual markers and all-retained/24-hour/7-day/
+30-day periods. Each request analyses at most **200 retained incidents**, displays
+20 overviews per page and offers older/newer batches if needed. Counts and JSON
+exports refer to the displayed analysis batch, with its bounds shown. Pattern
+filters select incidents sharing a finding or degraded probe path. Browser times
+use the viewer's timezone; JSON retains epoch timestamps.
+
+Pattern results count each incident ID once, not its sample count. Overlapping
+seven-minute windows on the same server form a **window group**, so overlapping
+markers do not masquerade as independent recurrences. Distinct groups can still
+belong to a prolonged problem. Marker counts are not outage rates, and missing or
+pruned incidents are not represented. Sealed analysis summaries are cached locally
+with an analyzer version and evidence digest; open windows are analysed afresh.
+The small derived cache is additional to incident payload limits and is deleted
+with its incident. Full reports are always derived from the original window.
+
+Authenticated API routes (under `/api/servers/{id}/network`):
+
+- `GET /incidents?kind=all&limit=200&offset=0`: summaries and pattern groups.
+  Optional `since`/`until` epoch timestamps bound the marker time; `download=true`
+  returns an attachment. `kind` also accepts `automatic` and `manual`.
+- `GET /incidents/{event_id}`: full analysis with referenced evidence.
+  `download=true` returns the structured report.
+- `GET /export/{event_id}`: the original complete or available incident bundle.
+
+For offline ingestion of multiple downloaded **incident JSON exports**:
+
+```sh
+python3 -m harbour.incidents incident-one.json incident-two.json > analysis.json
+```
+
+The parser uses only Python's standard library. It returns full reports plus
+cross-incident patterns, deduplicates repeated incident IDs, and rejects invalid
+export schemas and oversized inputs (64 MiB/file, 30,000 rows/incident). The CLI
+accepts incident JSON, **not daily `.jsonl.gz` archives**. Daily archives retain
+more raw evidence but must first be reconstructed into incident windows with their
+original run context. This release does not automatically recover pruned incidents
+from those files. New exports include a server ID for window grouping; legacy
+exports fall back to server name and should only be combined when those names
+identify the same physical recorder target.
+
 ## Validation boundary
 
 Synthetic tests use an invented device identity and example firmware build. They

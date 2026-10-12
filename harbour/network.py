@@ -39,6 +39,9 @@ def initialize():
         CREATE TABLE IF NOT EXISTS network_runs (
           id TEXT PRIMARY KEY, server_id TEXT REFERENCES servers(id) ON DELETE CASCADE,
           started REAL NOT NULL, config TEXT NOT NULL, observer TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS network_analysis (
+          event_id TEXT PRIMARY KEY REFERENCES network_events(id) ON DELETE CASCADE,
+          version INTEGER NOT NULL, digest TEXT NOT NULL, report TEXT NOT NULL);
         ''')
         # Both the web service and the recorder may start against an older DB.
         con.execute('BEGIN IMMEDIATE')
@@ -46,7 +49,8 @@ def initialize():
                 ('network_samples', 'archived', 'INTEGER NOT NULL DEFAULT 0'),
                 ('network_samples', 'payload_bytes', 'INTEGER NOT NULL DEFAULT 0'),
                 ('network_runs', 'written_through', 'INTEGER NOT NULL DEFAULT 0'),
-                ('network_events', 'archived_version', 'INTEGER NOT NULL DEFAULT -1')):
+                ('network_events', 'archived_version', 'INTEGER NOT NULL DEFAULT -1'),
+                ('network_events', 'trigger', 'TEXT')):
             if name not in {r['name'] for r in con.execute(f'PRAGMA table_info({table})')}:
                 con.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
                 if name == 'payload_bytes':
@@ -194,6 +198,14 @@ def export(id_: str, event_id: str, user=Depends(authenticated)):
     event = store.one('SELECT * FROM network_events WHERE id=? AND server_id=?', (event_id, id_))
     if not event:
         raise HTTPException(404, 'Incident not found')
+    bundle = incident_bundle(server, event)
+    return Response(json.dumps(bundle, allow_nan=False), media_type='application/json',
+                    headers={'Content-Disposition': f'attachment; filename="harbour-incident-{event_id}.json"'})
+
+
+def incident_bundle(server, event):
+    """One evidence source for downloads and analysis, including sealed windows."""
+    id_ = server['id']
     settings, _ = config(id_)
     if event['archive']:
         bundle = json.loads(event['archive'])
@@ -202,12 +214,12 @@ def export(id_: str, event_id: str, user=Depends(authenticated)):
         bundle = {'samples': rows, 'truncated': truncated, 'settings': settings,
                   'device': json.loads(server['snapshot']).get('metrics', {}).get('openwrt', {}).get('board')}
     bundle.update(schema=1, incident={k: event[k] for k in ('id', 'measured', 'label', 'automatic', 'complete')},
-                  server_name=server['name'], exported_at=time.time(),
+                  server_name=server['name'], server_id=id_, exported_at=time.time(),
                   scope='Recorder-to-target ICMP and router telemetry; not FaceTime media measurements')
+    bundle['incident']['trigger'] = json.loads(event['trigger']) if event.get('trigger') else None
     if 'runs' not in bundle:
         bundle['runs'] = run_metadata(id_, bundle['samples'])
-    return Response(json.dumps(bundle, allow_nan=False), media_type='application/json',
-                    headers={'Content-Disposition': f'attachment; filename="harbour-incident-{event_id}.json"'})
+    return bundle
 
 
 def run_metadata(id_, rows):
@@ -245,15 +257,15 @@ def persist(id_, rows, status, signature, revision, run=None, through=0):
             con.execute('UPDATE network_runs SET written_through=max(written_through,?) WHERE id=?', (through, run['id']))
             # Commit incident detection with the batch, so a writer dying before
             # acknowledgement cannot duplicate either samples or incident markers.
-            bad = [r for r in rows if r['kind'] == 'probe' and r.get('source') == 'recorder'
-                   and r.get('timing_quality') != 'uncertain'
-                   and (r.get('status') == 'timeout' or (r.get('rtt_ms') or 0) > run['config']['latency_limit_ms'])]
+            from .incidents import qualifies, trigger_evidence
+            bad = [r for r in rows if qualifies(r, run['config']['latency_limit_ms'])]
             if bad:
                 measured = min(r['at'] for r in bad)
                 previous = con.execute('SELECT max(measured) FROM network_events WHERE server_id=? AND automatic=1', (id_,)).fetchone()[0]
                 if previous is None or measured-previous >= 300:
-                    con.execute('INSERT INTO network_events(id,server_id,measured,label,automatic) VALUES (?,?,?,?,1)',
-                                (uuid.uuid4().hex, id_, measured, 'Probe degradation — inspect correlated evidence'))
+                    trigger = trigger_evidence(min(bad, key=lambda r: r['at']), run['config'])
+                    con.execute('INSERT INTO network_events(id,server_id,measured,label,automatic,trigger) VALUES (?,?,?,?,1,?)',
+                                (uuid.uuid4().hex, id_, measured, 'Probe degradation — inspect correlated evidence', json.dumps(trigger)))
         con.execute('INSERT OR REPLACE INTO network_status VALUES (?,?,?)', (id_, time.time(), json.dumps(status)))
     return True
 
