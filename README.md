@@ -45,6 +45,12 @@ Retention is configurable per router. Defaults keep seven days / 1 GiB of raw
 history and automatically save compressed daily files for 90 days / 4 GiB on the
 on-site server. Download finished files from the Network view; row and size caps
 can be disabled in Recording settings.
+Up to 12 IP probe targets are supported. Optional **Call traffic tests** apply
+bounded, simultaneous UDP upload/download loads using FaceTime (provisional),
+Teams and Zoom profiles. They retain receiver loss/jitter evidence and mark the
+router timeline. See [the research, profile limits and remote Docker endpoint
+setup](harbour/CALL_TESTS.md). Tests run on the Harbour host and do not reproduce
+the caller’s Wi-Fi or a real vendor call.
 See [OpenWRT deployment, measurement limits and retention](harbour/OPENWRT.md).
 
 ### Resource recording and reboot tracking

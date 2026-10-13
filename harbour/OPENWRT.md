@@ -35,7 +35,7 @@ by the diagnostics service until recording is enabled for an OpenWRT entry.
 Open **Network → Recording settings**:
 
 1. Enable recording and choose 1 second for a baseline or 250/500 ms for an
-   investigation. Up to four unicast IPv4/IPv6 literals are accepted. DNS is not
+   investigation. Up to 12 unicast IPv4/IPv6 literals are accepted. DNS is not
    involved. The router's LAN IP is also probed if its SSH address is an IP literal.
 2. Select the WAN device for router-originated probes. The default follows the
    router's routing policy; it does not guarantee a direct WAN path. Recorder
@@ -125,7 +125,9 @@ target for this diagnostics recorder; macOS host monitoring remains unchanged.
   they do not expose all retries made by the phone.
 - Queue drops may be normal active queue management. Hardware offload can bypass
   software queue accounting. Missing driver statistics stay unavailable.
-- There are no speed tests, bulk transfers, DNS tests or automatic repair actions.
+- Optional bounded UDP call-load tests run from the Harbour host to your own endpoint.
+  See [profiles, research and endpoint setup](CALL_TESTS.md). No DNS tests or
+  automatic repair actions run. Continuous probes remain independent.
 
 ## Retention and incidents
 
@@ -249,7 +251,7 @@ threshold does not rewrite historical run thresholds.
 ### What is captured?
 
 The saved window is **120 seconds before to 300 seconds after the marker**, up to
-30,000 rows. It contains the samples that actually exist, not guaranteed full
+60,000 rows. It contains the samples that actually exist, not guaranteed full
 coverage. Sealing a window means its saved evidence is frozen; it does not certify
 that every expected reading was collected.
 
@@ -343,7 +345,7 @@ python3 -m harbour.incidents incident-one.json incident-two.json > analysis.json
 
 The parser uses only Python's standard library. It returns full reports plus
 cross-incident patterns, deduplicates repeated incident IDs, and rejects invalid
-export schemas and oversized inputs (64 MiB/file, 30,000 rows/incident). The CLI
+export schemas and oversized inputs (64 MiB/file, 60,000 rows/incident). The CLI
 accepts incident JSON, **not daily `.jsonl.gz` archives**. Daily archives retain
 more raw evidence but must first be reconstructed into incident windows with their
 original run context. This release does not automatically recover pruned incidents

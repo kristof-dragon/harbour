@@ -19,8 +19,7 @@ class Collector:
         self.start_thread(self.telemetry)
         self.start_thread(self.logs)
         if settings['router_probes']:
-            for target in settings['targets']:
-                self.start_thread(self.router_probe, target)
+            self.start_thread(self.router_probes)
 
     def emit(self, row):
         self.sender.emit(row)
@@ -67,17 +66,10 @@ class Collector:
         finally:
             session.close()
 
-    def router_probe(self, target):
+    def router_probes(self):
         session, cancel = openwrt.Session(), ssh.Cancellation()
         self.cancellations.append(cancel)
-        version = ipaddress.ip_address(target).version
-        command = ('ping -6' if version == 6 else 'ping') + ' -n -c 1 -W 1 '
-        # IPs and interface names have already passed strict data validation.
-        if self.settings['wan_device']:
-            command += '-I ' + shlex.quote(self.settings['wan_device']) + ' '
-        command += shlex.quote(target)
-        # Preserve ping's exit code as data; remote shell itself succeeds.
-        command += '; printf "\\nHARBOUR_PING_EXIT:%s\\n" "$?"'
+        command = probe_command(self.settings)
         try:
             while not self.stop.is_set():
                 if not self.capability('router_ping'):
@@ -86,22 +78,13 @@ class Collector:
                 started, wall = time.monotonic(), time.time()
                 try:
                     text = session.command(self.server, command, cancel, timeout=3)
-                    match = re.search(r'time([=<])([\d.]+)\s*ms', text)
-                    exit_code = re.search(r'HARBOUR_PING_EXIT:(\d+)', text)
-                    success = bool(match and exit_code and exit_code[1] == '0')
-                    # BusyBox's explicit packet summary distinguishes timeout
-                    # from an absent tool, unsupported option or missing route.
-                    timeout = bool(re.search(r'0 (?:packets )?received', text))
-                    self.emit({'at': wall, 'kind': 'probe' if success or timeout else 'gap', 'target': target,
-                               'source': 'router', 'status': 'reply' if success else 'timeout' if timeout else 'unavailable',
-                               'rtt_ms': float(match[2]) if success else None,
-                               'rtt_upper_bound': bool(success and match[1] == '<'),
-                               'interface': self.settings['wan_device'] or 'router routing policy',
-                               'detail': None if success or timeout else 'Router ping unavailable; inspect capabilities and route'})
+                    for row in probe_results(text, self.settings, wall):
+                        self.emit(row)
                 except ssh.Cancelled:
                     break
                 except Exception:
-                    self.emit({'at': wall, 'kind': 'gap', 'target': target, 'source': 'router', 'detail': 'Router probe collection failed'})
+                    self.emit({'at': wall, 'kind': 'gap', 'source': 'router',
+                               'detail': 'Router probe collection failed'})
                     self.stop.wait(5)
                 self.stop.wait(max(.05, 1-(time.monotonic()-started)))
         finally:
@@ -172,3 +155,36 @@ def run(server, settings, run_id, output, stop):
             collector.sender.status(status)
     finally:
         collector.close()
+
+
+def probe_command(settings):
+    """One persistent SSH connection, concurrent bounded pings, no remote files."""
+    commands = []
+    for target in settings['targets']:
+        ping = ('ping -6' if ipaddress.ip_address(target).version == 6 else 'ping') + ' -n -c 1 -W 1 '
+        if settings['wan_device']:
+            ping += '-I ' + shlex.quote(settings['wan_device']) + ' '
+        ping += shlex.quote(target)
+        # Each short result is emitted in one printf after its ping completes;
+        # completion order is immaterial and cannot mislabel another target.
+        commands.append('(output=$(' + ping + ' 2>&1); result=$?; '
+                        + "printf '\\n@@HARBOUR_PING:%s\\n%s\\nHARBOUR_PING_EXIT:%s\\n' "
+                        + shlex.quote(target) + ' "$output" "$result") &')
+    return '\n'.join(commands) + '\nwait'
+
+
+def probe_results(text, settings, wall):
+    parts = re.split(r'\n@@HARBOUR_PING:([^\n]+)\n', text)
+    outputs = dict(zip(parts[1::2], parts[2::2]))
+    for target in settings['targets']:
+        output = outputs.get(target, '')
+        match = re.search(r'time([=<])([\d.]+)\s*ms', output)
+        exit_code = re.search(r'HARBOUR_PING_EXIT:(\d+)', output)
+        success = bool(match and exit_code and exit_code[1] == '0')
+        timeout = bool(exit_code and re.search(r'0 (?:packets )?received', output))
+        yield {'at': wall, 'kind': 'probe' if success or timeout else 'gap', 'target': target,
+               'source': 'router', 'status': 'reply' if success else 'timeout' if timeout else 'unavailable',
+               'rtt_ms': float(match[2]) if success else None,
+               'rtt_upper_bound': bool(success and match[1] == '<'),
+               'interface': settings['wan_device'] or 'router routing policy',
+               'detail': None if success or timeout else 'Router ping unavailable; inspect capabilities and route'}

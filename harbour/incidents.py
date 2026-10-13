@@ -12,8 +12,8 @@ from pathlib import Path
 import re
 import sys
 
-VERSION = 1
-MAX_SAMPLES = 30000
+VERSION = 2
+MAX_SAMPLES = 60000
 CORRELATION_SECONDS = 2
 
 
@@ -251,6 +251,14 @@ def analyze(bundle):
         quality.append('Window is still collecting or has not been sealed; this analysis can change.')
     if bundle.get('truncated'):
         quality.append('The incident export was truncated; observations outside the saved subset are unknown.')
+    for test in items(bundle.get('traffic_tests')):
+        test = obj(test)
+        started = obj(test.get('result')).get('load_started')
+        finished = obj(test.get('result')).get('load_finished') or test.get('finished')
+        finished = finished if finite(finished) else end
+        if finite(started) and started <= end and finished >= start:
+            quality.append('A controlled traffic test overlaps this window. Check its loading period before attributing these observations to normal call traffic.')
+            break
     if not rows:
         quality.append('No valid samples are available in this incident window.')
     if gaps:

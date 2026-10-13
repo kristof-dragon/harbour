@@ -59,6 +59,8 @@ def initialize():
         con.execute('CREATE INDEX IF NOT EXISTS network_sizes ON network_samples(server_id,measured,id,payload_bytes)')
     from . import network_archives
     network_archives.initialize()
+    from . import call_tests
+    call_tests.initialize(recover=False)
 
 
 def host(id_):
@@ -79,7 +81,7 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra='forbid')
     enabled: bool = False
     interval: float = 1
-    targets: list[str] = Field(default_factory=lambda: list(DEFAULTS['targets']), min_length=1, max_length=4)
+    targets: list[str] = Field(default_factory=lambda: list(DEFAULTS['targets']), min_length=1, max_length=12)
     router_probes: bool = True
     wan_device: str = Field(default='', max_length=32, pattern=r'^[A-Za-z0-9_.:@-]*$')
     client_mac: str = Field(default='', pattern=r'^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$|^$')
@@ -117,7 +119,7 @@ class Settings(BaseModel):
 
 @router.get('')
 def get(id_: str, user=Depends(authenticated)):
-    from . import network_archives
+    from . import call_tests, network_archives
     server = host(id_)
     settings, revision = config(id_)
     row = store.one('SELECT * FROM network_status WHERE server_id=?', (id_,))
@@ -131,7 +133,7 @@ def get(id_: str, user=Depends(authenticated)):
             'events': store.rows('SELECT id,measured,label,automatic,complete FROM network_events WHERE server_id=? ORDER BY measured DESC LIMIT 50', (id_,)),
             'retention': {'seconds': settings['retention_hours']*3600, 'max_rows': settings['max_rows'],
                           'max_payload_bytes': settings['max_payload_mib']*1024*1024},
-            'archives': network_archives.summary(id_)}
+            'archives': network_archives.summary(id_), 'call_tests': call_tests.listing(id_)}
 
 
 @router.get('/archives/{archive_id}')
@@ -205,13 +207,15 @@ def export(id_: str, event_id: str, user=Depends(authenticated)):
 
 def incident_bundle(server, event):
     """One evidence source for downloads and analysis, including sealed windows."""
+    from . import call_tests
     id_ = server['id']
     settings, _ = config(id_)
     if event['archive']:
         bundle = json.loads(event['archive'])
     else:
-        rows, truncated = samples(id_, event['measured']-120, event['measured']+300, 30000)
+        rows, truncated = samples(id_, event['measured']-120, event['measured']+300, 60000)
         bundle = {'samples': rows, 'truncated': truncated, 'settings': settings,
+                  'traffic_tests': call_tests.context(id_, event['measured']-120, event['measured']+300),
                   'device': json.loads(server['snapshot']).get('metrics', {}).get('openwrt', {}).get('board')}
     bundle.update(schema=1, incident={k: event[k] for k in ('id', 'measured', 'label', 'automatic', 'complete')},
                   server_name=server['name'], server_id=id_, exported_at=time.time(),
@@ -271,7 +275,7 @@ def persist(id_, rows, status, signature, revision, run=None, through=0):
 
 
 def maintain(id_, stop=None):
-    from . import network_archives
+    from . import call_tests, network_archives
     from .network_runtime import read_status
     now = time.time()
     server = store.one('SELECT snapshot FROM servers WHERE id=?', (id_,))
@@ -283,8 +287,9 @@ def maintain(id_, stop=None):
     pending = runtime.get('writer_stalled') or runtime.get('oldest_unsaved_seconds', 0) > 2
     events = [] if pending else store.rows('SELECT * FROM network_events WHERE server_id=? AND complete=0 AND measured<?', (id_, now-300))
     for event in events:
-        rows, truncated = samples(id_, event['measured']-120, event['measured']+300, 30000)
+        rows, truncated = samples(id_, event['measured']-120, event['measured']+300, 60000)
         archive = json.dumps({'samples': rows, 'truncated': truncated, 'runs': run_metadata(id_, rows),
+                              'traffic_tests': call_tests.context(id_, event['measured']-120, event['measured']+300),
                               'settings': config(id_)[0], 'device': json.loads(server['snapshot']).get('metrics', {}).get('openwrt', {}).get('board')})
         store.execute('UPDATE network_events SET archive=?,complete=1 WHERE id=?', (archive, event['id']))
     # Never prune an unarchived reading while daily archiving is enabled.

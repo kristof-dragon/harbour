@@ -20,6 +20,9 @@ assert.equal(generated.status,0,generated.stderr);
 const incidentReport=JSON.parse(generated.stdout);
 const incidentReports=Array.from({length:23},(_,i)=>({...incidentReport,incident:{...incidentReport.incident,id:i?`event-${i}`:'event',measured:now-60-i*1000,automatic:i<21?1:0}}));
 let delayIncident=false,releaseIncident;
+const callProfiles=[{id:'facetime',name:'FaceTime · provisional video',upload_kbps:2000,download_kbps:2000,basis:'Harbour approximation',note:'Not an Apple specification.',source:'https://support.apple.com/guide/security/facetime-security-seca331c55cd/web'},{id:'teams-meeting',name:'Teams · video meeting',upload_kbps:2500,download_kbps:4000,basis:'Microsoft recommended video bandwidth',note:'Asymmetric meeting profile',source:'https://learn.microsoft.com/en-us/microsoftteams/prepare-network'},{id:'zoom-meeting',name:'Zoom · group 720p',upload_kbps:2600,download_kbps:1800,basis:'Zoom recommended 720p bandwidth',note:'Group video',source:'https://support.zoom.com/'}];
+const callData={profiles:callProfiles,available:true,tests:[]};
+let callRequest=null,callStopped=false;
 let saved=null,markers=[];
 const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(),'harbour/static',req.url==='/'?'index.html':req.url.replace('/static/',''));res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html');res.end(fs.readFileSync(file));}catch{res.writeHead(404).end();}});
 (async()=>{
@@ -44,9 +47,14 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
     if(delayIncident)await new Promise(resolve=>{releaseIncident=resolve;});
     data={...incidentReport,incident:{...incidentReport.incident,id:url.pathname.split('/').at(-1)}};
    }
+   else if(url.pathname.endsWith('/network/call-tests')&&method==='POST'){
+    callRequest=route.request().postDataJSON();callData.tests=[{id:'load-example',created:now,status:'running',phase:'baseline',config:{...callRequest,profile_snapshot:callProfiles.find(p=>p.id===callRequest.profile)},result:{}}];data={id:'load-example'};
+   }else if(url.pathname.endsWith('/network/call-tests/load-example/stop')&&method==='POST'){
+    callStopped=true;callData.tests[0].status='cancelled';data={ok:true};
+   }
    else if(url.pathname.endsWith('/network')){
     if(method==='PUT'){saved=route.request().postDataJSON();Object.assign(settings,saved);data={ok:true};}
-    else data={settings,archives,status:{state:'recording',recorder_online:true,observer:'onsite-server',probe_errors:{},buffer_bytes:1048576,buffer_limit_bytes:settings.buffer_mib*1048576,buffer_samples:12,oldest_unsaved_seconds:1.2,probe_online:true,router_collector_online:true,timestamp_modes:{example:'kernel_receive'}},device:router,events:[{id:'event',measured:now-60,label:'Video degraded',complete:1}]};
+    else data={settings,archives,call_tests:callData,status:{state:'recording',recorder_online:true,observer:'onsite-server',probe_errors:{},buffer_bytes:1048576,buffer_limit_bytes:settings.buffer_mib*1048576,buffer_samples:12,oldest_unsaved_seconds:1.2,probe_online:true,router_collector_online:true,timestamp_modes:{example:'kernel_receive'}},device:router,events:[{id:'event',measured:now-60,label:'Video degraded',complete:1}]};
    }else throw Error('Unexpected API '+url.pathname);
    await route.fulfill({json:data});
   });
@@ -59,6 +67,29 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.match(await page.locator('.network-view').textContent(),/Memory buffer: 1.0 \/ 128 MiB/);
   assert.match(await page.locator('.network-view').textContent(),/Uncertain timing/);
   assert.doesNotMatch(await page.locator('.network-legend').allTextContents().then(x=>x.join(' ')),/example-tunnel/);
+  await page.getByRole('button',{name:'New traffic test',exact:true}).click();
+  await page.locator('#call-test-form').waitFor();
+  assert.match(await page.locator('#call-profile-note').textContent(),/Not an Apple specification/);
+  await page.locator('#call-test-form [name=profile]').selectOption('teams-meeting');
+  assert.equal(await page.locator('#call-test-form [name=upload_kbps]').inputValue(),'2500');
+  assert.equal(await page.locator('#call-test-form [name=download_kbps]').inputValue(),'4000');
+  fs.mkdirSync('test-results',{recursive:true});
+  await page.screenshot({path:'test-results/call-profile-desktop.png'});
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  await page.screenshot({path:'test-results/call-profile-mobile.png'});
+  await page.setViewportSize({width:1440,height:1000});
+  await page.locator('#call-test-form [name=profile]').selectOption('zoom-meeting');
+  assert.equal(await page.locator('#call-test-form [name=download_kbps]').inputValue(),'1800');
+  await page.locator('#call-test-form [name=endpoint]').fill('192.0.2.50');
+  await page.locator('#call-test-form [name=duration]').selectOption('30');
+  assert.match(await page.locator('#call-test-estimate').textContent(),/16.5 MB/);
+  await page.getByRole('button',{name:'Start traffic test',exact:true}).click();
+  await page.getByRole('button',{name:'Stop test',exact:true}).waitFor();
+  assert.equal(callRequest.profile,'zoom-meeting');assert.equal(callRequest.download_kbps,1800);
+  await page.getByRole('button',{name:'Stop test',exact:true}).click();
+  await page.getByRole('button',{name:'New traffic test',exact:true}).waitFor();
+  assert.equal(callStopped,true);
   const sparse=await page.evaluate(()=>{
    const end=Date.now()/1000,start=end-120;
    const render=points=>new DOMParser().parseFromString(networkChart('Sparse readings','ms',[{name:'Example target',maxGap:1.5,points}],start,end),'text/html');
