@@ -8,7 +8,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
-from . import incidents, network, store
+from . import incident_brief, incidents, network, store
 from .auth import authenticated
 
 router = APIRouter(prefix='/api/servers/{id_}/network/incidents')
@@ -94,3 +94,23 @@ def detail(id_: str, event_id: str, download: bool = False, user=Depends(authent
     except (ValueError, TypeError, KeyError, RecursionError):
         raise HTTPException(422, 'Stored evidence could not be parsed; download the original incident')
     return attachment(result, 'harbour-incident-analysis.json') if download else result
+
+
+@router.get('/{event_id}/brief')
+def brief(id_: str, event_id: str, format: Literal['markdown', 'json'] = 'markdown',
+          examples: int = Query(default=3, ge=1, le=6), include_review: bool = True,
+          download: bool = False, user=Depends(authenticated)):
+    server = network.host(id_)
+    event = store.one('SELECT * FROM network_events WHERE id=? AND server_id=?', (event_id, id_))
+    if not event:
+        raise HTTPException(404, 'Incident not found')
+    if examples not in (1, 3, 6):
+        raise HTTPException(422, 'Choose 1, 3 or 6 evidence examples')
+    try:
+        result = incident_brief.export(network.incident_bundle(server, event), format, examples, include_review)
+    except (ValueError, TypeError, KeyError, RecursionError):
+        raise HTTPException(422, 'Stored evidence could not be parsed; download the original incident')
+    if download:
+        return Response(result['content'], media_type=result['media_type'],
+                        headers={'Content-Disposition': f'attachment; filename="{result["filename"]}"'})
+    return result

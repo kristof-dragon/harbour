@@ -35,8 +35,10 @@ Mark call degradation/recovery and export the surrounding raw evidence. Use
 **Network → Incidents → Analyse** for a readable evidence report, or **Explore
 incident patterns** to compare retained incidents and download structured results.
 Analysis runs locally and separates observations, possible contributors and
-missing evidence; it does not claim a proven cause. The
-recorder continues during remote-access loss and web-container restarts.
+missing evidence; it does not claim a proven cause. **Export condensed evidence brief**
+in the analysis overlay pairs each conclusion with measured support in Markdown
+or JSON, ready to copy or download for independent review. The recorder continues
+during remote-access loss and web-container restarts.
 Probes, router collection, database writes and archives run in separate processes.
 A configurable 128 MiB RAM buffer per router absorbs storage delays, with live
 backlog/loss reporting and acknowledged writes. Linux receive timestamps separate

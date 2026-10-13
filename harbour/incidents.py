@@ -72,20 +72,11 @@ def probe_stats(rows, limits):
             'p95_ms': percentile(ms), 'peak_ms': max(ms) if ms else None}
 
 
-def analyze(bundle):
-    if not isinstance(bundle, dict) or bundle.get('schema') != 1:
-        raise ValueError('Expected a Harbour schema 1 incident JSON export')
-    event = obj(bundle.get('incident'))
-    if not text(event.get('id')) or not finite(event.get('measured')):
-        raise ValueError('Incident id and finite measurement timestamp are required')
-    if not isinstance(bundle.get('samples'), list) or len(bundle['samples']) > MAX_SAMPLES:
-        raise ValueError(f'An incident must contain at most {MAX_SAMPLES} samples')
-    at = event['measured']
-    start, end = at-120, at+300
-    runs = {text(r.get('id')): obj(r.get('config')) for r in items(bundle.get('runs')) if isinstance(r, dict)}
+def normalized_samples(samples, start, end):
+    """Keep source indexes stable for analysis and condensed evidence exports."""
     rows, seen = [], set()
     invalid = outside = duplicates = 0
-    for index, raw in enumerate(bundle['samples']):
+    for index, raw in enumerate(samples):
         if not isinstance(raw, dict) or not finite(raw.get('at')) or not text(raw.get('kind')):
             invalid += 1
             continue
@@ -107,6 +98,21 @@ def analyze(bundle):
         seen.add(identity)
         rows.append({**raw, '_ref': index})
     rows.sort(key=lambda r: (r['at'], r['_ref']))
+    return rows, invalid, outside, duplicates
+
+
+def analyze(bundle):
+    if not isinstance(bundle, dict) or bundle.get('schema') != 1:
+        raise ValueError('Expected a Harbour schema 1 incident JSON export')
+    event = obj(bundle.get('incident'))
+    if not text(event.get('id')) or not finite(event.get('measured')):
+        raise ValueError('Incident id and finite measurement timestamp are required')
+    if not isinstance(bundle.get('samples'), list) or len(bundle['samples']) > MAX_SAMPLES:
+        raise ValueError(f'An incident must contain at most {MAX_SAMPLES} samples')
+    at = event['measured']
+    start, end = at-120, at+300
+    runs = {text(r.get('id')): obj(r.get('config')) for r in items(bundle.get('runs')) if isinstance(r, dict)}
+    rows, invalid, outside, duplicates = normalized_samples(bundle['samples'], start, end)
     limits, missing_run = {}, 0
     for row in rows:
         cfg = runs.get(text(row.get('run_id')))

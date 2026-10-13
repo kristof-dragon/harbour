@@ -310,6 +310,37 @@ proof. ICMP filtering, rate limiting, routing differences and recorder/container
 conditions remain alternatives. No unaffected control windows are compared, so
 frequency here cannot establish that a symptom is unique to incidents.
 
+### Condensed evidence briefs (0.1.31)
+
+In **Network → Incidents → Analyse**, expand **Export condensed evidence brief**.
+Choose **Markdown** for a readable conclusion/evidence table or **JSON** for
+structured ingestion, and 1, 3 (default) or 6 supporting examples per conclusion.
+Generate a preview, then copy or download its exact contents. Clipboard access
+can be unavailable over HTTP; in that case the preview is selected for manual copy.
+
+Each conclusion has a stable-within-brief ID, its rule, observed values, original
+sample indexes, run identity, timestamps, supporting count and next check.
+Correlated findings include a nearby qualifying recorder probe; reboot findings
+include both boot identities. Path totals retain before/after statistics and
+usable/uncertain denominators. Trigger details, device/run context, coverage gaps,
+controlled traffic-test timing and analysis limitations accompany the conclusions.
+The optional review request asks an LLM to challenge each conclusion, cite its
+support, consider alternatives and identify the next useful measurement.
+
+Selection takes the first qualifying observations in time order, not a random or
+representative sample. Nested matching measurements are capped at 8 items with
+omission counts; log excerpts retain up to 400 characters around a matching event.
+The original full incident export remains the authority. `null`/missing values
+stay unknown, and root cause remains `not_established`. The brief never sends
+anything to an external service and adds no runtime dependencies or background
+work. Hostnames and IP/MAC addresses remain where present in the selected evidence.
+
+Brief schema 1 includes the app/analyzer version and a reproducible SHA-256 of the
+original samples array. Sample references are local to that incident. When giving
+several briefs to an LLM, compare server IDs, window bounds and fingerprints:
+overlapping windows or copied samples are not independent recurrence. Open windows
+can change between preview generations; copy/download uses the generated preview.
+
 ### Patterns and exports for further investigation
 
 The explorer filters all/automatic/manual markers and all-retained/24-hour/7-day/
@@ -335,6 +366,10 @@ Authenticated API routes (under `/api/servers/{id}/network`):
   returns an attachment. `kind` also accepts `automatic` and `manual`.
 - `GET /incidents/{event_id}`: full analysis with referenced evidence.
   `download=true` returns the structured report.
+- `GET /incidents/{event_id}/brief?format=markdown&examples=3&include_review=true`:
+  returns preview content, filename, media type and UTF-8 byte count. `format=json`
+  selects structured output; `download=true` returns the brief as an attachment.
+  Like analysis, the endpoint is available to authenticated read-only users.
 - `GET /export/{event_id}`: the original complete or available incident bundle.
 
 For offline ingestion of multiple downloaded **incident JSON exports**:

@@ -481,7 +481,7 @@ document.addEventListener('click',async event=>{
   finally{busyViewNodes.delete(el);if(el.isConnected)el.disabled=false;if(a==='dismiss-all'&&state.notices)renderNotices();}
 });
 document.addEventListener('submit',async event=>{
-  if(['login-filter','incident-filters'].includes(event.target.id)||event.target.matches('.collector-sudo-form'))return;
+  if(['login-filter','incident-filters','incident-brief-form'].includes(event.target.id)||event.target.matches('.collector-sudo-form'))return;
   event.preventDefault();const form=event.target;if(form.dataset.busy)return;const data=Object.fromEntries(new FormData(form));const submit=$('[type=submit]',form);const restoreForm=busyOnboarding(form);$('.form-error',form).textContent='';
   try{
     if(monitorForms.has(form.id)){await handleMonitorForm(form,data);return;}

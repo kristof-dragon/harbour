@@ -15,9 +15,10 @@ const rows=Array.from({length:120},(_,i)=>[{at:now-120+i,kind:'telemetry',metric
 const incidentRows=rows.map(row=>({...row,run_id:'example-run'}));
 incidentRows.push({at:now-60,kind:'log',run_id:'example-run',line:'kernel: link down <img src=x onerror="window.incidentInjection=true">'});
 const incidentInput={schema:1,server_id:'router',server_name:'Example router',incident:{id:'event',measured:now-60,label:'Video degraded',automatic:1,complete:1},samples:incidentRows,settings,runs:[{id:'example-run',config:settings}]};
-const generated=require('node:child_process').spawnSync(process.env.HARBOUR_TEST_PYTHON||'.venv/bin/python',['-c','import json,sys; from harbour.incidents import analyze; print(json.dumps(analyze(json.load(sys.stdin))))'],{input:JSON.stringify(incidentInput),encoding:'utf8'});
+const generated=require('node:child_process').spawnSync(process.env.HARBOUR_TEST_PYTHON||'.venv/bin/python',['-c','import json,sys; from harbour.incidents import analyze; from harbour.incident_brief import export; b=json.load(sys.stdin); print(json.dumps(dict(report=analyze(b), briefs={f+str(n)+str(r).lower():export(b,f,n,r) for f in ("markdown","json") for n in (1,3,6) for r in (True,False)})))'],{input:JSON.stringify(incidentInput),encoding:'utf8'});
 assert.equal(generated.status,0,generated.stderr);
-const incidentReport=JSON.parse(generated.stdout);
+const {report:incidentReport,briefs:incidentBriefs}=JSON.parse(generated.stdout);
+let briefFailure=false,delayBrief=false,releaseBrief;
 const incidentReports=Array.from({length:23},(_,i)=>({...incidentReport,incident:{...incidentReport.incident,id:i?`event-${i}`:'event',measured:now-60-i*1000,automatic:i<21?1:0}}));
 let delayIncident=false,releaseIncident;
 const callProfiles=[{id:'facetime',name:'FaceTime · provisional video',upload_kbps:2000,download_kbps:2000,basis:'Harbour approximation',note:'Not an Apple specification.',source:'https://support.apple.com/guide/security/facetime-security-seca331c55cd/web'},{id:'teams-meeting',name:'Teams · video meeting',upload_kbps:2500,download_kbps:4000,basis:'Microsoft recommended video bandwidth',note:'Asymmetric meeting profile',source:'https://learn.microsoft.com/en-us/microsoftteams/prepare-network'},{id:'zoom-meeting',name:'Zoom · group 720p',upload_kbps:2600,download_kbps:1800,basis:'Zoom recommended 720p bandwidth',note:'Group video',source:'https://support.zoom.com/'}];
@@ -43,6 +44,10 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
    else if(url.pathname.endsWith('/network/incidents')){
     const kind=url.searchParams.get('kind'),reports=incidentReports.filter(r=>kind==='automatic'?r.incident.automatic:kind==='manual'?!r.incident.automatic:true);
     data={reports,errors:[],total:reports.length,offset:0,limit:200,has_more:false,patterns:{incident_count:reports.length,window_clusters:reports.length,note:'Overlapping windows are grouped; these are marker counts, not outage rates.',patterns:reports.length?[{key:'finding:probe_degradation',title:'Recorder probe degradation',incidents:reports.length,window_clusters:reports.length,incident_ids:reports.map(r=>r.incident.id)}]:[]}};
+   }else if(url.pathname.endsWith('/brief')){
+    if(delayBrief)await new Promise(resolve=>{releaseBrief=resolve;});
+    if(briefFailure){await route.fulfill({status:422,json:{detail:'Evidence unavailable for brief'}});return;}
+    data=incidentBriefs[url.searchParams.get('format')+url.searchParams.get('examples')+url.searchParams.get('include_review')];
    }else if(url.pathname.includes('/network/incidents/')){
     if(delayIncident)await new Promise(resolve=>{releaseIncident=resolve;});
     data={...incidentReport,incident:{...incidentReport.incident,id:url.pathname.split('/').at(-1)}};
@@ -129,6 +134,49 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.locator('.incident-finding [data-action=incident-evidence]').first().click();
   assert.equal(await page.locator('.incident-evidence[open]').count(),1);
   assert.equal(await page.getByRole('link',{name:'Download analysis JSON'}).getAttribute('href'),'/api/servers/router/network/incidents/event?download=true');
+  await page.getByText('Export condensed evidence brief',{exact:true}).click();
+  await page.getByRole('button',{name:'Generate preview',exact:true}).click();
+  const briefPreview=page.locator('#incident-brief-form textarea');
+  await page.getByRole('button',{name:'Download brief',exact:true}).waitFor();
+  await page.waitForFunction(()=>!document.querySelector('[data-action=incident-brief-download]').disabled);
+  assert.equal(await briefPreview.inputValue(),incidentBriefs.markdown3true.content);
+  assert.equal(await page.locator('.incident-brief img').count(),0);
+  const downloadPromise=page.waitForEvent('download');
+  await page.getByRole('button',{name:'Download brief',exact:true}).click();
+  const briefDownload=await downloadPromise;
+  assert.equal(briefDownload.suggestedFilename(),incidentBriefs.markdown3true.filename);
+  assert.equal(fs.readFileSync(await briefDownload.path(),'utf8'),incidentBriefs.markdown3true.content);
+  await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async value=>{window.copiedBrief=value;}}}));
+  await page.getByRole('button',{name:'Copy brief',exact:true}).click();
+  assert.equal(await page.evaluate(()=>window.copiedBrief),incidentBriefs.markdown3true.content);
+  await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async()=>{throw Error('denied');}}}));
+  await page.getByRole('button',{name:'Copy brief',exact:true}).click();
+  await page.getByText('Clipboard access is unavailable.',{exact:false}).waitFor();
+  assert.equal(await briefPreview.evaluate(el=>el.selectionEnd-el.selectionStart),incidentBriefs.markdown3true.content.length);
+  await page.locator('#incident-brief-form [name=format]').selectOption('json');
+  await page.locator('#incident-brief-form [name=examples]').selectOption('6');
+  await page.locator('#incident-brief-form [name=include_review]').uncheck();
+  assert.equal(await page.getByRole('button',{name:'Download brief',exact:true}).isDisabled(),true);
+  briefFailure=true;
+  await page.getByRole('button',{name:'Generate preview',exact:true}).click();
+  await page.getByText('Evidence unavailable for brief',{exact:true}).waitFor();
+  briefFailure=false;
+  await page.getByRole('button',{name:'Generate preview',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('[data-action=incident-brief-download]').disabled);
+  assert.equal(await briefPreview.inputValue(),incidentBriefs.json6false.content);
+  delayBrief=true;
+  await page.getByRole('button',{name:'Generate preview',exact:true}).click();
+  for(let tries=0;!releaseBrief&&tries<30;tries++)await page.waitForTimeout(20);
+  assert.equal(typeof releaseBrief,'function');
+  await page.locator('#incident-brief-form [name=format]').selectOption('markdown');
+  releaseBrief();delayBrief=false;
+  await page.waitForTimeout(100);
+  assert.equal(await page.getByRole('button',{name:'Download brief',exact:true}).isDisabled(),true);
+  assert.equal(await briefPreview.inputValue(),'');
+  await page.getByRole('button',{name:'Generate preview',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('[data-action=incident-brief-download]').disabled);
+  await page.locator('.incident-brief').scrollIntoViewIfNeeded();
+  await page.screenshot({path:'test-results/incident-brief-desktop.png'});
   await page.locator('.modal').evaluate(el=>el.scrollTop=0);
   await page.screenshot({path:'test-results/incident-report-desktop.png'});
   await page.getByRole('button',{name:'Close dialog',exact:true}).click();
@@ -155,6 +203,11 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
   await page.locator('.incident-overviews [data-action=incident-open]').first().click();
   await page.locator('.incident-report').waitFor();
+  await page.getByText('Export condensed evidence brief',{exact:true}).click();
+  await page.getByRole('button',{name:'Generate preview',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('[data-action=incident-brief-download]').disabled);
+  await page.locator('.incident-brief').scrollIntoViewIfNeeded();
+  await page.screenshot({path:'test-results/incident-brief-mobile.png'});
   await page.screenshot({path:'test-results/incident-report-mobile.png'});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
   await page.getByRole('button',{name:'Close dialog',exact:true}).click();

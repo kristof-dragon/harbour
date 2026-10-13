@@ -761,3 +761,8 @@ body.mobile-panel-open{overflow:hidden}
 .incident-pagination{gap:12px;flex-wrap:wrap;margin:12px 0 18px}
 .incident-report,.incident-modal #incident-explorer{min-width:0;overflow-wrap:anywhere}
 @media(max-width:650px){.incident-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.incident-timeline li{grid-template-columns:minmax(0,1fr) auto}.incident-timeline time{grid-column:1/-1}.incident-finding{padding:12px}.incident-patterns button{max-width:100%}.incident-modal .network-table{max-width:100%}}
+.incident-brief{border:1px solid var(--line);border-radius:10px;padding:16px;margin:18px 0}
+.incident-brief summary{cursor:pointer;font-weight:600}.incident-brief .flex{gap:8px;flex-wrap:wrap}
+.incident-brief textarea{width:100%;resize:vertical;font-family:monospace;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.incident-brief-preview[hidden]{display:none}.incident-brief .check{margin:14px 0}
+.incident-brief .check{display:flex;flex-direction:row;align-items:flex-start;gap:8px}.incident-brief .check input{width:auto;flex:none;margin-top:3px}

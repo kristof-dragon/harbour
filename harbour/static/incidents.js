@@ -18,6 +18,7 @@ function renderIncidentReport(id,r){
     <div class="incident-stats"><div><strong>${c.samples.toLocaleString()}</strong><span>Stored observations</span></div><div><strong>${c.kinds.telemetry||0}</strong><span>Router readings</span></div><div><strong>${c.kinds.gap||0}</strong><span>Collection gaps</span></div><div><strong>${c.duplicates_removed}</strong><span>Duplicate rows excluded</span></div></div>
     <p class="hint">Requested window: ${e(incidentTime(c.requested_start))} – ${e(incidentTime(c.requested_end))}.<br>Available sample range: ${e(incidentTime(c.first_at))} – ${e(incidentTime(c.last_at))}. A sample range can contain gaps.</p>
     ${r.quality.length?`<details class="incident-quality" open><summary>Evidence limitations (${r.quality.length})</summary><ul>${r.quality.map(q=>`<li>${e(q)}</li>`).join('')}</ul></details>`:''}
+    ${renderIncidentBriefForm(id,r.incident.id)}
     <h3>Probe paths</h3><p class="hint">Timeouts are missed reply deadlines, not confirmed packet loss. Late replies supplement their original timeout and are not counted as extra attempts. Before/after p95 values describe available replies on either side of the marker.</p>
     <div class="network-table"><table><thead><tr><th>Path</th><th>Attempts / uncertain</th><th>Timeouts</th><th>Above threshold</th><th>Late replies</th><th>Before / after p95</th><th>Peak RTT</th></tr></thead><tbody>${r.paths.map(p=>`<tr><td>${e(p.source)} → ${e(p.target)}</td><td>${p.attempts} / ${p.uncertain}</td><td>${p.timeouts} (${networkNumber(p.timeout_percent)}%)</td><td>${p.high_latency}</td><td>${p.late_replies}</td><td>${networkNumber(p.before.p95_ms)} / ${networkNumber(p.after.p95_ms)} ms</td><td>${networkNumber(p.peak_ms)} ms</td></tr>`).join('')||'<tr><td colspan="7">No probes are available.</td></tr>'}</tbody></table></div>
     <h3>Evidence and possible contributors</h3><p class="hint">These local rules identify observations worth investigating. They do not assign a definitive cause. Nearby means within ${r.method.correlation_seconds} seconds in the same recorder run; delayed telemetry is excluded.</p>
@@ -94,4 +95,65 @@ document.addEventListener('submit',async event=>{
   event.preventDefault();const data=new FormData(event.target);
   Object.assign(incidentExplorer,{kind:data.get('kind'),hours:Number(data.get('hours')),until:Date.now()/1000,offset:0,page:0,pattern:'',data:null});
   await loadIncidentExplorer();
+});
+
+const incidentBriefState=new WeakMap();
+function renderIncidentBriefForm(id,event){
+  return `<details class="incident-brief"><summary>Export condensed evidence brief</summary>
+    <p>Pair each conclusion with measured evidence for an independent review. Includes path totals, coverage limits and references back to the original samples.</p>
+    <form id="incident-brief-form" data-server="${e(id)}" data-event="${e(event)}">
+      <div class="form-grid"><label>Format<select name="format"><option value="markdown">Markdown · readable brief</option><option value="json">JSON · structured data</option></select></label>
+      <label>Evidence examples per conclusion<select name="examples"><option value="1">1 · shortest</option><option value="3" selected>3 · balanced</option><option value="6">6 · more evidence</option></select></label></div>
+      <label class="check"><input type="checkbox" name="include_review" checked> Include instructions for an independent LLM review</label>
+      <p class="hint">Examples are selected supporting observations, not the full record. Hostnames and IP/MAC addresses present in the evidence remain in the brief. Nothing is sent to an LLM.</p>
+      <div class="flex"><button type="submit" class="small primary">Generate preview</button>${button('incident-brief-copy','Copy brief','','small ghost','disabled')}${button('incident-brief-download','Download brief','','small ghost','disabled')}</div>
+      <p class="incident-brief-status hint" role="status" aria-live="polite"></p><p class="form-error" role="alert"></p>
+      <label class="incident-brief-preview" hidden>Export preview<textarea name="preview" readonly rows="14" spellcheck="false"></textarea></label>
+    </form></details>`;
+}
+function invalidateIncidentBrief(form){
+  incidentBriefState.delete(form);
+  form.querySelector('[type=submit]').disabled=false;
+  form.querySelectorAll('[data-action^="incident-brief-"]').forEach(b=>b.disabled=true);
+  form.querySelector('.incident-brief-preview').hidden=true;
+  form.elements.preview.value='';
+  form.querySelector('.incident-brief-status').textContent='Generate a preview to use these options.';
+  form.querySelector('.form-error').textContent='';
+  markFormSaved(form);
+}
+document.addEventListener('change',event=>{
+  const form=event.target.closest('#incident-brief-form');
+  if(form&&event.target.matches('select,input'))invalidateIncidentBrief(form);
+});
+document.addEventListener('submit',async event=>{
+  const form=event.target;if(form.id!=='incident-brief-form')return;
+  event.preventDefault();markFormSaved(form);
+  invalidateIncidentBrief(form);
+  const request={};incidentBriefState.set(form,request);
+  form.querySelector('[type=submit]').disabled=true;
+  form.querySelector('.incident-brief-status').textContent='Preparing evidence brief…';
+  const query=new URLSearchParams({format:form.elements.format.value,examples:form.elements.examples.value,include_review:String(form.elements.include_review.checked)});
+  try{
+    const result=await api(`${incidentBase(form.dataset.server)}/${encodeURIComponent(form.dataset.event)}/brief?${query}`);
+    if(!form.isConnected||incidentBriefState.get(form)!==request)return;
+    request.result=result;
+    form.elements.preview.value=result.content;form.elements.preview.scrollTop=0;
+    form.querySelector('.incident-brief-preview').hidden=false;
+    form.querySelectorAll('[data-action^="incident-brief-"]').forEach(b=>b.disabled=false);
+    form.querySelector('.incident-brief-status').textContent=`${(result.bytes/1024).toFixed(1)} KiB · Copy or download the exact preview below. Original evidence remains available separately.`;
+    markFormSaved(form);
+  }catch(error){
+    if(form.isConnected&&incidentBriefState.get(form)===request){form.querySelector('.form-error').textContent=error.message;form.querySelector('.incident-brief-status').textContent='';}
+  }finally{if(form.isConnected&&incidentBriefState.get(form)===request)form.querySelector('[type=submit]').disabled=false;}
+});
+document.addEventListener('click',async event=>{
+  const el=event.target.closest('[data-action^="incident-brief-"]');if(!el)return;
+  const form=el.closest('#incident-brief-form'),result=incidentBriefState.get(form)?.result;if(!result)return;
+  if(el.dataset.action==='incident-brief-copy'){
+    try{await navigator.clipboard.writeText(result.content);if(form.isConnected&&incidentBriefState.get(form)?.result===result)form.querySelector('.incident-brief-status').textContent='Brief copied.';}
+    catch{if(form.isConnected&&incidentBriefState.get(form)?.result===result){form.elements.preview.focus();form.elements.preview.select();form.querySelector('.incident-brief-status').textContent='Clipboard access is unavailable. The preview is selected; use your usual Copy shortcut.';}}
+  }else if(el.dataset.action==='incident-brief-download'){
+    const url=URL.createObjectURL(new Blob([result.content],{type:result.media_type+';charset=utf-8'})),link=document.createElement('a');
+    link.href=url;link.download=result.filename;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
 });
