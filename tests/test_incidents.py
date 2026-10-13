@@ -1,5 +1,6 @@
 """Synthetic incident evidence; no live routers or network probes."""
 import copy
+import gzip
 import json
 import subprocess
 import sys
@@ -183,7 +184,11 @@ def test_api_uses_sealed_archive_after_raw_pruning_caches_and_exports(client, mo
     assert incidents.analyze(original) == detail
     download = client.get(base+'?download=true')
     assert 'attachment' in download.headers['content-disposition']
-    assert download.json()['patterns']['incident_count'] == 1
+    assert download.headers['content-type'] == 'application/gzip'
+    assert 'content-encoding' not in download.headers
+    assert download.headers['content-disposition'].endswith('.json.gz\"')
+    assert int(download.headers['content-length']) == len(download.content)
+    assert json.loads(gzip.decompress(download.content))['patterns']['incident_count'] == 1
     assert client.get(base+'/'+event+'?download=true').status_code == 200
     store.execute('DELETE FROM network_events WHERE id=?', (event,))
     assert not store.one('SELECT * FROM network_analysis WHERE event_id=?', (event,))
@@ -306,3 +311,95 @@ def test_file_ingestor_rejects_nonfinite_numbers(tmp_path, invalid):
     source.write_text('{"value":'+invalid+'}')
     with pytest.raises(ValueError, match='Non-finite'):
         incidents.read_bundle(source)
+
+
+def test_patterns_gzip_preserves_batch_filters_and_excludes_raw_evidence(client, monkeypatch):
+    enable(client, monkeypatch)
+    at = time.time()-500
+    sealed_event(at)
+    sealed_event(at-500)
+    network.mark('atlas', 'Manual comparison', measured=at-20)
+    query = f'?kind=automatic&limit=1&offset=1&since={at-1000}&until={at+1}'
+    base = '/api/servers/atlas/network/incidents'
+    summary = client.get(base+query).json()
+    download = client.get(base+query+'&download=true')
+    result = json.loads(gzip.decompress(download.content))
+    assert result['reports'] == summary['reports']
+    assert result['patterns'] == summary['patterns']
+    assert result['filters'] == summary['filters']
+    assert (result['total'], result['limit'], result['offset']) == (2, 1, 1)
+    assert 'evidence' not in result['reports'][0]
+    assert 'samples' not in result['reports'][0]
+    assert 'no-store' in download.headers['cache-control']
+    client.post('/api/users', json={'name': 'reader', 'password': 'reader-password-strong', 'role': 'user'})
+    client.post('/api/login', json={'name': 'reader', 'password': 'reader-password-strong'})
+    assert client.get(base+query+'&download=true').status_code == 200
+    client.cookies.clear()
+    assert client.get(base+'?download=true').status_code == 401
+
+
+def test_compressed_download_is_complete_on_disk_and_closes_after_transfer(tmp_path, monkeypatch):
+    import asyncio
+    monkeypatch.setattr(store, 'DATA', tmp_path)
+    value = {'reports': [{'name': 'Example router · café', 'observations': ['Repeated telemetry']*5000} for _ in range(10)]}
+    # The encoder writes incrementally; building a second giant JSON string fails this check.
+    monkeypatch.setattr(network_incidents.json, 'dumps', lambda *a, **k: pytest.fail('Whole-batch serialization'))
+    response = network_incidents.compressed_attachment(value, 'patterns.json.gz')
+    assert gzip.decompress(response.file.read()).decode('utf-8').startswith('{"reports":')
+    response.file.seek(0)
+    assert response.file.fileno() >= 0 and not response.file.closed
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    async def receive():
+        return {'type': 'http.request'}
+
+    asyncio.run(response({'type': 'http', 'asgi': {'spec_version': '2.4'}}, receive, send))
+    payload = b''.join(message.get('body', b'') for message in sent)
+    assert json.loads(gzip.decompress(payload)) == value
+    assert response.file.closed
+    assert not list(tmp_path.iterdir())
+
+
+def test_compressed_download_releases_file_on_preparation_and_send_errors(tmp_path, monkeypatch):
+    import asyncio
+    monkeypatch.setattr(store, 'DATA', tmp_path)
+    files = []
+    temporary_file = network_incidents.tempfile.TemporaryFile
+
+    def track(**kwargs):
+        file = temporary_file(**kwargs)
+        files.append(file)
+        return file
+
+    monkeypatch.setattr(network_incidents.tempfile, 'TemporaryFile', track)
+    with pytest.raises(ValueError):
+        network_incidents.compressed_attachment({'invalid': float('nan')}, 'patterns.json.gz')
+    assert files[-1].closed
+    response = network_incidents.compressed_attachment({'reports': []}, 'patterns.json.gz')
+
+    async def failed_send(message):
+        raise RuntimeError('Disconnected before body iteration')
+
+    async def receive():
+        return {'type': 'http.request'}
+
+    with pytest.raises(RuntimeError, match='Disconnected'):
+        asyncio.run(response({'type': 'http', 'asgi': {'spec_version': '2.4'}}, receive, failed_send))
+    assert files[-1].closed
+    assert not list(tmp_path.iterdir())
+
+
+def test_patterns_download_reports_local_storage_failure(client, monkeypatch):
+    enable(client, monkeypatch)
+
+    def full_disk(**kwargs):
+        raise OSError('No space left on device')
+
+    monkeypatch.setattr(network_incidents.tempfile, 'TemporaryFile', full_disk)
+    response = client.get('/api/servers/atlas/network/incidents?download=true')
+    assert response.status_code == 507
+    assert 'data volume' in response.json()['detail']
+    assert client.get('/api/servers/atlas/network/incidents').status_code == 200

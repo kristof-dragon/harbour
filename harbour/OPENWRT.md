@@ -350,6 +350,20 @@ exports refer to the displayed analysis batch, with its bounds shown. Pattern
 filters select incidents sharing a finding or degraded probe path. Browser times
 use the viewer's timezone; JSON retains epoch timestamps.
 
+**Download patterns (.json.gz)** prepares a completed gzip file locally on the
+Harbour server, then offers it for download with its compressed file size. JSON
+is encoded incrementally into the compressed file on the data volume, avoiding
+a second uncompressed batch in memory or Docker's small `/tmp` RAM filesystem.
+The private temporary file is removed after transfer, disconnect or process exit.
+The ordinary JSON API used by the explorer is unchanged.
+
+This download contains compact incident summaries and recurrence statistics for
+the selected batch, including its filters and evidence limitations. It does not
+bundle the full raw sample archives, which can be tens of megabytes per incident.
+Compression is lossless; decompress the `.json.gz` file to recover the JSON.
+Actual size savings depend on repetition in the evidence. Full individual
+incident evidence downloads remain available separately.
+
 Pattern results count each incident ID once, not its sample count. Overlapping
 seven-minute windows on the same server form a **window group**, so overlapping
 markers do not masquerade as independent recurrences. Distinct groups can still
@@ -363,7 +377,7 @@ Authenticated API routes (under `/api/servers/{id}/network`):
 
 - `GET /incidents?kind=all&limit=200&offset=0`: summaries and pattern groups.
   Optional `since`/`until` epoch timestamps bound the marker time; `download=true`
-  returns an attachment. `kind` also accepts `automatic` and `manual`.
+  returns a compressed `.json.gz` attachment. `kind` also accepts `automatic` and `manual`.
 - `GET /incidents/{event_id}`: full analysis with referenced evidence.
   `download=true` returns the structured report.
 - `GET /incidents/{event_id}/brief?format=markdown&examples=3&include_review=true`:

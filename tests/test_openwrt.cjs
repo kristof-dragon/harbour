@@ -44,6 +44,9 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
    else if(url.pathname.endsWith('/network/incidents')){
     const kind=url.searchParams.get('kind'),reports=incidentReports.filter(r=>kind==='automatic'?r.incident.automatic:kind==='manual'?!r.incident.automatic:true);
     data={reports,errors:[],total:reports.length,offset:0,limit:200,has_more:false,patterns:{incident_count:reports.length,window_clusters:reports.length,note:'Overlapping windows are grouped; these are marker counts, not outage rates.',patterns:reports.length?[{key:'finding:probe_degradation',title:'Recorder probe degradation',incidents:reports.length,window_clusters:reports.length,incident_ids:reports.map(r=>r.incident.id)}]:[]}};
+    if(url.searchParams.get('download')==='true'){
+     await route.fulfill({status:200,contentType:'application/gzip',headers:{'Content-Disposition':'attachment; filename="harbour-incident-patterns.json.gz"'},body:require('node:zlib').gzipSync(JSON.stringify(data))});return;
+    }
    }else if(url.pathname.endsWith('/brief')){
     if(delayBrief)await new Promise(resolve=>{releaseBrief=resolve;});
     if(briefFailure){await route.fulfill({status:422,json:{detail:'Evidence unavailable for brief'}});return;}
@@ -192,7 +195,14 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.locator('#incident-filters [name=kind]').selectOption('manual');
   await page.getByRole('button',{name:'Refresh analysis',exact:true}).click();
   await page.waitForFunction(()=>document.querySelectorAll('.incident-overviews tbody tr').length===2);
-  assert.match(await page.getByRole('link',{name:'Download patterns JSON'}).getAttribute('href'),/kind=manual/);
+  assert.match(await page.getByRole('link',{name:'Download patterns (.json.gz)'}).getAttribute('href'),/kind=manual/);
+  const patternsDownloadPromise=page.waitForEvent('download');
+  await page.getByRole('link',{name:'Download patterns (.json.gz)'}).click();
+  const patternsDownload=await patternsDownloadPromise;
+  assert.equal(patternsDownload.suggestedFilename(),'harbour-incident-patterns.json.gz');
+  const downloadedPatterns=JSON.parse(require('node:zlib').gunzipSync(fs.readFileSync(await patternsDownload.path())).toString('utf8'));
+  assert.equal(downloadedPatterns.patterns.incident_count,2);
+  assert.equal(downloadedPatterns.reports.length,2);
   await page.locator('#incident-filters [name=kind]').selectOption('all');
   await page.getByRole('button',{name:'Refresh analysis',exact:true}).click();
   await page.waitForFunction(()=>document.querySelectorAll('.incident-overviews tbody tr').length===20);

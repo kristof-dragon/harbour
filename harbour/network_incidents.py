@@ -1,12 +1,15 @@
 """Authenticated incident reports and bounded recurrence exploration."""
+import gzip
 import hashlib
+import io
 import json
 import sqlite3
+import tempfile
 import time
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from . import incident_brief, incidents, network, store
 from .auth import authenticated
@@ -40,6 +43,38 @@ def report(server, event, full=False):
 def attachment(data, filename):
     return Response(json.dumps(data, allow_nan=False, indent=2), media_type='application/json',
                     headers={'Content-Disposition': f'attachment; filename="{filename}"'})
+
+
+class PreparedDownload(StreamingResponse):
+    """Serve an already completed local file and release it even on disconnect."""
+    def __init__(self, file, filename):
+        self.file = file
+        size = file.tell()
+        file.seek(0)
+        super().__init__(iter(lambda: file.read(64*1024), b''), media_type='application/gzip',
+                         headers={'Content-Disposition': f'attachment; filename="{filename}"',
+                                  'Content-Length': str(size), 'Cache-Control': 'private, no-store'})
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.file.close()
+
+
+def compressed_attachment(data, filename):
+    # Use the data volume, not Docker's small /tmp RAM filesystem. TemporaryFile
+    # is private and removed automatically on close, including process exit.
+    file = tempfile.TemporaryFile(mode='w+b', dir=store.DATA)
+    try:
+        with gzip.GzipFile(fileobj=file, mode='wb', compresslevel=6, mtime=0, filename='') as compressed:
+            with io.TextIOWrapper(compressed, encoding='utf-8') as text_file:
+                # Encode incrementally: no second, uncompressed copy of the batch.
+                json.dump(data, text_file, allow_nan=False, ensure_ascii=False, separators=(',', ':'))
+        return PreparedDownload(file, filename)
+    except BaseException:
+        file.close()
+        raise
 
 
 @router.get('')
@@ -80,7 +115,12 @@ def collection(id_: str, limit: int = Query(default=200, ge=1, le=200),
               'reports': reports, 'patterns': incidents.patterns(reports), 'errors': errors,
               'total': total, 'offset': offset, 'limit': limit, 'has_more': offset+len(events) < total,
               'filters': {'kind': kind, 'since': since, 'until': until}}
-    return attachment(result, 'harbour-incident-patterns.json') if download else result
+    if download:
+        try:
+            return compressed_attachment(result, 'harbour-incident-patterns.json.gz')
+        except OSError:
+            raise HTTPException(507, 'Could not prepare the compressed download. Check free space and permissions on Harbour\'s data volume.')
+    return result
 
 
 @router.get('/{event_id}')
