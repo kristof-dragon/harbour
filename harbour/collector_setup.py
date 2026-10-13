@@ -90,6 +90,9 @@ def transfer(op):
     config = {'kind': op.kind, 'action': op.action, 'prefix': prefix, 'installer': installer, 'files': files,
               'reader': server['username'], 'interval': server.get('record_seconds') or 60,
               'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+    if op.kind == 'call-endpoint':
+        from . import call_endpoint
+        config['endpoint'] = call_endpoint.saved(server['id'], secret=True)
     try:
         credential = ({'password': store.cipher().decrypt(server['password_encrypted'].encode()).decode()}
                       if server.get('auth_method') == 'password' else {'pkey': ssh.stored_key(server['key_id'])})
@@ -157,6 +160,8 @@ def transfer(op):
 def worker(op, username, address):
     try:
         result = transfer(op)
+        if op.kind == 'call-endpoint' and result.get('ok'):
+            store.execute('UPDATE call_endpoints SET deployed=1 WHERE server_id=?', (op.server['id'],))
         op.emit(result)
         auth.log(username, address, 'collector_setup_succeeded' if result.get('ok') else 'collector_setup_failed',
                  op.server['id'] + ' · ' + op.kind + ' · ' + op.action)
@@ -212,12 +217,17 @@ class SetupResponse(StreamingResponse):
 
 
 @router.post('/api/servers/{id_}/collector/{kind}')
-def start(id_: str, kind: Literal['resources', 'logins'], body: SetupInput, request: Request, user=Depends(auth.admin)):
+def start(id_: str, kind: Literal['resources', 'logins', 'call-endpoint'], body: SetupInput, request: Request, user=Depends(auth.admin)):
     from .app import get_server, server_lock
     if get_server(id_)['server_type'] == 'openwrt':
         raise HTTPException(400, 'OpenWRT is read-only. Router collector installation is disabled.')
     if store.DEMO:
         raise HTTPException(400, 'Collector push and installation are disabled in demo mode')
+    if kind == 'call-endpoint':
+        from . import call_endpoint
+        if body.action != 'install':
+            raise HTTPException(400, 'Choose Install for the remote call endpoint')
+        call_endpoint.saved(id_)
     lock = server_lock(id_)
     with guard:
         if len(operations) >= 4:

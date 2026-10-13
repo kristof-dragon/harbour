@@ -23,7 +23,9 @@ const incidentReports=Array.from({length:23},(_,i)=>({...incidentReport,incident
 let delayIncident=false,releaseIncident;
 const callProfiles=[{id:'facetime',name:'FaceTime · provisional video',upload_kbps:2000,download_kbps:2000,basis:'Harbour approximation',note:'Not an Apple specification.',source:'https://support.apple.com/guide/security/facetime-security-seca331c55cd/web'},{id:'teams-meeting',name:'Teams · video meeting',upload_kbps:2500,download_kbps:4000,basis:'Microsoft recommended video bandwidth',note:'Asymmetric meeting profile',source:'https://learn.microsoft.com/en-us/microsoftteams/prepare-network'},{id:'zoom-meeting',name:'Zoom · group 720p',upload_kbps:2600,download_kbps:1800,basis:'Zoom recommended 720p bandwidth',note:'Group video',source:'https://support.zoom.com/'}];
 const callData={profiles:callProfiles,available:true,tests:[]};
-let callRequest=null,callStopped=false;
+let callRequest=null,callStopped=false,endpointRequest=null,deployRequest=null;
+const remoteHost={...host,id:'remote',name:'Remote Docker host',host:'192.0.2.10',server_type:'docker'};
+const endpointData={endpoints:[]};
 let saved=null,markers=[];
 const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(),'harbour/static',req.url==='/'?'index.html':req.url.replace('/static/',''));res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html');res.end(fs.readFileSync(file));}catch{res.writeHead(404).end();}});
 (async()=>{
@@ -36,8 +38,12 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
    const url=new URL(route.request().url()),method=route.request().method();let data;
    if(url.pathname==='/api/config')data={demo:false,version:'test'};
    else if(url.pathname==='/api/me')data={id:'admin',name:'admin',role:'admin',csrf:'test'};
-   else if(url.pathname==='/api/dashboard')data={servers:[host],thresholds,jobs:[]};
+   else if(url.pathname==='/api/dashboard')data={servers:[host,remoteHost],thresholds,jobs:[]};
    else if(url.pathname==='/api/session/activity')data={ok:true};
+   else if(url.pathname==='/api/call-endpoints')data=endpointData;
+   else if(url.pathname==='/api/servers/remote/call-endpoint'&&method==='PUT'){endpointRequest=route.request().postDataJSON();data={...endpointRequest,server_id:'remote',deployed:false};endpointData.endpoints=[data];}
+   else if(url.pathname==='/api/servers/remote/collector/call-endpoint'&&method==='POST'){deployRequest=route.request().postDataJSON();await route.fulfill({contentType:'application/x-ndjson',body:[{kind:'started',id:'endpoint-fixture'},{kind:'output',text:'Building endpoint…\n'},{kind:'result',ok:true,message:'Remote call endpoint installed in ~/harbour-c-remote.'}].map(x=>JSON.stringify(x)).join('\n')+'\n'});return;}
+   else if(url.pathname==='/api/servers/remote/call-endpoint/logs')data=url.searchParams.has('day')?{files:[{name:'upload-fixture.jsonl',bytes:200}]}:{days:['26-10-13']};
    else if(url.pathname.endsWith('/history'))data={points:[],hours:6,from:now-21600,to:now,resolution_seconds:60,poll_seconds:60};
    else if(url.pathname.endsWith('/network/samples'))data={start:now-120,end:now,samples:rows,truncated:false};
    else if(url.pathname.endsWith('/network/markers')){markers.push(route.request().postDataJSON());data={id:'new-event'};}
@@ -71,11 +77,14 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.locator('.network-chart svg').first().waitFor();
   assert.equal(await page.locator('[data-tab=containers],[data-tab=logins]').count(),0);
   assert.match(await page.locator('.network-view').textContent(),/ethernet details: unavailable/);
-  assert.equal(await page.locator('.network-chart svg').count(),6);
+  assert.equal(await page.locator('.network-chart svg').count(),5);
+  assert.equal(await page.locator('.probe-card').count(),2);
+  assert.equal(await page.locator('[data-tab=wireless],[data-tab=incidents],[data-tab=calls],[data-tab=archives]').count(),4);
   assert.match(await page.locator('.network-view').textContent(),/Memory buffer: 1.0 \/ 128 MiB/);
   assert.match(await page.locator('.network-view').textContent(),/Uncertain timing/);
   assert.doesNotMatch(await page.locator('.network-legend').allTextContents().then(x=>x.join(' ')),/example-tunnel/);
-  await page.getByRole('button',{name:'New traffic test',exact:true}).click();
+  await page.locator('[data-tab=calls]').click();
+  await page.getByRole('button',{name:'Remote call flow test',exact:true}).click();
   await page.locator('#call-test-form').waitFor();
   assert.match(await page.locator('#call-profile-note').textContent(),/Not an Apple specification/);
   await page.locator('#call-test-form [name=profile]').selectOption('teams-meeting');
@@ -84,6 +93,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   fs.mkdirSync('test-results',{recursive:true});
   await page.screenshot({path:'test-results/call-profile-desktop.png'});
   await page.setViewportSize({width:390,height:844});
+  await page.waitForFunction(()=>document.documentElement.scrollWidth<=innerWidth);
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   await page.screenshot({path:'test-results/call-profile-mobile.png'});
   await page.setViewportSize({width:1440,height:1000});
@@ -96,7 +106,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.getByRole('button',{name:'Stop test',exact:true}).waitFor();
   assert.equal(callRequest.profile,'zoom-meeting');assert.equal(callRequest.download_kbps,1800);
   await page.getByRole('button',{name:'Stop test',exact:true}).click();
-  await page.getByRole('button',{name:'New traffic test',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Remote call flow test',exact:true}).waitFor();
   assert.equal(callStopped,true);
   const sparse=await page.evaluate(()=>{
    const end=Date.now()/1000,start=end-120;
@@ -106,6 +116,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
    return {dots:isolated.querySelectorAll('.network-point').length,lines:isolated.querySelectorAll('polyline').length,brokenLines:broken.querySelectorAll('polyline').length,brokenDots:broken.querySelectorAll('.network-point').length,missing:render([[end-1,null]]).querySelectorAll('svg').length};
   });
   assert.deepEqual(sparse,{dots:3,lines:0,brokenLines:1,brokenDots:1,missing:0});
+  await page.locator('[data-tab=archives]').click();
   assert.equal(await page.getByRole('link',{name:'Download .jsonl.gz',exact:true}).getAttribute('href'),'/api/servers/router/network/archives/yesterday');
   assert.match(await page.locator('.network-view').textContent(),/Collecting · available after midnight/);
   await page.getByRole('button',{name:'Mark degradation',exact:true}).click();
@@ -122,6 +133,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.waitForFunction(()=>!document.querySelector('#network-settings-form'));
   assert.equal(saved.interval,.5);assert.equal(saved.client_mac,'aa:bb:cc:dd:ee:ff');
   assert.equal(saved.buffer_mib,256);assert.equal(saved.retention_hours,720);assert.equal(saved.max_payload_mib,0);assert.equal(saved.archive_retention_days,180);assert.equal(saved.archive_max_mib,0);assert.equal(saved.archive_enabled,true);
+  await page.locator('[data-tab=incidents]').click();
   assert.match(await page.locator('.network-view').textContent(),/720 hours/);
   await page.locator('[data-action=server-settings]').click();
   assert.equal(await page.locator('[data-action=recorder-setup],[data-action=recorder-remove]').count(),0);
@@ -233,6 +245,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.equal(await page.locator('#network-settings-form').count(),1);
   assert.equal(await page.locator('.incident-report').count(),0);
   await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+  await page.locator('[data-tab=network]').click();
   await page.screenshot({path:'test-results/openwrt-desktop.png',fullPage:true});
   await page.setViewportSize({width:390,height:844});
   await page.waitForTimeout(200);
@@ -250,10 +263,43 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.getByRole('button',{name:'Save recording settings',exact:true}).click();
   await page.waitForFunction(()=>!document.querySelector('#network-settings-form'));
   assert.equal(saved.archive_enabled,false);assert.equal(saved.retention_hours,48);
+  await page.locator('[data-tab=archives]').click();
   archives.error='Daily archiving failed. Unarchived readings are protected from cleanup.';
   await page.evaluate(()=>loadNetwork(current(),true));
   assert.match(await page.locator('.network-view .form-error').textContent(),/protected from cleanup/);
   await page.setViewportSize({width:1440,height:1000});
+  // Both wide and intermediate desktop sizes reserve the sidebar's actual width.
+  for(const width of [2600,1200,900]){
+   await page.setViewportSize({width,height:1000});
+   await page.locator('[data-tab=network]').click();
+   const sizes=await page.evaluate(()=>({sidebar:document.querySelector('.sidebar').getBoundingClientRect().width,left:document.querySelector('.workspace').getBoundingClientRect().left,overflow:document.documentElement.scrollWidth>innerWidth}));
+   assert(sizes.sidebar>=220&&sizes.sidebar<=340);assert(sizes.left>=sizes.sidebar-1);assert.equal(sizes.overflow,false);
+   if(width===2600){const cards=await page.locator('.probe-card').evaluateAll(es=>es.map(e=>e.getBoundingClientRect().top));assert.equal(cards[0],cards[1]);await page.screenshot({path:'test-results/openwrt-wide.png'});}
+  }
+  // The mobile backdrop must not dim or intercept the drawer at 700px.
+  await page.setViewportSize({width:700,height:1000});
+  await page.getByRole('button',{name:'Toggle server list',exact:true}).click();
+  await page.waitForTimeout(250);
+  assert.equal(await page.evaluate(()=>document.querySelector('.sidebar').contains(document.elementFromPoint(100,150))),true);
+  await page.screenshot({path:'test-results/openwrt-sidebar.png'});
+  await page.getByRole('button',{name:'Close server list',exact:true}).click();
+  await page.setViewportSize({width:1440,height:1000});
+  await page.locator('[data-tab=wireless]').click();
+  assert.equal(await page.locator('.network-chart svg').count(),1);
+  await page.locator('[data-tab=calls]').click();
+  await page.getByRole('button',{name:'Deploy remote endpoint',exact:true}).click();
+  await page.locator('#endpoint-form').waitFor();
+  const port=Number(await page.locator('#endpoint-form [name=http_port]').inputValue());assert(port>=20000&&port<60000);
+  await page.locator('#endpoint-form [name=http_port]').fill('25432');
+  await page.getByRole('button',{name:'Save & deploy endpoint',exact:true}).click();
+  await page.getByText('Remote call endpoint installed in ~/harbour-c-remote.',{exact:true}).first().waitFor();
+  assert.equal(endpointRequest.http_port,25432);assert.equal(endpointRequest.endpoint,'192.0.2.10');assert.deepEqual(deployRequest,{action:'install'});
+  await page.screenshot({path:'test-results/remote-endpoint-deploy.png'});
+  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+  await page.getByRole('button',{name:'Remote logs',exact:true}).click();
+  await page.locator('.remote-log-list a').waitFor();
+  assert.equal(await page.locator('.remote-log-list a').getAttribute('href'),'/api/servers/remote/call-endpoint/logs/26-10-13/upload-fixture.jsonl');
+  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
   await page.evaluate(()=>onboard());
   assert.equal(await page.locator('[name=server_type] option').count(),3);
   await page.locator('[name=server_type]').selectOption('openwrt');

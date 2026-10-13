@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from . import __version__, auth, call_tests, collector_setup, cpu, demo, history, logins, network, network_incidents, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
+from . import __version__, auth, call_endpoint, call_tests, collector_setup, cpu, demo, history, logins, network, network_incidents, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
 
 pool = ThreadPoolExecutor(max_workers=4)
@@ -336,6 +336,7 @@ async def lifespan(app):
     store.initialize()
     network.initialize()
     call_tests.initialize()
+    call_endpoint.initialize()
     with queue_guard:
         detail_refreshes.clear()
     if store.DEMO:
@@ -378,6 +379,7 @@ app.include_router(notifications.router)
 app.include_router(network.router)
 app.include_router(network_incidents.router)
 app.include_router(call_tests.router)
+app.include_router(call_endpoint.router)
 
 
 @app.exception_handler(RequestValidationError)

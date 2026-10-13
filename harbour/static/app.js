@@ -49,7 +49,7 @@ function applyTheme(){
 applyTheme();
 systemTheme.addEventListener('change',()=>{if(followSystem)applyTheme();});
 const width = Number(localStorage.getItem('harbour-width'));
-if (width >= 18 && width <= 40) document.documentElement.style.setProperty('--sidebar', width+'%');
+if (width >= 220 && width <= 340) document.documentElement.style.setProperty('--sidebar', width+'px');
 const admin = () => state.user?.role === 'admin';
 const current = () => state.data?.servers.find(s => s.id === state.server);
 const gb = n => (Number(n || 0)/1e9).toLocaleString(undefined,{maximumFractionDigits:1});
@@ -146,7 +146,7 @@ function renderSidebar(){
     <div class="server-filters">${filterControl('warnings','Warnings',[['with','With warnings'],['without','No warnings']])}${filterControl('status','Status',[['up','Up'],['down','Down'],['paused','Paused']])}${filterControl('updates','Updates',[['with','Available'],['without','None']])}</div></details>
     <nav class="server-list" aria-label="Servers">${serverCards(servers)}</nav>
     <div class="sidebar-bottom"><details class="sidebar-menu" id="sidebar-menu" ${state.menuOpen?'open':''}><summary>${icon('menu')}<span>Menu</span>${icon('down','menu-chevron')}</summary><nav aria-label="Workspace menu">${admin()?button('onboard','Add server','plus','ghost sidebar-link'):''}${button('visuals','Visuals','sun','ghost sidebar-link')}${admin()?button('global-settings','Global settings','settings','ghost sidebar-link')+button('notification-settings','Notifications','bell','ghost sidebar-link')+button('users','Manage users','users','ghost sidebar-link')+button('security','Security & sign-ins','shield','ghost sidebar-link'):''}${button('account','My account','users','ghost sidebar-link')}<div class="connection-note"><span class="dot"></span><span id="connection-status">${state.demo?'Demo workspace':'Background monitoring active'}</span></div></nav></details>
-    <div class="sidebar-footer"><span class="app-version">Harbour v${e(state.version)}</span><span class="footer-account" title="${e(state.user.name)} · ${admin()?'Administrator':'Read-only user'}">${e(state.user.name)}</span>${iconButton('logout','Sign out','logout')}</div></div><div class="resize-handle" role="separator" aria-label="Resize server pane" aria-orientation="vertical" aria-valuemin="18" aria-valuemax="40" aria-valuenow="${Math.round(parseFloat(document.documentElement.style.getPropertyValue('--sidebar'))||23)}" tabindex="0"></div>`);
+    <div class="sidebar-footer"><span class="app-version">Harbour v${e(state.version)}</span><span class="footer-account" title="${e(state.user.name)} · ${admin()?'Administrator':'Read-only user'}">${e(state.user.name)}</span>${iconButton('logout','Sign out','logout')}</div></div><div class="resize-handle" role="separator" aria-label="Resize server pane" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="340" aria-valuenow="${Math.round(parseFloat(document.documentElement.style.getPropertyValue('--sidebar'))||260)}" tabindex="0"></div>`);
 }
 function visuals(){
   const densities=[['compact','Compact'],['normal','Normal'],['comfortable','Comfortable']];
@@ -164,16 +164,17 @@ function renderMain(){
   const s=current();
   if(!s){updateHTML($('#main'),`<div class="no-servers empty">${icon('server')}<h1>Your fleet starts here</h1><p>Add your first Linux or macOS server to see its resources and Docker services.</p>${admin()?button('onboard','Add your first server','plus','primary'):''}</div>`);return;}
   const m=s.metrics,isDocker=s.server_type==='docker',isOpenWrt=s.server_type==='openwrt';
-  const view=isOpenWrt&&!['network','activity'].includes(state.tab)?'network':!isDocker&&state.tab==='containers'?'storage':state.tab;
+  const tabs=isOpenWrt?['network','wireless','incidents','calls','archives','activity']:isDocker?['containers','storage','activity','logins']:['storage','activity','logins'];
+  const view=tabs.includes(state.tab)?state.tab:tabs[0];
   updateHTML($('#main'),`${serverWarnings(s)}${state.demo?`<div data-key="demo-banner" class="demo-banner">${icon('info')}<span>Demo workspace · sample servers, simulated actions.</span><span>No live connections</span></div>`:''}
     <section data-key="server-header" class="server-header"><div class="server-heading"><div class="server-emblem">${icon('server')}</div><div><h1>${e(s.name)}</h1><div class="server-meta">${serverConnection(s,true)}</div></div></div>${m?`<div class="host-facts">${isOpenWrt?`<span><small>Model</small><b>${e(m.model||'Pending')}</b></span><span><small>Architecture</small><b>${e(m.architecture||'Pending')}</b></span>`:''}<span title="Operating system"><small>OS</small><b>${e(m.os||'Unavailable')}</b></span><span title="Kernel"><small>Kernel</small><b class="mono">${e(m.kernel||'Pending')}</b></span><span title="Uptime at latest resource sample"><small>Uptime</small><b>${uptime(m.uptime)}</b>${button('boot-history','Boot history','','ghost small')}</span><span title="Server timezone"><small>Timezone</small><b>${timezoneLabel(m.timezone)}</b></span></div>`:''}<div class="header-actions">${admin()?button('refresh','','refresh','small',`aria-label="Refresh server" title="Refresh server"`)+button('server-settings','','settings','small',`aria-label="Server settings" title="Server settings"`):''}</div></section>
     ${m?`<div data-key="overview-connection" class="overview-connection">${isDocker?`<span>${icon('box')}Docker ${e(m.docker||'Pending')}</span>`:isOpenWrt?'<span>OpenWRT · read-only inspection</span>':'<span>Resource monitoring</span>'}<span>${icon('shield')}${state.demo?'Simulated SSH':'Pinned SSH'} · port ${s.port}</span><span>${e(recordingLabel(s))} · collect every ${s.poll_seconds}s${!s.monitoring_enabled?' · paused':''}</span><span>${s.override?'Custom':'Global'} thresholds</span></div>`:''}
     ${m?`    <div data-key="resource-heading" class="resource-heading"><h2>Resources</h2><div class="flex">${admin()?cardLayoutControls(s):''}<label>Recent history <select id="card-hours" aria-label="Resource card history hours">${hourOptions(cardHours)}</select></label>${button('history','Explore history','activity','small')}</div></div><section data-key="metrics:${e(s.id)}" class="metrics resource-card-grid" aria-label="Server resource usage">${resourceCards(s)}</section>${isOpenWrt?'':hardwarePanel(s)}`:''}
-    <nav data-key="server-tabs" class="tabs" aria-label="Server views">${(isOpenWrt?['network','activity']:isDocker?['containers','storage','activity','logins']:['storage','activity','logins']).map(tab=>button('tab',tab[0].toUpperCase()+tab.slice(1)+(tab==='containers'?` <span class="tag">${s.services?.length||0}</span>`:''),'',view===tab?'active':'',`data-tab="${tab}"`)).join('')}<span class="tab-meta">Updated ${age(s.checked)}</span></nav><div id="server-view">${view==='network'?renderNetwork(s):view==='containers'?renderContainers(s):view==='storage'?renderStorage(s):view==='logins'?renderLogins(s):renderActivity(s)}</div>
+    <nav data-key="server-tabs" class="tabs" aria-label="Server views">${tabs.map(tab=>button('tab',(tab==='calls'?'Call tests':tab[0].toUpperCase()+tab.slice(1))+(tab==='containers'?` <span class="tag">${s.services?.length||0}</span>`:''),'',view===tab?'active':'',`data-tab="${tab}"`)).join('')}<span class="tab-meta">Updated ${age(s.checked)}</span></nav><div id="server-view">${isOpenWrt&&view!=='activity'?renderNetwork(s,view):view==='containers'?renderContainers(s):view==='storage'?renderStorage(s):view==='logins'?renderLogins(s):renderActivity(s)}</div>
 `);
   if(m){layoutResourceCards();loadCardHistory(s);}
   if(view==='logins')loadLogins(s);
-  if(view==='network')loadNetwork(s);
+  if(isOpenWrt&&view!=='activity')loadNetwork(s);
 }
 function updateTag(s){
   const u=s.update||{},title=e(u.reason||u.error||'Checks the configured image tag, not newer version tags');
@@ -481,7 +482,7 @@ document.addEventListener('click',async event=>{
   finally{busyViewNodes.delete(el);if(el.isConnected)el.disabled=false;if(a==='dismiss-all'&&state.notices)renderNotices();}
 });
 document.addEventListener('submit',async event=>{
-  if(['login-filter','incident-filters','incident-brief-form'].includes(event.target.id)||event.target.matches('.collector-sudo-form'))return;
+  if(['login-filter','incident-filters','incident-brief-form','endpoint-form','call-test-form'].includes(event.target.id)||event.target.matches('.collector-sudo-form'))return;
   event.preventDefault();const form=event.target;if(form.dataset.busy)return;const data=Object.fromEntries(new FormData(form));const submit=$('[type=submit]',form);const restoreForm=busyOnboarding(form);$('.form-error',form).textContent='';
   try{
     if(monitorForms.has(form.id)){await handleMonitorForm(form,data);return;}
@@ -526,10 +527,10 @@ document.addEventListener('keydown',event=>{
   if(event.key==='Escape'){closeOverlay();if(state.mobile)setMobilePanel(false);}
   const dialog=$('[role=alertdialog]')||$('[role=dialog]')||(state.mobile?$('#sidebar'):null);
   if(event.key==='Tab'&&dialog){const items=[...dialog.querySelectorAll('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea,summary,[tabindex="0"]')].filter(el=>el.getClientRects().length&&!el.closest('details:not([open]) nav'));const first=items[0],last=items.at(-1);if(event.shiftKey&&(document.activeElement===first||!dialog.contains(document.activeElement))){event.preventDefault();last?.focus();}else if(!event.shiftKey&&(document.activeElement===last||!dialog.contains(document.activeElement))){event.preventDefault();first?.focus();}}
-  if(event.target.classList.contains('resize-handle')&&['ArrowLeft','ArrowRight'].includes(event.key)){event.preventDefault();resize((parseFloat(document.documentElement.style.getPropertyValue('--sidebar'))||23)+(event.key==='ArrowRight'?1:-1));}
+  if(event.target.classList.contains('resize-handle')&&['ArrowLeft','ArrowRight'].includes(event.key)){event.preventDefault();resize((parseFloat(document.documentElement.style.getPropertyValue('--sidebar'))||260)+(event.key==='ArrowRight'?10:-10));}
 });
-function resize(value){const w=Math.max(18,Math.min(40,Math.max(220/innerWidth*100,value)));document.documentElement.style.setProperty('--sidebar',w+'%');localStorage.setItem('harbour-width',w);$('.resize-handle')?.setAttribute('aria-valuenow',Math.round(w));}
-document.addEventListener('pointerdown',event=>{if(!event.target.classList.contains('resize-handle'))return;event.preventDefault();const el=event.target;el.setPointerCapture(event.pointerId);const move=e=>resize(e.clientX/innerWidth*100);el.addEventListener('pointermove',move);el.addEventListener('pointerup',()=>el.removeEventListener('pointermove',move),{once:true});});
+function resize(value){const w=Math.max(220,Math.min(340,value));document.documentElement.style.setProperty('--sidebar',w+'px');localStorage.setItem('harbour-width',w);$('.resize-handle')?.setAttribute('aria-valuenow',Math.round(w));}
+document.addEventListener('pointerdown',event=>{if(!event.target.classList.contains('resize-handle'))return;event.preventDefault();const el=event.target;el.setPointerCapture(event.pointerId);const move=e=>resize(e.clientX);el.addEventListener('pointermove',move);el.addEventListener('pointerup',()=>el.removeEventListener('pointermove',move),{once:true});});
 async function start(){try{const config=await api('/config');state.demo=config.demo;state.version=config.version;try{state.user=await api('/me');await load(true);}catch{renderLogin();}}catch(err){$('#app').innerHTML=`<div class="empty"><h1>Harbour is unavailable</h1><p>${e(err.message)}</p></div>`;}}
 
 

@@ -10,6 +10,7 @@ COPY requirements.txt .
 COPY --from=iperf-build /usr/local/bin/iperf3 /usr/local/bin/iperf3
 RUN python -m pip install --no-cache-dir --require-hashes -r requirements.txt && python -m pip check && useradd --uid 10001 --create-home harbour && mkdir /data && chown harbour:harbour /data
 COPY harbour ./harbour
+COPY deploy/call-test-endpoint ./harbour/endpoint_deploy
 USER 10001:10001
 EXPOSE 8080
 CMD ["uvicorn", "harbour.app:app", "--host", "0.0.0.0", "--port", "8080", "--no-proxy-headers"]

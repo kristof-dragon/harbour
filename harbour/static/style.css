@@ -1,5 +1,5 @@
 @import url('/static/fonts.css');
-:root{font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.5;color-scheme:dark;--bg:#101519;--panel:#151c21;--card:#192228;--hover:#202c33;--line:#2a363e;--text:#e8eeef;--muted:#91a3ae;--faint:#70838f;--accent:#43d7b6;--accent-bg:#153b34;--red:#fa868a;--red-bg:#43292d;--blue:#84b5fc;--blue-bg:#233650;--amber:#f6c775;--shadow:0 20px 80px #0007;--sidebar:23%;--mono:ui-monospace,SFMono-Regular,Consolas,monospace}
+:root{font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.5;color-scheme:dark;--bg:#101519;--panel:#151c21;--card:#192228;--hover:#202c33;--line:#2a363e;--text:#e8eeef;--muted:#91a3ae;--faint:#70838f;--accent:#43d7b6;--accent-bg:#153b34;--red:#fa868a;--red-bg:#43292d;--blue:#84b5fc;--blue-bg:#233650;--amber:#f6c775;--shadow:0 20px 80px #0007;--sidebar:260px;--mono:ui-monospace,SFMono-Regular,Consolas,monospace}
 
 :root[data-theme=light]{color-scheme:light;--bg:#f3f6f8;--panel:#fff;--card:#fff;--hover:#edf3f5;--line:#dce5e9;--text:#172d38;--muted:#516977;--faint:#6e828d;--accent:#087f68;--accent-bg:#ddf5ed;--red:#b53141;--red-bg:#ffebee;--blue:#255ca8;--blue-bg:#e5efff;--amber:#976109;--shadow:0 20px 80px #233d4826}
 
@@ -38,7 +38,7 @@ h2{font-size:1.15rem;letter-spacing:-.015em;margin-bottom:12px}
 h3{font-size:1rem;margin-bottom:7px}
 p{margin-bottom:12px}
 small{font-size:.86rem}
-.app-shell{display:grid;grid-template-columns:var(--sidebar) 1fr;min-height:100vh}
+.app-shell{display:grid;grid-template-columns:clamp(220px,var(--sidebar),340px) minmax(0,1fr);min-height:100vh}
 .sidebar{background:var(--panel);border-right:1px solid var(--line);position:sticky;top:0;height:100vh;min-width:220px;display:flex;flex-direction:column;z-index:12}
 .brand{display:flex;align-items:center;gap:10px;font-size:1.5rem;font-weight:680;letter-spacing:-.04em;padding:26px 24px}
 .brand img{width:32px;height:32px}
@@ -766,3 +766,16 @@ body.mobile-panel-open{overflow:hidden}
 .incident-brief textarea{width:100%;resize:vertical;font-family:monospace;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .incident-brief-preview[hidden]{display:none}.incident-brief .check{margin:14px 0}
 .incident-brief .check{display:flex;flex-direction:row;align-items:flex-start;gap:8px}.incident-brief .check input{width:auto;flex:none;margin-top:3px}
+
+/* Keep navigation bounded, and place the mobile drawer above its own backdrop. */
+@media(max-width:800px){.sidebar{z-index:20;width:280px;background:var(--panel)}.mobile-sidebar-backdrop{z-index:19}}
+.server-header .host-facts b{overflow-wrap:normal;word-break:normal}
+.server-header .host-facts{grid-template-columns:repeat(auto-fit,minmax(115px,1fr))}
+.tabs{overflow-x:auto;gap:18px}.tabs>button{white-space:nowrap;flex-shrink:0}.tabs .tab-meta{white-space:nowrap}
+.network-heading{gap:12px;flex-wrap:wrap;margin-bottom:12px}.network-heading h2{margin:0}.network-heading>.flex{flex-wrap:wrap}
+.network-status-strip{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px;font-size:12px;color:var(--muted);margin:12px 0}
+.network-notes{margin:12px 0;font-size:12px;color:var(--muted)}.network-notes summary{cursor:pointer}
+.probe-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,530px),1fr));gap:16px;margin:18px 0}
+.probe-card{min-width:0;border:1px solid var(--line);border-radius:10px;background:var(--card);padding:14px}
+.probe-card h3{margin:0}.probe-card .network-table{margin:8px 0 0}.probe-card table{min-width:470px;font-size:12px}.probe-card td,.probe-card th{padding:9px 7px;white-space:nowrap}
+.endpoint-controls{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.remote-log-list{max-height:380px;overflow:auto}.remote-log-list a{display:block;padding:9px 0;border-bottom:1px solid var(--line)}

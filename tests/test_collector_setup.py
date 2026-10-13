@@ -201,11 +201,12 @@ def test_cancel_while_waiting_for_password_releases_host(client, monkeypatch):
     assert not setup.operations and not module.server_lock('atlas').locked()
 
 
-@pytest.mark.parametrize('action', ['push', 'extract', 'install'])
-@pytest.mark.parametrize('kind', ['resources', 'logins'])
+@pytest.mark.parametrize(('kind','action'), [(k,a) for k in ('resources','logins') for a in ('push','extract','install')] + [('call-endpoint','install')])
 def test_full_bootstrap_protocol_in_subprocess(client, tmp_path, monkeypatch, action, kind):
     """Run the exact remote bootstrap and byte protocol; stub only SSH and sudo."""
     monkeypatch.setattr(store, 'DEMO', False)
+    if kind == 'call-endpoint':
+        assert client.put('/api/servers/atlas/call-endpoint', json={'endpoint':'192.0.2.10'}).status_code == 200
     home = tmp_path / 'home'; home.mkdir()
     fake_sudo = tmp_path / 'fixture-sudo'
     fake_sudo.write_text('#!' + sys.executable + '\nimport sys\n'
@@ -270,6 +271,10 @@ def test_full_bootstrap_protocol_in_subprocess(client, tmp_path, monkeypatch, ac
     assert any(event['kind'] == 'progress' for event in events)
     assert 'one-time password' not in str(events)
     if action == 'install': assert 'Fixture service started' in str(events)
+    if kind == 'call-endpoint':
+        assert not (Path(result['directory']) / 'endpoint.json').exists()
+        from harbour import call_endpoint
+        assert call_endpoint.saved('atlas', True)['token'] not in str(events)
 
 
 @pytest.mark.parametrize('disconnect', [False, True])

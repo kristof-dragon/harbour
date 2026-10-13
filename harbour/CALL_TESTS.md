@@ -87,7 +87,7 @@ media retransmission/FEC, DSCP policies and jitter buffers are not reproduced.
 
 1. Keep the normal recorder probes running. Include the router LAN reference,
    remote test endpoint and useful independent destinations among the 12 targets.
-2. In **Network → Call traffic tests → New traffic test**, choose a profile and
+2. In **Call tests → Remote call flow test**, choose a profile and
    supply the remote IP and first port. Check the displayed rates and data volume.
 3. Default timing is 60 seconds idle, 180 seconds under load and 60 seconds
    recovery. Compare RTT, receiver loss/jitter and router CPU, queues and retries
@@ -128,22 +128,80 @@ actual router before adopting the fastest settings permanently.
 
 ## Remote Docker endpoint
 
-Copy [`deploy/call-test-endpoint/`](../deploy/call-test-endpoint/) to your remote
-Linux Docker host and run inside that directory:
+Use the existing **WebUI remote installer** (Harbour 0.1.34+):
 
-```sh
-docker compose up -d --build
+1. Add the remote **Linux** host to Harbour as a Docker or plain server, with its
+   verified SSH connection. Docker Engine and the Compose plugin must already be
+   available; Harbour does not install or upgrade host packages.
+2. On the OpenWrt server, open **Call tests → Deploy remote endpoint** and select
+   that remote host. Set its reachable IP and the first traffic port (default
+   5201; the second is 5202). Choose the log HTTP port, initially a random number
+   between 20000 and 59999. If the remote port is occupied, choose another.
+3. Leave the token blank to generate one securely on first deployment, or supply
+   32–128 URL-safe characters. A blank token on subsequent deployments preserves
+   the saved token. Set retention (30 days by default).
+4. Select **Save & deploy endpoint**. The existing installer streams progress
+   over a separate, pinned SSH connection and asks for sudo only when needed.
+   Its sudo password is never saved. Closing the dialog cancels the setup
+   connection; completed deployment steps and logs remain on the host.
+5. Open **Remote logs** to choose a date and download files. These requests use
+   HTTP with `Authorization: Bearer …`; they do **not** open SSH. Saved endpoint
+   addresses and ports are also available in the call-test form.
+
+The deployment always lives in the SSH user's **`~/harbour-c-remote`**:
+
+```text
+harbour-c-remote/
+  compose.yaml, Dockerfile, build-iperf.sh, call_endpoint_service.py
+  endpoint.json, .env       # protected configuration; token is in endpoint.json
+  previous/                # one protected previous deployment configuration
+  logs/
+    26-10-13/
+      upload-HHMMSS-id.jsonl
+      download-HHMMSS-id.jsonl
+    26-10-14/
+      ...
 ```
 
-This starts two unprivileged iperf3 containers with read-only root filesystems
-and a small temporary RAM filesystem: **5201 for upload** and
-**5202 for download**. Both TCP control and UDP traffic must reach both ports.
-Restrict these published ports to the intended survey sites at the host/cloud
-firewall; the template does not provide authentication. Each listener has a
-10 Mbps server-side limit. This is an abort threshold, not a traffic shaper or a
-substitute for access control. The remote host must have spare bandwidth and CPU;
-its own congestion would become part of the result. Multiple simultaneous sites
-need separate port pairs, because each listener accepts one test at a time.
+Dates use **UTC**, always `YY-MM-DD`. JSONL records have UTC timestamps and
+contain listener lifecycle events plus chunks of iperf's JSON output. The
+original iperf result can span consecutive output records; these are endpoint
+logs, while the test export remains the parsed receiver result. Files rotate at
+3 MiB and date boundaries when output arrives. The next output after midnight
+is written into the new date folder. Completed files expire after the chosen
+retention or when the 1 GiB total cap is reached. Cleanup runs every 30 seconds;
+current writer files and data between cleanup passes can temporarily exceed the
+cap. Existing logs survive container recreation and repeat deployments.
+
+Harbour encrypts the HTTP token in its database and never sends it back in
+settings, test exports or setup progress. The remote configuration and logs use
+owner-only permissions. A custom token can be selected during deployment for
+other HTTP clients; the generated token also remains in the protected remote
+configuration. Read-only Harbour users may download logs; only administrators
+can configure/deploy endpoints. The remote API provides `GET /logs`,
+`GET /logs/YY-MM-DD` and `GET /logs/YY-MM-DD/name.jsonl`, all token protected.
+It has no execution or upload endpoints, rejects symlinks/traversal and bounds
+file size, socket wait time and concurrent connections. Tokens stay in headers,
+never URLs. Plain HTTP requires a trusted LAN or VPN: it does not encrypt the
+bearer token. A random port is not access control.
+
+The bundle starts one unprivileged container containing two iperf3 listeners
+and the HTTP service. It uses a read-only root filesystem, limited memory/PIDs,
+no Linux capabilities and separate persistent log/config mounts. The chosen
+traffic ports must allow **both TCP control and UDP data**; the log port needs
+TCP. Restrict all three published ports to the intended Harbour site using the
+host/cloud firewall. The installer does not change firewall rules. The HTTP
+token protects logs only; iperf itself remains source-restricted. Each listener
+has a 10 Mbps abort limit and rejects tests longer than 330 seconds, following
+[ESnet's documented server options](https://software.es.net/iperf/invoking.html).
+The remote host needs spare CPU/bandwidth, and one endpoint pair serves one site
+at a time. Multiple sites need separate hosts/deployments.
+
+The files in `deploy/call-test-endpoint` are installer templates. The WebUI
+bundle adds the standalone service and installer; copying that template folder
+alone is no longer a complete deployment. A failed update keeps a protected
+`previous/` copy of managed configuration for administrator recovery; it does
+not automatically roll back or erase logs.
 
 Harbour launches separate upload and reverse-download clients, allowing the
 asymmetric app presets. A single `--bidir` test would apply the same configured
@@ -165,7 +223,7 @@ python3 scripts/start.py
 ```
 
 This rebuilds and restarts Harbour, including its iperf3 client. The remote
-endpoint is deployed separately. Start a test from the Network view only after
+endpoint is deployed separately. Start a test from the Call tests tab only after
 that endpoint is reachable; enabling the feature does not start traffic by itself.
 
 ## Useful subsequent extensions
@@ -199,8 +257,33 @@ tested or deployed. Actual-router CPU overhead and real-call correlation remain
 field-validation work.
 
 The subsequent 0.1.32 dependency upgrade pins iperf3 3.22 in both Docker images;
-see [stack versions and compatibility notes](DEPENDENCIES.md). The remote
-deployment directory now also needs `build-iperf.sh` when rebuilding its image.
+see [stack versions and compatibility notes](DEPENDENCIES.md). The WebUI installer includes the shared `build-iperf.sh` in each deployment bundle.
+
+## Validation for the remote installer and layout update (0.1.34)
+
+- Full suite on the pinned Linux Python 3.15 runtime: **480 passed, 1 skipped**
+  (the platform-specific macOS launcher). After the final installer changes,
+  all **37 endpoint, collector setup and call-test tests passed**, including
+  the additional complete SSH bootstrap protocol fixture for this endpoint.
+- OpenWrt browser checks passed at 390, 700, 900, 1200, 1440 and 2600 px:
+  separate views, responsive probe cards, bounded sidebar, undimmed mobile
+  drawer, WebUI deployment form, log date selection and download links.
+  Existing refresh/resource and collector-install browser suites also passed.
+- Both Docker images built. The endpoint was tested as an unprivileged user
+  with a read-only filesystem and external networking disabled. Simultaneous
+  ten-second UDP loads at 128/256 kbps returned receiver measurements in both
+  directions and remote upload intervals. Local dated logs and authenticated
+  HTTP downloads worked; bad tokens and unsafe paths were rejected. This caught
+  and resolved a Docker file-permission issue before publication.
+- Real HTTP tests cover token authentication and Harbour's log proxy; filesystem
+  tests cover UTC rollover, file rotation, retention and symlinks. Installer
+  tests preserve existing logs/configuration and exercise the separate setup
+  connection, sudo secrecy, cancellation and OpenWrt installation refusal.
+- Production Harbour container smoke checks passed for authentication, encrypted
+  credentials, permissions, persistence and non-root/read-only operation.
+
+The remote installer is ready to run from the WebUI. No user-owned remote host,
+router, firewall or real-call path was changed or tested during this update.
 
 ## Reference index
 

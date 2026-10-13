@@ -162,7 +162,7 @@ evidence. After midnight **UTC** it seals one `.jsonl.gz` file per router with d
 the first day can be partial. This happens on the next maintenance sweep, or on
 restart if the recorder was stopped. Pausing recording does not prevent sealing.
 The current `.part` file is not offered as a finished download. Finished files
-appear under **Network → Daily compressed archives** with download links, sizes
+appear under **Archives** with download links, sizes
 and sample counts. Retention applies to finished files; the growing current file
 is additional to the archive size cap.
 
@@ -210,7 +210,7 @@ local evidence and are excluded from Git by the repository's ignore rules.
 
 ## Incident reports and pattern analysis
 
-Open **Network → Incidents → Analyse** for an individual incident, or **Explore
+Open **Incidents → Analyse** for an individual incident, or **Explore
 incident patterns** to compare incidents. Viewer accounts can use both views and
 download the original evidence, individual analysis JSON and pattern summaries.
 Analysis runs on the Harbour server when requested; it does not contact an AI
@@ -312,7 +312,7 @@ frequency here cannot establish that a symptom is unique to incidents.
 
 ### Condensed evidence briefs (0.1.31)
 
-In **Network → Incidents → Analyse**, expand **Export condensed evidence brief**.
+In **Incidents → Analyse**, expand **Export condensed evidence brief**.
 Choose **Markdown** for a readable conclusion/evidence table or **JSON** for
 structured ingestion, and 1, 3 (default) or 6 supporting examples per conclusion.
 Generate a preview, then copy or download its exact contents. Clipboard access

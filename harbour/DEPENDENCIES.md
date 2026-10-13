@@ -44,8 +44,10 @@ review time. Installation enforces hashes and checks dependency compatibility.
 - **Traffic endpoint:** the two images build the same checksum-verified iperf3
   source using [the shared build script](../deploy/call-test-endpoint/build-iperf.sh).
   Only the executable enters the final image. Its optional OpenSSL/RSA
-  authentication is disabled; the existing template uses source-restricted
-  firewall access and has no authentication settings. TCP and UDP 5201/5202
+  authentication is disabled; traffic listeners require source-restricted
+  firewall access. In 0.1.34 the separate HTTP log service adds token authentication;
+  this does not authenticate iperf traffic. The endpoint container now also uses
+  the same pinned Python base as Harbour. TCP and UDP 5201/5202
   remain the defaults. See [the endpoint deployment guide](CALL_TESTS.md).
 - **Host tooling:** Docker Engine/Compose and the host Python that runs
   `scripts/start.py` are supplied by the administrator. This release does not
@@ -69,8 +71,9 @@ git pull --ff-only
 python3 scripts/start.py
 ```
 
-Rebuild the remote endpoint separately with `docker compose up -d --build` in
-its deployment directory, including the new `build-iperf.sh` file.
+Deploy or update the remote endpoint through **Call tests → Deploy remote
+endpoint** in the WebUI. It includes the shared build script, service, pinned
+image and protected configuration in `~/harbour-c-remote`.
 
 For a dependency update, check official stable releases and edit
 `requirements.in` / `requirements-dev.in`, then run:

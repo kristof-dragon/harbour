@@ -1,25 +1,31 @@
+# Prepared and configured by Harbour's WebUI remote installer.
 services:
-  upload:
+  endpoint:
     build: .
-    command: ["-s", "-p", "5201", "-J", "--server-bitrate-limit", "10M"]
+    user: "${REMOTE_UID:-10001}:${REMOTE_GID:-10001}"
     ports:
-      - "5201:5201/tcp"
-      - "5201:5201/udp"
+      - "${TRAFFIC_PORT:-5201}:5201/tcp"
+      - "${TRAFFIC_PORT:-5201}:5201/udp"
+      - "${DOWNLOAD_PORT:-5202}:5202/tcp"
+      - "${DOWNLOAD_PORT:-5202}:5202/udp"
+      - "${LOG_PORT:?Set a log HTTP port}:8080/tcp"
+    volumes:
+      - ./logs:/logs
+      - ./endpoint.json:/run/endpoint.json:ro
     restart: unless-stopped
     init: true
     read_only: true
     tmpfs: ["/tmp:size=8m,noexec,nosuid"]
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-  download:
-    build: .
-    command: ["-s", "-p", "5202", "-J", "--server-bitrate-limit", "10M"]
-    ports:
-      - "5202:5202/tcp"
-      - "5202:5202/udp"
-    restart: unless-stopped
-    init: true
-    read_only: true
-    tmpfs: ["/tmp:size=8m,noexec,nosuid"]
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; c=json.load(open('/run/endpoint.json')); r=urllib.request.Request('http://127.0.0.1:8080/health',headers={'Authorization':'Bearer '+c['token']}); urllib.request.urlopen(r,timeout=3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

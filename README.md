@@ -32,7 +32,7 @@ records 250 ms–2 s ICMP probes alongside approximately one-second router CPU,
 interface, Wi-Fi and queue readings. Open **Network → Recording settings** to
 enable recording, choose targets/WAN interface and follow a calling device.
 Mark call degradation/recovery and export the surrounding raw evidence. Use
-**Network → Incidents → Analyse** for a readable evidence report, or **Explore
+**Incidents → Analyse** for a readable evidence report, or **Explore
 incident patterns** to compare retained incidents and download structured results.
 Analysis runs locally and separates observations, possible contributors and
 missing evidence; it does not claim a proven cause. **Export condensed evidence brief**
@@ -45,14 +45,19 @@ backlog/loss reporting and acknowledged writes. Linux receive timestamps separat
 late collection from network latency; uncertain readings remain labelled evidence.
 Retention is configurable per router. Defaults keep seven days / 1 GiB of raw
 history and automatically save compressed daily files for 90 days / 4 GiB on the
-on-site server. Download finished files from the Network view; row and size caps
+on-site server. Download finished files from the Archives tab; row and size caps
 can be disabled in Recording settings.
-Up to 12 IP probe targets are supported. Optional **Call traffic tests** apply
+Up to 12 IP probe targets are supported. Optional **Remote call flow tests** apply
 bounded, simultaneous UDP upload/download loads using FaceTime (provisional),
 Teams and Zoom profiles. They retain receiver loss/jitter evidence and mark the
 router timeline. See [the research, profile limits and remote Docker endpoint
 setup](harbour/CALL_TESTS.md). Tests run on the Harbour host and do not reproduce
 the caller’s Wi-Fi or a real vendor call.
+The **Call tests** tab includes the WebUI remote installer: deploy to
+`~/harbour-c-remote`, retain remote logs in `logs/YY-MM-DD` (UTC), and download
+them over token-authenticated HTTP without SSH. The log port and token are set
+during deployment. Network, Wireless, Incidents, Call tests, Archives and
+Activity have separate tabs; Recorder and Router probe cards adapt to the screen.
 See [OpenWRT deployment, measurement limits and retention](harbour/OPENWRT.md).
 
 Harbour's container uses Python 3.15.0 with exact image references and hashed

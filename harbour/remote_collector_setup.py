@@ -149,18 +149,33 @@ def main():
     config = json.loads(stream.readline(65536))
     archive, folder = receive(config, stream)
     if folder:
+        if config['kind'] == 'call-endpoint':
+            if sys.platform != 'linux':
+                raise RuntimeError('The remote call endpoint requires a Linux Docker host')
+            target = folder / 'endpoint.json'
+            target.write_text(json.dumps(config['endpoint']))
+            target.chmod(0o600)
         command = [sys.executable, '-I', '-S', '-u', str(folder / config['installer']), '--reader', config['reader']]
         if config['kind'] == 'resources':
             command += ['--interval', str(config['interval'])]
         output('Install command: ' + shlex.join(['sudo', *command]) + '\n')
         if config['action'] == 'install':
             output('Installing the boot service…\n')
-            code = run_installer(command, stream)
+            try:
+                code = run_installer(command, stream)
+            finally:
+                if config['kind'] == 'call-endpoint':
+                    (folder / 'endpoint.json').unlink(missing_ok=True)
             if code:
                 emit('result', ok=False, message='Installer exited with status ' + str(code) + '. Review the output before retrying.')
                 return
-    emit('result', ok=True, message={'push': 'Bundle uploaded.', 'extract': 'Bundle uploaded and extracted.',
-                                   'install': 'Collector installed. Harbour will discover it on the next resource check.'}[config['action']],
+    message = ('Remote call endpoint installed in ~/harbour-c-remote. Logs are available over HTTP.'
+               if config['kind'] == 'call-endpoint' and config['action'] == 'install' else
+               {'push': 'Bundle uploaded.', 'extract': 'Bundle uploaded and extracted.',
+                'install': 'Collector installed. Harbour will discover it on the next resource check.'}[config['action']])
+    if config['kind'] == 'call-endpoint':
+        (folder / 'endpoint.json').unlink(missing_ok=True)
+    emit('result', ok=True, message=message,
          archive=str(archive), directory=str(folder) if folder else None)
 
 
