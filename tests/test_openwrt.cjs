@@ -273,7 +273,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
    await page.setViewportSize({width,height:1000});
    await page.locator('[data-tab=network]').click();
    const sizes=await page.evaluate(()=>({sidebar:document.querySelector('.sidebar').getBoundingClientRect().width,left:document.querySelector('.workspace').getBoundingClientRect().left,overflow:document.documentElement.scrollWidth>innerWidth}));
-   assert(sizes.sidebar>=220&&sizes.sidebar<=340);assert(sizes.left>=sizes.sidebar-1);assert.equal(sizes.overflow,false);
+   assert(sizes.sidebar>=280&&sizes.sidebar<=408);assert(sizes.left>=sizes.sidebar-1);assert.equal(sizes.overflow,false);
    if(width===2600){const cards=await page.locator('.probe-card').evaluateAll(es=>es.map(e=>e.getBoundingClientRect().top));assert.equal(cards[0],cards[1]);await page.screenshot({path:'test-results/openwrt-wide.png'});}
   }
   // The mobile backdrop must not dim or intercept the drawer at 700px.
