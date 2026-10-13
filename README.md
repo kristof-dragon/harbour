@@ -62,7 +62,10 @@ output stays visible until you close it or continue. **Download output** saves t
 transcript; **Saved installs** (also in the main Menu) retains administrator-only
 Install artifacts on Harbour indefinitely, including failed and interrupted
 attempts, with credentials excluded. Tests support
-up to 60 minutes and recurring profile schedules. Analysis correlates local and
+up to 60 minutes and multiple named recurring schedules, with **Edit**, **Start
+now**, **Pause / Resume** and per-schedule result history. Running tests show
+directional throughput, loss and jitter with in-place updates every five seconds.
+Redeploy older endpoints for live upload receiver readings. Analysis correlates local and
 remote evidence, with a combined compressed download. Network, Wireless, Incidents, Call tests, Archives and
 Activity have separate tabs; Recorder and Router probe cards adapt to the screen.
 See [OpenWRT deployment, measurement limits and retention](harbour/OPENWRT.md).

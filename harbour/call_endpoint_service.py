@@ -28,6 +28,24 @@ class Logs:
         self.root, self.days, self.max_bytes = Path(root), days, max_bytes
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.lock, self.files = threading.RLock(), {}
+        self.live = {}
+
+    def observe(self, direction, event):
+        data = event.get('data', {})
+        with self.lock:
+            if event.get('event') == 'start':
+                self.live[direction] = {'cookie': data.get('cookie')}
+            elif event.get('event') == 'interval' and isinstance(data.get('sum'), dict):
+                row = data['sum']
+                if not row.get('omitted'):
+                    self.live[direction] = {**row, 'cookie': self.live.get(direction, {}).get('cookie'),
+                                            'measured_monotonic': time.monotonic()}
+
+    def live_readings(self):
+        with self.lock:
+            return {direction: {**{k: v for k, v in row.items() if k != 'measured_monotonic'},
+                                'age_seconds': time.monotonic() - row['measured_monotonic']}
+                    for direction, row in self.live.items() if 'measured_monotonic' in row}
 
     def append(self, source, event, now=None):
         now = now or dt.datetime.now(dt.timezone.utc)
@@ -171,7 +189,12 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/status':
                 body = json.dumps({'protocol': 1, 'endpoint_id': self.server.endpoint_id,
                                    'boot_id': self.server.boot_id, 'ready': self.server.ready(),
-                                   'wall_time': time.time(), 'monotonic': time.monotonic(), 'max_duration': 3600}).encode()
+                                   'wall_time': time.time(), 'monotonic': time.monotonic(), 'max_duration': 3600,
+                                   'live_metrics': True}).encode()
+                mime = 'application/json'
+            elif self.path == '/live':
+                body = json.dumps({'endpoint_id': self.server.endpoint_id, 'boot_id': self.server.boot_id,
+                                   'directions': self.server.logs.live_readings()}, allow_nan=False).encode()
                 mime = 'application/json'
             elif self.path.startswith('/runs/'):
                 body, mime = self.server.logs.run(self.path[6:])
@@ -257,7 +280,7 @@ def main():
     signal.signal(signal.SIGTERM, halt); signal.signal(signal.SIGINT, halt)
     def listen(name, port):
         while not stop.is_set():
-            command = ['iperf3', '-s', '-p', str(port), '-J', '--forceflush', '--server-bitrate-limit', '10M',
+            command = ['iperf3', '-s', '-p', str(port), '-J', '--json-stream', '--json-stream-full-output', '--forceflush', '--server-bitrate-limit', '10M',
                        '--server-max-duration', '3630', '--rcv-timeout', '15000']
             try:
                 child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -283,7 +306,10 @@ def main():
                             break
                         pending = pending.lstrip()[end:]
                         if isinstance(data, dict):
-                            logs.result(name, data, boot_id)
+                            if 'event' in data:
+                                logs.observe(name, data)
+                            else:
+                                logs.result(name, data, boot_id)
                 logs.append(name, {'event': 'exit', 'code': child.wait()})
             except Exception:
                 stop.set()

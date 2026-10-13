@@ -107,24 +107,24 @@ def configure(id_: str, body: Settings, user=Depends(auth.admin)):
         lock.release()
 
 
-def fetch(id_, path):
+def fetch(id_, path, limit=LIMIT, timeout=5):
     config = saved(id_, True)
-    conn = http.client.HTTPConnection(config['endpoint'], config['http_port'], timeout=5)
+    conn = http.client.HTTPConnection(config['endpoint'], config['http_port'], timeout=timeout)
     try:
         conn.request('GET', path, headers={'Authorization': 'Bearer ' + config['token']})
         response = conn.getresponse()
         if response.status != 200:
             raise HTTPException(502, 'Remote logs returned HTTP ' + str(response.status))
         data = bytearray()
-        deadline = time.monotonic() + 15
-        while len(data) <= LIMIT:
+        deadline = time.monotonic() + min(15, timeout * 3)
+        while len(data) <= limit:
             if time.monotonic() > deadline:
                 raise HTTPException(504, 'Remote log request timed out')
-            chunk = response.read1(min(65536, LIMIT + 1 - len(data)))
+            chunk = response.read1(min(65536, limit + 1 - len(data)))
             if not chunk:
                 return bytes(data)
             data.extend(chunk)
-        raise HTTPException(502, 'Remote log response exceeded 32 MiB')
+        raise HTTPException(502, 'Remote log response exceeded its size limit')
     except (OSError, http.client.HTTPException):
         raise HTTPException(502, 'Cannot reach the remote log service. Check its port, token and firewall.') from None
     finally:

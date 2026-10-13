@@ -84,7 +84,12 @@ async function load(initial=false){
     const next=await api('/dashboard');
     if(sequence!==dashboardSequence||state.user!==user||state.dragging)return;
     updateText($('#connection-status'),state.demo?'Demo workspace':'Background monitoring active');
-    if(!initial&&JSON.stringify(next)===JSON.stringify(state.data)){if(state.tab==='logins'&&current())loadLogins(current());return;}
+    if(!initial&&JSON.stringify(next)===JSON.stringify(state.data)){
+      const server=current();
+      if(state.tab==='logins'&&server)loadLogins(server);
+      if(state.tab==='calls'&&server?.server_type==='openwrt')refreshCallTests(server);
+      return;
+    }
     state.data=next;
     if(!current()){state.server=state.data.servers[0]?.id;state.selected.clear();}
     for(const job of state.data.jobs){

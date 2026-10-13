@@ -49,6 +49,7 @@ function networkChart(label,unit,series,start,end){
 }
 function renderNetwork(s,section=['network','wireless','incidents','calls','archives'].includes(state.tab)?state.tab:'network'){
   const v=networkView(s),d=v.data,r=v.readings,settings=d?.settings;
+  if(section==='calls')return `<section class="network-view" data-key="calls:${e(s.id)}">${renderCallTests(s,d)}</section>`;
   const controls=admin()?`${button('network-settings','Recording settings','settings','small')}${button('network-degrade','Mark degradation','warning','small','data-label="Call degradation"')}${button('network-recover','Mark recovery','check','small','data-label="Call recovery"')}`:'';
   if(!d)return `<section class="network-view" data-key="network:${e(s.id)}"><div class="between"><h2>Network diagnostics</h2>${controls}</div><p>${e(v.error||'Loading read-only diagnostics…')}</p></section>`;
   const rows=r?.samples||[],telemetry=rows.filter(x=>x.kind==='telemetry'),latest=telemetry.at(-1)?.metrics,device=latest?.openwrt||d.device;
@@ -112,6 +113,7 @@ function renderNetwork(s,section=['network','wireless','incidents','calls','arch
 }
 
 async function loadNetwork(s,force=false){
+  if(current()?.id===s.id&&state.tab==='calls')return refreshCallTests(s,force);
   const v=networkView(s);if(v.busy||(!force&&Date.now()-v.loaded<2000))return;
   v.busy=true;
   try{const [data,readings]=await Promise.all([api(`/servers/${s.id}/network`),api(`/servers/${s.id}/network/samples`)]);v.data=data;v.readings=readings;v.loaded=Date.now();v.error=null;}

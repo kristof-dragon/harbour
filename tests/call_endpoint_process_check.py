@@ -42,13 +42,22 @@ try:
         if direction=='upload':assert len(data['server_output_json']['intervals'])>=9
         return direction,data
     with concurrent.futures.ThreadPoolExecutor(2) as pool:
-        results=list(pool.map(lambda args:run(*args),[('upload','128K',5201),('download','256K',5202)]))
+        futures=[pool.submit(run,*args) for args in [('upload','128K',5201),('download','256K',5202)]]
+        time.sleep(3)
+        live=json.loads(fetch('/live'))
+        assert status['live_metrics'] is True and live['endpoint_id']==config['endpoint_id']
+        assert live['directions']['upload']['sender'] is False
+        assert live['directions']['upload']['packets']>0
+        assert live['directions']['upload']['age_seconds']<3
+        assert not any(f.done() for f in futures),'Live readings arrived only after completion'
+        results=[f.result() for f in futures]
     time.sleep(.2)
     remote=json.loads(fetch('/runs/'+test_id))['records'];assert len(remote)==2,remote
     for direction,local in results:
         record=next(r for r in remote if r['direction']==direction)
         assert record['raw']['extra_data']==local['extra_data']
         assert record['raw']['start']['cookie']==local['start']['cookie']
+        assert live['directions'][direction]['cookie']==local['start']['cookie']
     # Negotiate a full-hour run and stop it early; this verifies the deployed
     # server limit without manufacturing an hour of network observations.
     long_run=subprocess.Popen(['iperf3','-c','127.0.0.1','-p','5201','-u','-b','64K','-t','3600','-i','1','-J'],stdout=subprocess.PIPE,stderr=subprocess.PIPE)

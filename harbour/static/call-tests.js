@@ -1,46 +1,75 @@
 'use strict';
 
-function renderCallTests(s,d){
-  const data=d.call_tests;if(!data)return '';
-  const tests=data.tests||[],running=tests.find(t=>t.status==='running');
-  const metric=(t,direction,key,digits=2)=>networkNumber(t.result?.directions?.[direction]?.summary?.[key],digits);
-  return `<section class="call-tests"><div class="between"><h3>Remote call flow tests</h3>${admin()?button('call-test-configure','Remote call flow test','activity','small',`data-server="${e(s.id)}" ${running?'disabled':''}`):''}</div>
-    <div class="endpoint-controls">${admin()?button('endpoint-setup','Deploy remote endpoint','','small')+button('install-artifacts','Saved installs','','small'): ''}${button('endpoint-logs','Remote logs','download','small')}${admin()?button('call-schedule','Schedule','','small'):''}</div>${data.schedule?`<p class="hint"><b>Recurring:</b> ${e(data.schedule.config.profile_snapshot?.name||data.profiles.find(p=>p.id===data.schedule.config.profile)?.name||data.schedule.config.profile)} · every ${data.schedule.interval_seconds/60} minutes · ${data.schedule.config.duration/60} minute load · ${data.schedule.enabled?'next '+e(new Date(data.schedule.next_run*1000).toLocaleString()):'paused'} ${admin()?button('call-schedule-remove','Remove schedule','','small'):''}<br>${e(data.schedule.last_outcome||'Awaiting first run')}</p>`:''}<details class="network-notes"><summary>What this test measures</summary><p class="hint">Controlled UDP loads for FaceTime, Teams and Zoom. Runs from the on-site Harbour host to your test endpoint. A wired host tests its LAN/WAN path, not the caller’s Wi-Fi. These are traffic approximations, not real calls or video-quality scores.</p>
-    </details>${!data.available?'<p class="hint">iperf3 is not installed on the Harbour host. Rebuild the container or install it for a native deployment.</p>':''}
-    ${running?`<p role="status"><b>${e(running.config.profile_snapshot.name)}</b> · ${e(running.phase)} · ${Math.max(0,Math.floor(Date.now()/1000-running.created))} s elapsed ${admin()?button('call-test-stop','Stop test','','small',`data-server="${e(s.id)}" data-test="${e(running.id)}"`):''}</p>`:''}
-    <p class="hint">Latest 20 tests · receiver loss and jitter · fixed-rate UDP approximation</p>
-    <div class="network-table"><table><thead><tr><th>Test</th><th>Status</th><th>Upload loss / jitter</th><th>Download loss / jitter</th><th>Evidence</th></tr></thead><tbody>${tests.map(t=>`<tr><td>${e(t.config.profile_snapshot.name)}<br><small>${t.config.source==='schedule'?'Scheduled · ':''}${e(new Date(t.created*1000).toLocaleString())} · ${t.config.upload_kbps/1000} ↑ / ${t.config.download_kbps/1000} ↓ Mbps</small></td><td>${e(t.status==='running'?t.phase:t.status)}${t.error?`<br><small>${e(t.error)}</small>`:''}</td><td>${metric(t,'upload','lost_percent')}% / ${metric(t,'upload','jitter_ms')} ms</td><td>${metric(t,'download','lost_percent')}% / ${metric(t,'download','jitter_ms')} ms</td><td>${button('call-analysis','Analysis','','small',`data-server="${e(s.id)}" data-test="${e(t.id)}"`)} <a href="/api/servers/${encodeURIComponent(s.id)}/network/call-tests/${encodeURIComponent(t.id)}/export">Download evidence (.gz)</a>${t.event_id?` ${button('incident-open','Router evidence','','small',`data-server="${e(s.id)}" data-event="${e(t.event_id)}"`)}`:''}</td></tr>`).join('')||'<tr><td colspan="5">No traffic tests yet. Start one after preparing your remote endpoint.</td></tr>'}</tbody></table></div></section>`;
+function callTestState(s){const v=networkView(s);v.callFilter??='';return v;}
+function callTestContent(s,data){
+  const v=callTestState(s),tests=data?.tests||[],schedules=data?.schedules||[],running=data?.running||tests.find(t=>t.status==='running');
+  const when=value=>value?new Date(value*1000).toLocaleString():'—';
+  const controls=(row)=>admin()?`${button('call-schedule-edit','Edit','','small',`data-id="${e(row.id)}"`)}${button('call-schedule-start','Start now','','small',`data-id="${e(row.id)}" ${running?'disabled':''}`)}${button('call-schedule-toggle',row.enabled?'Pause':'Resume','','small',`data-id="${e(row.id)}"`)}${button('call-schedule-remove','Remove','','ghost small',`data-id="${e(row.id)}"`)}`:'';
+  const liveRow=direction=>{
+    const final=running?.result?.directions?.[direction]?.summary;
+    const sample=running?.live?.[direction==='upload'?'upload_receiver':'download'];
+    const sender=direction==='upload'?running?.live?.upload:null;
+    const stale=sample?.stale??(sample?.observed_at&&Date.now()/1000-sample.observed_at>10);
+    const available=Boolean(sample)&&!stale&&sample.sender===false;
+    const senderFresh=sender&&!(sender.stale??(!sender.observed_at||Date.now()/1000-sender.observed_at>10));
+    const values=final||(available?sample:null),rate=values?.bits_per_second??(senderFresh?sender.bits_per_second:null);
+    const note=final?'Final receiver summary':stale?'Readings stale':available?'Latest receiver interval':direction==='upload'&&running&&!running.config.remote_live?'Redeploy endpoint for live upload loss/jitter':running?.phase==='loading'?'Waiting for receiver readings':'Waiting for load';
+    return `<article class="probe-card" data-key="live-${direction}"><h4>${direction==='upload'?'Upload':'Download'}</h4><div class="call-live-values"><span>Throughput <b data-key="bitrate">${networkNumber(rate==null?null:rate/1e6,2)} Mbps</b></span><span>Loss <b data-key="loss">${networkNumber(values?.lost_percent,2)}%</b></span><span>Jitter <b data-key="jitter">${networkNumber(values?.jitter_ms,2)} ms</b></span></div><small data-key="live-note">${e(note)}${!values&&senderFresh?' · rate measured at sender':''}</small></article>`;
+  };
+  return `<div class="between" data-key="call-actions"><h3>Remote call flow tests</h3>${admin()?button('call-test-configure','Remote call flow test','activity','small',`data-server="${e(s.id)}" ${running?'disabled':''}`):''}</div>
+    <div class="endpoint-controls" data-key="endpoint-actions">${admin()?button('endpoint-setup','Deploy remote endpoint','','small')+button('install-artifacts','Saved installs','','small'):''}${button('endpoint-logs','Remote logs','download','small')}${admin()?button('call-schedule','Add recurring test','','small'):''}</div>
+    <p class="form-error" data-key="call-error" role="status">${e(v.callError||'')}</p>
+    <section class="call-live" data-key="call-live" ${running?'':'hidden'}><div class="between"><h3>Running · <span data-key="live-profile">${e(running?.config.profile_snapshot?.name||'')}</span></h3>${admin()?button('call-test-stop','Stop test','','small',`data-server="${e(s.id)}" data-test="${e(running?.id||'')}"`):''}</div><p data-key="live-phase">${e(running?.phase||'')} · ${running?Math.max(0,Math.floor(Date.now()/1000-running.created)):0} seconds elapsed · updates every 5 seconds</p><div class="probe-cards">${liveRow('upload')}${liveRow('download')}</div><p class="hint" data-key="live-warning">${e(running?.live?.remote_error||'Receiver loss and jitter are provisional until the test finishes.')}</p></section>
+    <section data-key="schedules"><h3>Recurring tests</h3><div class="network-table"><table class="call-schedules"><thead><tr><th>Name / profile</th><th>Timing</th><th>Last run</th><th>Controls</th></tr></thead><tbody>${schedules.map(row=>`<tr data-key="schedule:${e(row.id)}"><td><b>${e(row.name)}</b><br>${e(data.profiles.find(p=>p.id===row.config.profile)?.name||row.config.profile)}</td><td>${row.config.duration/60} minute load · every ${row.interval_seconds/60} minutes<br>${row.enabled?'Next: '+e(when(row.next_run)):'Paused'}</td><td>${e(row.last_status||'Not run yet')}<br><small>${e(row.last_outcome||'')} · ${e(when(row.last_run))}</small></td><td><div class="collector-actions">${controls(row)}${button('call-schedule-results','Results','','small',`data-id="${e(row.id)}"`)}</div></td></tr>`).join('')||'<tr data-key="no-schedules"><td colspan="4">No recurring tests.</td></tr>'}</tbody></table></div></section>
+    <section data-key="call-history"><div class="between"><h3>Test results</h3><label>Results for<select id="call-results-filter"><option value="">All tests</option>${schedules.map(row=>`<option value="${e(row.id)}" ${v.callFilter===row.id?'selected':''}>${e(row.name)}</option>`).join('')}${v.callFilter&&!schedules.some(r=>r.id===v.callFilter)?`<option value="${e(v.callFilter)}" selected>Removed recurring test</option>`:''}</select></label></div><p class="hint">Latest 20 runs retained per recurring test, plus 20 one-off tests. Up to 50 shown here; choose a recurring test for its history.</p><div class="network-table"><table class="call-results"><thead><tr><th>Test</th><th>Status</th><th>Upload loss / jitter</th><th>Download loss / jitter</th><th>Results</th></tr></thead><tbody>${tests.map(t=>`<tr data-key="test:${e(t.id)}"><td>${e(t.config.profile_snapshot?.name||t.config.profile)}<br><small>${e(t.config.schedule_name||'One-off test')} · ${e(when(t.created))}</small></td><td>${e(t.status==='running'?t.phase:t.status)}${t.error?`<br><small>${e(t.error)}</small>`:''}</td>${['upload','download'].map(d=>`<td data-key="result:${d}">${networkNumber(t.result?.directions?.[d]?.summary?.lost_percent,2)}% / ${networkNumber(t.result?.directions?.[d]?.summary?.jitter_ms,2)} ms</td>`).join('')}<td>${button('call-analysis','Analysis','','small',`data-server="${e(s.id)}" data-test="${e(t.id)}" ${t.status==='running'?'disabled':''}`)}${t.status!=='running'?` <a href="/api/servers/${encodeURIComponent(s.id)}/network/call-tests/${encodeURIComponent(t.id)}/export">Download evidence (.gz)</a>`:''}</td></tr>`).join('')||'<tr data-key="no-tests"><td colspan="5">No test results yet.</td></tr>'}</tbody></table></div></section>
+    <details class="network-notes" data-key="call-notes"><summary>What this test measures</summary><p class="hint">Fixed-rate UDP approximations for FaceTime, Teams and Zoom, from Harbour to your endpoint. These are not real calls or video-quality scores. One test runs at a time; due schedules wait their turn, without replaying every missed interval.</p></details>${data&&!data.available?'<p class="hint" data-key="iperf-missing">Install iperf3 on Harbour or rebuild its container to run tests.</p>':''}`;
+}
+function renderCallTests(s,d){return `<section class="call-tests" data-server="${e(s.id)}" data-key="call-tests:${e(s.id)}" data-preserve-children>${callTestContent(s,callTestState(s).callData||d?.call_tests)}</section>`;}
+async function refreshCallTests(s,force=false){
+  const v=callTestState(s);
+  if(v.callPending){await v.callPending;if(force)return refreshCallTests(s);return;}
+  const filter=v.callFilter;
+  v.callPending=(async()=>{
+    try{
+      const data=await api(`/servers/${encodeURIComponent(s.id)}/network/call-tests/live`+(filter?'?schedule_id='+encodeURIComponent(filter):''));
+      if(v.callFilter!==filter)return;
+      v.callData=data;v.callLoaded=Date.now();v.callError=null;
+    }catch(error){if(v.callFilter===filter){v.callError='Live updates unavailable: '+error.message;v.callLoaded=Date.now();}}
+    finally{
+      v.callPending=null;
+      const root=$('.call-tests');
+      if(current()?.id===s.id&&root?.dataset.server===s.id)updateHTML(root,callTestContent(s,v.callData));
+    }
+  })();
+  await v.callPending;
+  if(v.callFilter!==filter&&current()?.id===s.id)await refreshCallTests(s,true);
 }
 
-async function callTestForm(s,mode='manual'){
-  await loadNetwork(s,true);
-  const data=networkView(s).data?.call_tests;if(!data)return;
+async function callTestForm(s,mode='manual',scheduleId=''){
+  await refreshCallTests(s,true);
+  const data=callTestState(s).callData;if(!data)return;
+  const saved=data.schedules.find(row=>row.id===scheduleId);
   const endpoints=(await api('/call-endpoints')).endpoints.filter(x=>x.deployed);
   if(!endpoints.length){await endpointSetup(s);return;}
-  const previous=mode==='schedule'?data.schedule?.config:data.tests?.[0]?.config;
+  const previous=saved?.config||(mode==='manual'?data.tests?.[0]?.config:null);
   const profiles=data.profiles,last={...previous,...(endpoints.find(x=>x.id===previous?.endpoint_id)||endpoints[0])},selected=profiles.find(p=>p.id===last.profile)||profiles[0];
-  const options=(values,value)=>values.map(v=>`<option value="${v}" ${v===value?'selected':''}>${v} seconds</option>`).join('');
-  modal('Remote call flow test',`<form id="call-test-form" data-server="${e(s.id)}">
-    <p>Generate a controlled load from this Harbour installation to a remote endpoint you operate. Probes and router monitoring continue throughout the test.</p>
-    ${endpoints.length?`<label>Remote endpoint<select name="saved_endpoint">${endpoints.map(x=>`<option value="${e(x.id)}" ${x.endpoint===last.endpoint?'selected':''}>${e(state.data.servers.find(s=>s.id===x.id)?.name||x.endpoint)} · ${e(x.endpoint)}</option>`).join('')}</select></label>`:''}
-    <label>Call profile<select name="profile">${profiles.map(p=>`<option value="${e(p.id)}" ${p.id===selected.id?'selected':''}>${e(p.name)}</option>`).join('')}</select></label>
-    <p class="hint" id="call-profile-note"></p>
-    <div class="form-grid"><label>Remote endpoint IP<input name="endpoint" readonly value="${e(last.endpoint||'')}" placeholder="IPv4 or IPv6 address" required></label>
-    <label>First endpoint port<input name="port" readonly type="number" min="1024" max="65534" value="${last.port||5201}" required></label>
-    <label>Upload load (kbps)<input name="upload_kbps" type="number" min="64" max="8000" value="${last.upload_kbps??selected.upload_kbps}" required></label>
-    <label>Download load (kbps)<input name="download_kbps" type="number" min="64" max="8000" value="${last.download_kbps??selected.download_kbps}" required></label>
-    <label>Load duration (seconds, up to 60 minutes)<input name="duration" type="number" min="10" max="3600" value="${last.duration||180}" list="call-durations" required><datalist id="call-durations"><option value="300">5 minutes</option><option value="900">15 minutes</option><option value="1800">30 minutes</option><option value="3600">60 minutes</option></datalist></label>
-    <label>Quiet time before and after<select name="quiet">${options([0,30,60,120],last.baseline??60)}</select></label></div>
-    <details><summary>Packet size</summary><label>UDP payload bytes<input name="packet_bytes" type="number" min="128" max="1400" value="${last.packet_bytes||1200}" required></label><p class="hint">1200 bytes is Harbour’s common test setting, not a published packet size for these apps. Traffic is paced at a fixed rate; video frame bursts, separate audio, codec adaptation and QoS markings are not reproduced.</p></details>
-    <div class="form-grid"><label>Run mode<select name="run_mode"><option value="manual" ${mode==='manual'?'selected':''}>Run once now</option><option value="schedule" ${mode==='schedule'?'selected':''}>Repeat on schedule</option></select></label><label id="call-repeat-interval" ${mode==='schedule'?'':'hidden'}>Start every (minutes)<input name="interval_minutes" type="number" min="1" max="10080" value="${data.schedule?.interval_seconds/60||120}"></label></div>
-    <p id="call-test-estimate" class="hint"></p>
-    <p class="hint">The endpoint needs two iperf3 servers on consecutive ports (default 5201 and 5202), with TCP and UDP available. They support simultaneous, independent upload and download rates. Add this endpoint to the IP probe targets to measure its RTT during the load.</p>
-    <p class="hint">Tests stop automatically. Closing this dialog or browser leaves the test running; Stop test, pausing monitoring, changing the router connection or restarting Harbour ends it. One traffic test can run at a time.</p>
-    <div class="form-error" role="alert"></div><div class="form-actions"><button type="submit" class="primary" ${!data.available?'disabled':''}>${mode==='schedule'?'Save schedule':'Start traffic test'}</button></div></form>`);
+  const localDate=value=>{const d=new Date(value*1000);return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);};
+  const first=saved?.next_run?localDate(saved.next_run):'';
+  modal(saved?'Edit recurring test':'Remote call flow test',`<form id="call-test-form" data-server="${e(s.id)}" data-schedule="${e(scheduleId)}" data-first-run="${e(first)}">
+    <div class="form-grid"><label>Remote endpoint<select name="saved_endpoint">${endpoints.map(x=>`<option value="${e(x.id)}" ${x.endpoint===last.endpoint?'selected':''}>${e(x.endpoint)}</option>`).join('')}</select></label>
+    <label>Call profile<select name="profile">${profiles.map(p=>`<option value="${e(p.id)}" ${p.id===selected.id?'selected':''}>${e(p.name)}</option>`).join('')}</select></label></div>
+    <details><summary>Profile basis</summary><p class="hint" id="call-profile-note"></p></details>
+    <div class="form-grid"><label>Remote endpoint IP<input name="endpoint" readonly value="${e(last.endpoint||'')}" required></label><label>First endpoint port<input name="port" readonly type="number" value="${last.port||5201}" required></label>
+    <label>Upload load (kbps)<input name="upload_kbps" type="number" min="64" max="8000" value="${last.upload_kbps??selected.upload_kbps}" required></label><label>Download load (kbps)<input name="download_kbps" type="number" min="64" max="8000" value="${last.download_kbps??selected.download_kbps}" required></label>
+    <label>Load duration (seconds, up to 60 minutes)<input name="duration" type="number" min="10" max="3600" value="${last.duration||180}" list="call-durations" required><datalist id="call-durations"><option value="300">5 minutes</option><option value="1800">30 minutes</option><option value="3600">60 minutes</option></datalist></label>
+    ${[['quiet','Before',last.baseline??60],['recovery','After',last.recovery??60]].map(([name,label,value])=>`<label>Quiet time ${label.toLowerCase()}<select name="${name}">${[...new Set([0,30,60,120,value])].sort((a,b)=>a-b).map(n=>`<option value="${n}" ${n===value?'selected':''}>${n} seconds</option>`).join('')}</select></label>`).join('')}</div>
+    <details><summary>Packet size</summary><label>UDP payload bytes<input name="packet_bytes" type="number" min="128" max="1400" value="${last.packet_bytes||1200}" required></label></details>
+    <label ${saved?'hidden':''}>Run mode<select name="run_mode"><option value="manual" ${mode==='manual'?'selected':''}>Run once now</option><option value="schedule" ${mode==='schedule'?'selected':''}>Repeat on schedule</option></select></label>
+    <div id="call-repeat-interval" ${mode==='schedule'?'':'hidden'}><div class="form-grid"><label>Recurring test name<input name="schedule_name" maxlength="80" value="${e(saved?.name||'')}"></label><label>Start every (minutes)<input name="interval_minutes" type="number" min="1" max="10080" value="${saved?.interval_seconds/60||120}"></label><label>${saved?'Next run':'First run'} (local time, optional)<input name="first_run" type="datetime-local" value="${e(first)}"></label><label class="check-line"><input name="enabled" type="checkbox" ${saved?.enabled===false?'':'checked'}>Enabled</label></div></div>
+    <p id="call-test-estimate" class="hint"></p><p class="hint">One test runs at a time. Closing this dialog leaves an active test running.</p><div class="form-error" role="alert"></div><div class="form-actions"><button type="submit" class="primary" ${!data.available?'disabled':''}>${mode==='schedule'?'Save schedule':'Start traffic test'}</button></div></form>`);
   $('#call-test-form').endpointChoices=endpoints;
   callProfileNote(profiles);
 }
-
 function callProfileNote(profiles,reset=false){
   const form=$('#call-test-form');if(!form)return;
   const profile=profiles.find(p=>p.id===form.elements.profile.value);if(!profile)return;
@@ -50,42 +79,52 @@ function callProfileNote(profiles,reset=false){
 }
 function callTestEstimate(){
   const form=$('#call-test-form');if(!form)return;
-  const up=Number(form.elements.upload_kbps.value),down=Number(form.elements.download_kbps.value),duration=Number(form.elements.duration.value),quiet=Number(form.elements.quiet.value);
-  const scheduled=form.elements.run_mode.value==='schedule';
+  const up=Number(form.elements.upload_kbps.value),down=Number(form.elements.download_kbps.value),duration=Number(form.elements.duration.value),quiet=Number(form.elements.quiet.value)+Number(form.elements.recovery.value),scheduled=form.elements.run_mode.value==='schedule';
   $('#call-repeat-interval').hidden=!scheduled;
   form.querySelector('[type=submit]').textContent=scheduled?'Save schedule':'Start traffic test';
-  $('#call-test-estimate').textContent=(scheduled?'First run in '+form.elements.interval_minutes.value+' minutes. Overlapping runs are skipped. ':'')+`${duration+quiet*2} seconds total · approximately ${((up+down)*duration/8000).toFixed(1)} MB of UDP payload, plus network overhead. Your chosen rates are recorded with the profile.`;
+  const timing=form.dataset.schedule?'Existing timing is kept unless changed. ':form.elements.first_run.value?'First run at the chosen time. ':'First run in '+form.elements.interval_minutes.value+' minutes. ';
+  $('#call-test-estimate').textContent=(scheduled?timing:'')+`${duration+quiet} seconds total · approximately ${((up+down)*duration/8000).toFixed(1)} MB of UDP payload, plus network overhead.`;
 }
 document.addEventListener('change',event=>{
   if(event.target.matches('#call-test-form [name=saved_endpoint]')){const f=event.target.form,c=f.endpointChoices.find(x=>x.id===event.target.value);if(c){f.elements.endpoint.value=c.endpoint;f.elements.port.value=c.port;}}
-  if(event.target.matches('#call-test-form [name=profile]'))callProfileNote(networkView(current()).data.call_tests.profiles,true);
+  if(event.target.matches('#call-test-form [name=profile]'))callProfileNote(callTestState(current()).callData.profiles,true);
+  if(event.target.id==='call-results-filter'){const s=current();callTestState(s).callFilter=event.target.value;refreshCallTests(s,true);}
 });
 document.addEventListener('input',event=>{if(event.target.closest('#call-test-form'))callTestEstimate();});
 document.addEventListener('click',async event=>{
   const el=event.target.closest('[data-action]');if(!el)return;
+  const s=current(),action=el.dataset.action;
   try{
-    if(el.dataset.action==='endpoint-setup')await endpointSetup(current());
-    if(el.dataset.action==='call-analysis')await callAnalysis(el.dataset.server,el.dataset.test);
-    if(el.dataset.action==='endpoint-logs')await endpointLogs();
-    if(el.dataset.action==='call-test-configure')await callTestForm(current());
-    if(el.dataset.action==='call-schedule')await callTestForm(current(),'schedule');
-    if(el.dataset.action==='call-schedule-remove'){await api(`/servers/${current().id}/network/call-tests/schedule`,'DELETE');await loadNetwork(current(),true);}
-    if(el.dataset.action==='call-test-stop'){
-      await api(`/servers/${el.dataset.server}/network/call-tests/${el.dataset.test}/stop`,'POST',{});
-      toast('Stopping traffic test…');if(current()?.id===el.dataset.server)await loadNetwork(current(),true);
+    if(action==='endpoint-setup')await endpointSetup(s);
+    if(action==='call-analysis')await callAnalysis(el.dataset.server,el.dataset.test);
+    if(action==='endpoint-logs')await endpointLogs();
+    if(action==='call-test-configure')await callTestForm(s);
+    if(action==='call-schedule')await callTestForm(s,'schedule');
+    if(action==='call-schedule-edit')await callTestForm(s,'schedule',el.dataset.id);
+    if(['call-schedule-start','call-schedule-toggle','call-schedule-remove'].includes(action)){
+      busyViewNodes.add(el);el.disabled=true;
+      const row=callTestState(s).callData.schedules.find(r=>r.id===el.dataset.id),url=`/servers/${s.id}/network/call-tests/schedules/${encodeURIComponent(el.dataset.id)}`;
+      if(action==='call-schedule-start')await api(url+'/start','POST',{});
+      if(action==='call-schedule-remove')await api(url,'DELETE');
+      if(action==='call-schedule-toggle')await api(url,'PUT',{name:row.name,enabled:!row.enabled,interval_minutes:row.interval_seconds/60,test:row.config});
+      await refreshCallTests(s,true);
     }
-  }catch(error){toast(error.message,true);}
+    if(action==='call-schedule-results'){callTestState(s).callFilter=el.dataset.id;await refreshCallTests(s,true);$('.call-results')?.scrollIntoView({block:'nearest'});}
+    if(action==='call-test-stop'){await api(`/servers/${el.dataset.server}/network/call-tests/${el.dataset.test}/stop`,'POST',{});toast('Stopping traffic test…');if(current()?.id===el.dataset.server)await refreshCallTests(s,true);}
+  }catch(error){toast(error.message,true);}finally{busyViewNodes.delete(el);if(el.isConnected&&['call-schedule-start','call-schedule-toggle','call-schedule-remove'].includes(action))el.disabled=action==='call-schedule-start'&&Boolean(callTestState(s).callData?.running);}
 });
 document.addEventListener('submit',async event=>{
   const form=event.target;if(form.id!=='call-test-form')return;event.preventDefault();
+  const submit=form.querySelector('[type=submit]');if(submit.disabled)return;
   const values=Object.fromEntries(new FormData(form)),body={endpoint:values.endpoint.trim(),endpoint_id:values.saved_endpoint,profile:values.profile};
   for(const key of ['port','upload_kbps','download_kbps','duration','packet_bytes'])body[key]=Number(values[key]);
-  body.baseline=body.recovery=Number(values.quiet);
-  const submit=form.querySelector('[type=submit]');submit.disabled=true;
+  body.baseline=Number(values.quiet);body.recovery=Number(values.recovery);submit.disabled=true;
   try{
-    const scheduled=values.run_mode==='schedule';
-    await api(`/servers/${form.dataset.server}/network/call-tests`+(scheduled?'/schedule':''),scheduled?'PUT':'POST',scheduled?{enabled:true,interval_minutes:Number(values.interval_minutes),test:body}:body);
-    closeOverlay(true);toast(scheduled?'Recurring test saved':'Traffic test started');if(current()?.id===form.dataset.server)await loadNetwork(current(),true);
+    const scheduled=values.run_mode==='schedule',id=form.dataset.schedule;
+    const payload=scheduled?{name:values.schedule_name.trim()||callTestState(current()).callData.profiles.find(p=>p.id===body.profile).name,enabled:values.enabled==='on',interval_minutes:Number(values.interval_minutes),test:body}:body;
+    if(scheduled&&values.first_run&&values.first_run!==form.dataset.firstRun)payload.first_run=new Date(values.first_run).getTime()/1000;
+    await api(`/servers/${form.dataset.server}/network/call-tests`+(scheduled?'/schedules'+(id?'/'+encodeURIComponent(id):''):''),scheduled&&id?'PUT':'POST',payload);
+    closeOverlay(true);toast(scheduled?'Recurring test saved':'Traffic test started');if(current()?.id===form.dataset.server)await refreshCallTests(current(),true);
   }catch(error){if(form.isConnected){formError(error.message);submit.disabled=false;}}
 });
 

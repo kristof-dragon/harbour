@@ -318,28 +318,78 @@ included in this version.
 
 ## Recurring tests and longer calls
 
-**Call tests → Schedule** uses the same profile/rate/duration controls. Loads can
+**Call tests → Add recurring test** uses the same profile/rate/duration controls. Loads can
 run for any integer duration from 10 seconds to 3600 seconds, with 30/60-minute
 suggestions. Choose a start-to-start interval in minutes (up to seven days).
 The interval must include both quiet periods, the load, and at least 30 seconds
 for result collection. For example, a 60-minute load with 60-second quiet periods
 fits a 120-minute interval. The displayed payload estimate is per run.
 
-The first run occurs one interval after saving. The tab shows the next due time
-and last scheduling outcome. One test can run at a time across Harbour; busy,
-paused/offline recording or unavailable-endpoint slots are skipped and reported,
-not queued. Scheduling pauses while Harbour is stopped and advances overdue
-slots on restart. Removing the schedule prevents future starts; **Stop test**
-ends an already running test. A saved schedule requires a confirmed managed
-endpoint and stores no SSH credential. No Codex/chat automation is involved.
+Create multiple named schedules, each with its own profile, endpoint, duration,
+quiet periods and interval. The first run occurs one interval after saving unless
+you choose a first-run time. **Edit** changes the selected schedule; changing its
+profile preserves the next due time and previous results. Changing the interval
+or resuming a paused schedule schedules the next run one interval ahead unless
+you specify a next-run time. An active run keeps its original profile and settings.
 
-The latest 20 tests and their collected evidence are retained per router. Active
+**Start now** runs a saved profile once without changing its recurring timing or
+enabling a paused schedule. **Pause / Resume** controls future starts; **Remove**
+removes only that schedule and retains its test results. **Stop test** ends the
+active run. **Results** filters the history for that schedule, including run time,
+profile used, completion state, directional receiver statistics, analysis and the
+combined compressed evidence download. **All tests** includes removed schedules.
+Existing single schedules and their retained run history migrate automatically.
+
+One test runs at a time across Harbour. When another test is active, due schedules
+wait in due-time order. Each runs once when the slot becomes free, then advances
+to its next future interval; missed intervals are not replayed as a backlog.
+Unavailable recording or endpoint attempts are skipped and reported. Scheduling
+pauses while Harbour is stopped and advances overdue slots on restart. A saved
+schedule requires a confirmed managed endpoint and stores no SSH credential.
+No Codex/chat automation is involved.
+
+The latest 20 runs and collected evidence are retained per recurring schedule,
+plus 20 one-off tests per router. The combined view displays up to 50 recent runs;
+select a schedule to see its retained history. Active
 runs protect their raw recorder window from cleanup until collection finishes.
 The aggregate capture is bounded to 300,000 rows / 128 MiB of serialized recorder
 samples (enough for the normal 12-target, 250 ms, hour-long collection pattern);
 exceptionally chatty logs or large router payloads can hit the cap, which is
 reported as partial evidence. Protection can temporarily exceed raw-retention
 size limits. Receiver parsing retains up to 7202 intervals per direction.
+
+## Live call results
+
+While the Call tests tab is visible, Harbour requests live readings every five
+seconds. It updates values and changed rows in place, preserving the section,
+controls, scroll position, keyboard focus and open editing dialogs. It continues
+even when the router's dashboard readings have not changed. Requests do not
+overlap if the remote endpoint is slow.
+
+The live card shows phase, elapsed time, throughput, receiver packet loss and
+jitter for upload and download. Values describe the latest one-second interval,
+not the cumulative call, and remain provisional until final collection. Baseline
+and recovery phases remain visible. Missing or stale receiver readings are
+shown as unavailable, never as zero loss.
+
+The pinned iperf3 3.22 client and endpoint emit JSON interval events while retaining
+the original complete JSON result using `--json-stream --json-stream-full-output`.
+These output modes are documented in the
+[ESnet iperf3 manual](https://github.com/esnet/iperf/blob/3.22/src/iperf3.1).
+Download receiver measurements come from Harbour's client; upload receiver
+measurements are fetched through the endpoint's token-authenticated `/live`
+route. The endpoint ID and session cookie must match the active client session.
+The endpoint reports sample age using its own monotonic clock, and Harbour adds
+HTTP retrieval time; an interval older than ten seconds is marked stale. A new
+session clears the endpoint's previous live readings. Sender throughput can be
+shown separately while waiting, but sender-side values cannot supply receiver
+loss or jitter.
+
+**Redeploy existing remote endpoints from the WebUI for live upload receiver
+readings.** Older endpoints still provide final evidence and local download
+readings; the live card identifies the missing capability. Redeployment preserves
+dated remote logs. Final analysis and exports continue to use the complete
+results and identity-checked remote logs, independently of browser polling.
 
 ## Correlation, analysis and aggregate export
 
@@ -459,6 +509,28 @@ checked on the user's deployment.
   pagination, administrator-only retrieval, split-secret redaction, output limits
   and storage failures. No user-owned remote host was deployed or changed.
 
+## Validation for editable schedules and live results (0.1.38)
+
+- Pinned Linux Python 3.15 regression suite: **510 passed, 1 skipped**. The final
+  focused call-test, endpoint, evidence and scheduling suite passed **37 tests**;
+  the existing Starlette/httpx deprecation warning remains.
+- Browser checks pass for multiple schedules, changing profiles and quiet periods,
+  pausing, starting a paused schedule once, filtering results, removing one
+  schedule, and desktop/mobile layout. Live updates preserve DOM elements, focus,
+  scroll position and unsaved form edits even with an unchanged dashboard.
+  The separate installer/output-artifact browser suite also passes.
+- A real isolated iperf3 client returned live download receiver readings before
+  completion and retained its complete final results. The updated endpoint
+  returned authenticated live upload receiver readings during simultaneous UDP
+  flows, then retained independently indexed final logs with matching cookies.
+- Backend checks cover migration and run attribution, independent result
+  retention, administrator/CSRF restrictions, sequential due schedules,
+  restart behavior, active-run configuration snapshots, mismatched cookies,
+  stale readings and an unavailable remote log service.
+
+No user-owned router or endpoint was deployed. Live WAN behavior and a complete
+hour-long test remain field validation, not claims made by these isolated checks.
+
 ## Reference index
 
 All links below are primary vendor, project or standards sources reviewed for
@@ -479,6 +551,7 @@ their sources; this index keeps the research together for later review.
 | [Apple: FaceTime security](https://support.apple.com/guide/security/facetime-security-seca331c55cd/web) | SRTP and connection establishment; no comparable fixed video bitrate table in this source. |
 | [Apple: use FaceTime and iMessage behind a firewall](https://support.apple.com/en-us/102036) | Connectivity requirements; does not substantiate Harbour's provisional 2/2 Mbps choice. |
 | [ESnet: invoking iperf3](https://software.es.net/iperf/invoking.html) | UDP, reverse and bidirectional modes, rate and length settings, JSON output and server limits used by the implementation. |
+| [ESnet: iperf3 3.22 manual](https://github.com/esnet/iperf/blob/3.22/src/iperf3.1) | Streaming interval JSON together with complete JSON output; live transport statistics remain distinct from final receiver evidence and application quality. |
 | [iperf2 user manual](https://iperf2.sourceforge.io/iperf2-user-manual.html) | Isochronous frame-oriented traffic as a possible future extension; requires a different endpoint and parser. |
 | [W3C: WebRTC statistics API](https://www.w3.org/TR/webrtc-stats/) | Media statistics for a possible browser-based test, including freezes, concealment and jitter-buffer delay; actual browser support needs checking. |
 | [IETF RFC 8836: congestion control requirements for interactive real-time media](https://www.rfc-editor.org/rfc/rfc8836.html) | Interactive media adapts to network conditions; fixed-rate UDP alone does not reproduce that behaviour. |

@@ -22,7 +22,8 @@ let briefFailure=false,delayBrief=false,releaseBrief;
 const incidentReports=Array.from({length:23},(_,i)=>({...incidentReport,incident:{...incidentReport.incident,id:i?`event-${i}`:'event',measured:now-60-i*1000,automatic:i<21?1:0}}));
 let delayIncident=false,releaseIncident;
 const callProfiles=[{id:'facetime',name:'FaceTime · provisional video',upload_kbps:2000,download_kbps:2000,basis:'Harbour approximation',note:'Not an Apple specification.',source:'https://support.apple.com/guide/security/facetime-security-seca331c55cd/web'},{id:'teams-meeting',name:'Teams · video meeting',upload_kbps:2500,download_kbps:4000,basis:'Microsoft recommended video bandwidth',note:'Asymmetric meeting profile',source:'https://learn.microsoft.com/en-us/microsoftteams/prepare-network'},{id:'zoom-meeting',name:'Zoom · group 720p',upload_kbps:2600,download_kbps:1800,basis:'Zoom recommended 720p bandwidth',note:'Group video',source:'https://support.zoom.com/'}];
-const callData={profiles:callProfiles,available:true,tests:[]};
+let liveTick=1,liveRequests=0;
+const callData={schedules:[],profiles:callProfiles,available:true,tests:[]};
 let callRequest=null,callStopped=false,endpointRequest=null,deployRequest=null;
 const remoteHost={...host,id:'remote',name:'Remote Docker host',host:'192.0.2.10',server_type:'docker'};
 const endpointData={endpoints:[]};
@@ -65,12 +66,27 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
     if(delayIncident)await new Promise(resolve=>{releaseIncident=resolve;});
     data={...incidentReport,incident:{...incidentReport.incident,id:url.pathname.split('/').at(-1)}};
    }
-   else if(url.pathname.endsWith('/network/call-tests/schedule')&&method==='PUT'){scheduleRequest=route.request().postDataJSON();callData.schedule={enabled:true,config:scheduleRequest.test,interval_seconds:scheduleRequest.interval_minutes*60,next_run:now+7200};data=callData.schedule;}
-   else if(url.pathname.endsWith('/network/call-tests/schedule')&&method==='DELETE'){callData.schedule=null;data={ok:true};}
+   else if(url.pathname.endsWith('/network/call-tests/live')){
+    liveRequests++;const running=callData.tests.find(t=>t.status==='running')||null;
+    if(running?.phase==='loading')running.live={upload:{bits_per_second:1000000,observed_at:Date.now()/1000},upload_receiver:{sender:false,lost_percent:liveTick,jitter_ms:7,bits_per_second:1000000,stale:false},download:{sender:false,lost_percent:liveTick/2,jitter_ms:3,bits_per_second:2000000,observed_at:Date.now()/1000}};
+    const filter=url.searchParams.get('schedule_id');
+    data={...callData,tests:filter?callData.tests.filter(t=>t.config.schedule_id===filter):callData.tests,running};
+   }
+   else if(url.pathname.endsWith('/network/call-tests/schedules')&&method==='POST'){scheduleRequest=route.request().postDataJSON();const row={id:'schedule-'+(callData.schedules.length+1),name:scheduleRequest.name,enabled:true,config:scheduleRequest.test,interval_seconds:scheduleRequest.interval_minutes*60,next_run:now+7200};callData.schedules.push(row);data=row;}
+   else if(url.pathname.includes('/network/call-tests/schedules/')&&method==='PUT'){
+    const row=callData.schedules.find(r=>r.id===url.pathname.split('/').at(-1)),body=route.request().postDataJSON();
+    Object.assign(row,{name:body.name,config:body.test,enabled:body.enabled,interval_seconds:body.interval_minutes*60});data=row;
+   }
+   else if(url.pathname.includes('/network/call-tests/schedules/')&&url.pathname.endsWith('/start')){
+    const row=callData.schedules.find(r=>r.id===url.pathname.split('/').at(-2));
+    const test={id:'scheduled-example',created:Date.now()/1000,status:'running',phase:'loading',config:{...row.config,remote_live:true,schedule_id:row.id,schedule_name:row.name,source:'schedule-now',profile_snapshot:callProfiles.find(p=>p.id===row.config.profile)},result:{}};
+    callData.tests.unshift(test);row.last_test=test.id;data={id:test.id};
+   }
+   else if(url.pathname.includes('/network/call-tests/schedules/')&&method==='DELETE'){callData.schedules=callData.schedules.filter(r=>r.id!==url.pathname.split('/').at(-1));data={ok:true};}
    else if(url.pathname.endsWith('/network/call-tests')&&method==='POST'){
     callRequest=route.request().postDataJSON();callData.tests=[{id:'load-example',created:now,status:'running',phase:'baseline',config:{...callRequest,profile_snapshot:callProfiles.find(p=>p.id===callRequest.profile)},result:{}}];data={id:'load-example'};
-   }else if(url.pathname.endsWith('/network/call-tests/load-example/stop')&&method==='POST'){
-    callStopped=true;callData.tests[0].status='cancelled';data={ok:true};
+   }else if(url.pathname.includes('/network/call-tests/')&&url.pathname.endsWith('/stop')&&method==='POST'){
+    callStopped=true;callData.tests.find(t=>t.id===url.pathname.split('/').at(-2)).status='cancelled';data={ok:true};
    }
    else if(url.pathname.endsWith('/network')){
     if(method==='PUT'){saved=route.request().postDataJSON();Object.assign(settings,saved);data={ok:true};}
@@ -139,14 +155,84 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.getByRole('button',{name:'Stop test',exact:true}).click();
   await page.getByRole('button',{name:'Remote call flow test',exact:true}).waitFor();
   assert.equal(callStopped,true);
-  await page.getByRole('button',{name:'Schedule',exact:true}).click();
+  await page.getByRole('button',{name:'Add recurring test',exact:true}).click();
   await page.locator('#call-test-form [name=duration]').fill('3600');
   await page.locator('#call-test-form [name=interval_minutes]').fill('120');
   await page.getByRole('button',{name:'Save schedule',exact:true}).click();
-  await page.getByRole('button',{name:'Remove schedule',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Remove',exact:true}).waitFor();
   assert.equal(scheduleRequest.test.duration,3600);assert.equal(scheduleRequest.interval_minutes,120);
   assert.equal(scheduleRequest.test.endpoint_id,'remote');
-  await page.getByRole('button',{name:'Remove schedule',exact:true}).click();
+  await page.getByRole('button',{name:'Remove',exact:true}).click();
+
+
+  // Multiple schedules remain independently editable; starting a paused one runs once.
+  for(const [name,profile] of [['Morning','facetime'],['Afternoon','zoom-meeting']]){
+    await page.getByRole('button',{name:'Add recurring test',exact:true}).click();
+    await page.locator('#call-test-form [name=schedule_name]').fill(name);
+    await page.locator('#call-test-form [name=profile]').selectOption(profile);
+    await page.locator('#call-test-form [name=duration]').fill('30');
+    await page.locator('#call-test-form [name=quiet]').selectOption('30');
+    await page.locator('#call-test-form [name=recovery]').selectOption('120');
+    await page.getByRole('button',{name:'Save schedule',exact:true}).click();
+    await page.getByRole('heading',{name:'Recurring tests',exact:true}).waitFor();
+  }
+  assert.equal(callData.schedules.length,2);
+  const morning=()=>page.locator('.call-schedules tr').filter({hasText:'Morning'});
+  await morning().getByRole('button',{name:'Edit',exact:true}).click();
+  assert.equal(await page.locator('#call-test-form [name=schedule_name]').inputValue(),'Morning');
+  assert.equal(await page.locator('#call-test-form [name=quiet]').inputValue(),'30');
+  assert.equal(await page.locator('#call-test-form [name=recovery]').inputValue(),'120');
+  await page.locator('#call-test-form [name=profile]').selectOption('teams-meeting');
+  await page.getByRole('button',{name:'Save schedule',exact:true}).click();
+  await page.waitForFunction(()=>[...document.querySelectorAll('.call-schedules tr')].some(r=>r.textContent.includes('Morning')&&r.textContent.includes('Teams · video meeting')));
+  assert.equal(callData.schedules[1].config.profile,'zoom-meeting');
+  assert.equal(callData.schedules[0].config.baseline,30);assert.equal(callData.schedules[0].config.recovery,120);
+  await morning().getByRole('button',{name:'Pause',exact:true}).click();
+  await morning().getByRole('button',{name:'Resume',exact:true}).waitFor();
+  const nextBefore=callData.schedules[0].next_run;
+  await morning().getByRole('button',{name:'Start now',exact:true}).click();
+  await page.locator('[data-key="live-upload"] [data-key=loss]').getByText('1.00%',{exact:true}).waitFor();
+  assert.equal(callData.schedules[0].enabled,false);assert.equal(callData.schedules[0].next_run,nextBefore);
+  await page.locator('#call-results-filter').focus();
+  await page.evaluate(()=>{
+    window.liveNodes=['.network-view','.call-tests','.call-live','[data-key="live-upload"]','[data-key="live-upload"] [data-key=loss]','.call-schedules','#call-results-filter','.call-results'].map(s=>document.querySelector(s));
+    window.liveFocus=document.activeElement;window.liveScroll=scrollY;
+  });
+  liveTick=4;const beforeRequests=liveRequests;
+  await page.locator('[data-key="live-upload"] [data-key=loss]').getByText('4.00%',{exact:true}).waitFor({timeout:12000});
+  assert(liveRequests>beforeRequests);
+  assert.equal(await page.evaluate(()=>window.liveNodes.every(n=>n.isConnected)&&document.activeElement===window.liveFocus&&scrollY===window.liveScroll),true);
+  await page.screenshot({path:'test-results/call-schedules-live-desktop.png'});
+  // Background polling must not reset edits or change the active run's snapshot.
+  await morning().getByRole('button',{name:'Edit',exact:true}).click();
+  await page.locator('#call-test-form [name=schedule_name]').fill('Morning edited');
+  await page.locator('#call-test-form [name=profile]').selectOption('facetime');
+  const editRequests=liveRequests;
+  await page.waitForFunction(()=>document.querySelector('.call-live [data-key="live-phase"]')?.textContent.includes('seconds elapsed'));
+  await new Promise(resolve=>setTimeout(resolve,5500));
+  assert(liveRequests>editRequests);
+  assert.equal(await page.locator('#call-test-form [name=schedule_name]').inputValue(),'Morning edited');
+  await page.getByRole('button',{name:'Save schedule',exact:true}).click();
+  await page.getByRole('button',{name:'Stop test',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('.call-live')?.hidden===true);
+  assert.equal(callData.tests[0].config.profile,'teams-meeting');
+  await morning().getByRole('button',{name:'Results',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('.call-results tbody tr').length===1);
+  assert.match(await page.locator('.call-results').textContent(),/Teams · video meeting/);
+  assert.equal(await page.locator('#call-results-filter').inputValue(),callData.schedules[0].id);
+  await page.setViewportSize({width:390,height:844});
+  await page.waitForFunction(()=>document.querySelector('.sidebar').getBoundingClientRect().right<=1);
+  await page.locator('.call-schedules').scrollIntoViewIfNeeded();
+  await page.screenshot({path:'test-results/call-schedules-mobile.png'});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.setViewportSize({width:1440,height:1000});
+  await morning().getByRole('button',{name:'Remove',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('.call-schedules tbody tr').length===1);
+  assert.equal(callData.schedules[0].name,'Afternoon');
+  await page.locator('#call-results-filter').selectOption('');
+  await page.waitForFunction(()=>document.querySelectorAll('.call-results tbody tr').length===2);
+  // Keep the existing analysis fixture aimed at its original manual test.
+  callData.tests=callData.tests.filter(t=>t.id==='load-example');
 
   const sparse=await page.evaluate(()=>{
    const end=Date.now()/1000,start=end-120;
@@ -327,7 +413,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.locator('[data-tab=wireless]').click();
   assert.equal(await page.locator('.network-chart svg').count(),1);
   await page.locator('[data-tab=calls]').click();
-  await page.getByRole('button',{name:'Analysis',exact:true}).click();
+  await page.locator('[data-action=call-analysis][data-test=load-example]').click();
   await page.locator('#call-analysis').waitFor();
   assert.match(await page.locator('#call-analysis').textContent(),/Receiver impairment was recorded/);
   assert.equal(await page.locator('#call-analysis a').getAttribute('href'),'/api/servers/router/network/call-tests/load-example/export');
