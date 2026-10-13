@@ -4,7 +4,14 @@ const {chromium}=require('playwright');
 const now=Date.now()/1000,thresholds={cpu:85,memory:85,disk:85,disk_free_gb:10,temperature:80};
 const host={id:'plain',name:'Test host',host:'example.invalid',port:22,username:'harbour',server_type:'plain',services:[],warnings:[],updates:0,checked:now,monitoring_enabled:true,poll_seconds:60,record_seconds:30,connection_status:'up',thresholds,recording:{mode:'remote'},metrics:null};
 let active=null,requests=[],passwords=[];
-const send=event=>active?.res.write(JSON.stringify(event)+'\n');
+const artifacts=new Map();
+const send=event=>{
+ if(!active)return;
+ const saved=artifacts.get(active.id);
+ if(event.kind==='output')saved.output+=event.text;
+ if(event.kind==='result'){saved.output+='\n'+event.message+'\n';saved.status=event.ok?'succeeded':'failed';}
+ active.res.write(JSON.stringify(event)+'\n');
+};
 const finish=ok=>{send({kind:'result',ok,message:ok?'Setup completed.':'Installer failed.'});active.res.end();active=null;};
 const server=http.createServer(async(req,res)=>{
  try{
@@ -20,6 +27,7 @@ const server=http.createServer(async(req,res)=>{
    assert.equal(req.headers['x-csrf-token'],'test');requests.push([url.pathname,data.action]);
    res.setHeader('Content-Type','application/x-ndjson');res.setHeader('X-Accel-Buffering','no');
    active={res,mode:data.action,attempt:0,id:'setup-'+requests.length};
+   artifacts.set(active.id,{id:active.id,created:now,actor:'admin',kind:'resources',action:data.action,host:host.host,target_name:host.name,status:'running',version:'test',output:''});
    send({kind:'started',id:active.id});send({kind:'progress',received:100,total:100});
    send({kind:'output',text:'Uploaded: /home/harbour/collector.zip\n<script>window.compromised=true</script>\n'});
    if(data.action==='install')send({kind:'password',prompt:'first',message:'One-time sudo password on Test host.'});
@@ -31,7 +39,13 @@ const server=http.createServer(async(req,res)=>{
    else {send({kind:'output',text:'Installing service…\n'});finish(true);}
    return;
   }
-  if(url.pathname.endsWith('/cancel')){if(active&&url.pathname.includes('/'+active.id+'/')){active.res.end();active=null;}return json({ok:true});}
+  if(url.pathname.endsWith('/cancel')){if(active&&url.pathname.includes('/'+active.id+'/')){const saved=artifacts.get(active.id);saved.status='stopped';saved.output+='\nSetup stopped.\n';active.res.end();active=null;}return json({ok:true});}
+  if(url.pathname==='/api/install-artifacts')return json({artifacts:[...artifacts.values()].reverse(),next:null});
+  if(url.pathname.startsWith('/api/install-artifacts/')){
+   const saved=artifacts.get(url.pathname.split('/')[3]);assert(saved);
+   if(url.pathname.endsWith('/download')){res.setHeader('Content-Type','text/plain');res.setHeader('Content-Disposition','attachment; filename="harbour-install.txt"');return res.end(saved.output);}
+   return json(saved);
+  }
   if(url.pathname.startsWith('/api/'))throw Error('Unexpected API '+url.pathname);
   const file=path.join(process.cwd(),'harbour/static',url.pathname==='/'?'index.html':url.pathname.replace('/static/',''));
   res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html');res.end(fs.readFileSync(file));
@@ -53,6 +67,15 @@ const server=http.createServer(async(req,res)=>{
   assert.equal(await page.getByRole('button',{name:'Push & install',exact:true}).isDisabled(),true);
   assert.equal(await page.locator('.collector-output script').count(),0);
   assert.equal(await page.evaluate(()=>window.compromised),undefined);
+  // The browser only shows a tail, but the server download retains all chunks.
+  send({kind:'output',text:'x'.repeat(180000)+'\nLast build step\n'});
+  await page.waitForFunction(()=>document.querySelector('.collector-output')?.textContent.includes('Last build step'));
+  assert.doesNotMatch(await page.locator('.collector-output').textContent(),/Uploaded:/);
+  const downloaded=page.waitForEvent('download');
+  await page.getByRole('link',{name:'Download output',exact:true}).click();
+  const full=fs.readFileSync(await (await downloaded).path(),'utf8');
+  assert.match(full,/Uploaded:/);assert.match(full,/Last build step/);
+  assert(full.length>180000);
   finish(true);await page.getByText('Setup completed.',{exact:true}).waitFor();
   await page.getByRole('button',{name:'Push & extract',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('.collector-output')?.textContent.includes('Uploaded:'));
@@ -69,6 +92,10 @@ const server=http.createServer(async(req,res)=>{
   assert.deepEqual(passwords,['wrong password','  correct £  ']);
   assert.equal(await page.locator('.collector-sudo-form').count(),0);
   assert.doesNotMatch(await page.locator('.collector-output').textContent(),/correct|wrong password/);
+  const completedDownload=page.waitForEvent('download');
+  await page.getByRole('link',{name:'Download output',exact:true}).click();
+  const completeText=fs.readFileSync(await (await completedDownload).path(),'utf8');
+  assert.match(completeText,/Setup completed/);assert.doesNotMatch(completeText,/correct|wrong password/);
   assert.equal(requests.length,3);
   fs.mkdirSync('test-results',{recursive:true});
   await page.screenshot({path:'test-results/collector-setup-desktop.png'});
@@ -93,7 +120,20 @@ const server=http.createServer(async(req,res)=>{
   assert.equal(requests.at(-1)[0],'/api/servers/plain/collector/logins');
   finish(false);await page.getByText('Installer failed.',{exact:true}).waitFor();
   assert.equal(await page.locator('.collector-status.form-error').count(),1);
+  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+  await page.locator('#sidebar-menu summary').click();
+  await page.getByRole('button',{name:'Saved installs',exact:true}).click();
+  await page.getByRole('button',{name:'View',exact:true}).first().click();
+  await page.getByRole('heading',{name:'Install artifact',exact:true}).waitFor();
+  assert.match(await page.getByLabel('Saved install output').textContent(),/Installer failed/);
+  assert.equal(await page.locator('.install-artifact-output script').count(),0);
+  const failedDownload=page.waitForEvent('download');
+  await page.getByRole('link',{name:'Download output',exact:true}).click();
+  assert.match(fs.readFileSync(await (await failedDownload).path(),'utf8'),/Installer failed/);
+  await page.setViewportSize({width:390,height:844});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  await page.screenshot({path:'test-results/saved-install-mobile.png'});
   assert.equal(errors.length,0,errors.join('\n'));
-  console.log('PASS: live chunks, all three actions, sudo retry/secrecy, cancellation, dialog close, both collectors, failure output and mobile layout');
+  console.log('PASS: full streaming downloads, completed/failed transcripts, saved install browser, sudo secrecy, cancellation, both collectors and mobile layout');
  }finally{await browser.close();server.close();}
 })().catch(error=>{console.error(error);server.close();process.exit(1);});

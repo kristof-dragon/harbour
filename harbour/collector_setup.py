@@ -5,6 +5,7 @@ import json
 import queue
 import secrets
 import shlex
+import sqlite3
 import threading
 import time
 from pathlib import Path
@@ -15,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from . import auth, collector_bundle, logins, ssh, store
+from . import auth, collector_bundle, install_artifacts, logins, ssh, store
 
 router = APIRouter()
 operations = {}
@@ -56,6 +57,11 @@ class Operation:
         self.ephemeral = credential is not None
         self.credential = credential
         self.endpoint_config = endpoint_config
+        self.artifact = False
+        self.redactor = install_artifacts.Redactor()
+        self.redactor.add((credential or {}).get('password'))
+        for key in ('token', 'callback_token'):
+            self.redactor.add((endpoint_config or {}).get(key))
 
     def clear_secrets(self):
         if self.credential is not None:
@@ -65,11 +71,45 @@ class Operation:
 
     def emit(self, event):
         self.cancel.check()
+        if event['kind'] == 'output':
+            event = {'kind': 'output', 'text': self.redactor.feed(event['text'])}
+            if not event['text']:
+                return
+            if self.artifact:
+                install_artifacts.append(self.id, event['text'])
+        elif event['kind'] == 'result':
+            self.flush_output()
+            event = {**event, 'message': self.redactor.feed(event.get('message', ''), final=True)}
+            if self.artifact:
+                install_artifacts.finish(self.id, 'succeeded' if event.get('ok') else 'failed', event['message'])
+        elif event['kind'] == 'password' and self.artifact:
+            install_artifacts.append(self.id, '\nWaiting for one-shot sudo authentication. Password omitted.\n')
+        self.queue_event(event)
+
+    def queue_event(self, event):
         try:
             self.events.put_nowait(event)
         except queue.Full:
             self.cancel.stop()
             raise RuntimeError('Progress reader is too slow') from None
+
+    def flush_output(self):
+        tail = self.redactor.feed('', final=True)
+        if tail:
+            if self.artifact:
+                try:
+                    install_artifacts.append(self.id, tail)
+                except RuntimeError as exc:
+                    if not str(exc).startswith('Setup output exceeded its limit'):
+                        raise
+                    tail = '\nOutput limit reached; final partial output omitted.\n'
+            if not self.cancel.is_set():
+                self.queue_event({'kind': 'output', 'text': tail})
+
+    def finish(self, status, message):
+        if self.artifact:
+            self.flush_output()
+            install_artifacts.finish(self.id, status, message)
 
     def password(self):
         if self.kind == 'call-endpoint':
@@ -84,7 +124,9 @@ class Operation:
             while time.monotonic() < deadline:
                 self.cancel.check()
                 try:
-                    return self.replies.get(timeout=.1)
+                    password = self.replies.get(timeout=.1)
+                    self.redactor.add(password)
+                    return password
                 except queue.Empty:
                     pass
             raise TimeoutError('Sudo password prompt timed out')
@@ -101,14 +143,19 @@ def transfer(op):
     config = {'kind': op.kind, 'action': op.action, 'prefix': prefix, 'installer': installer, 'files': files,
               'reader': server['username'], 'interval': server.get('record_seconds') or 60,
               'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+    if op.artifact:
+        store.execute('UPDATE install_artifacts SET bundle_sha256=? WHERE id=?', (config['sha256'], op.id))
     if op.kind == 'call-endpoint':
         from . import call_endpoint
         config['endpoint'] = op.endpoint_config or call_endpoint.saved(server['id'], secret=True)
+        for key in ('token', 'callback_token'):
+            op.redactor.add(config['endpoint'].get(key))
     credential = None
     try:
         credential = (op.credential if op.ephemeral else
                       {'password': store.cipher().decrypt(server['password_encrypted'].encode()).decode()}
                       if server.get('auth_method') == 'password' else {'pkey': ssh.stored_key(server['key_id'])})
+        op.redactor.add(credential.get('password'))
         op.emit({'kind': 'output', 'text': 'Opening a separate SSH connection…\n'})
         client = ssh.connect(server, cancel=op.cancel, **credential)
         credential.clear()
@@ -187,7 +234,7 @@ def worker(op, username, address):
                 store.execute('UPDATE call_endpoints SET deployed=1 WHERE server_id=?', (op.server['id'],))
         op.emit(result)
         auth.log(username, address, 'collector_setup_succeeded' if result.get('ok') else 'collector_setup_failed',
-                 op.server['id'] + ' · ' + op.kind + ' · ' + op.action)
+                 op.server['id'] + ' · ' + op.kind + ' · ' + op.action + ' · install:' + op.id)
     except Exception as exc:
         message = ('Host fingerprint mismatch. Verify the server identity before retrying.' if isinstance(exc, ssh.HostKeyMismatch)
                    else 'SSH sign-in failed. Check the username and password.' if isinstance(exc, paramiko.AuthenticationException)
@@ -195,22 +242,37 @@ def worker(op, username, address):
                    else 'Endpoint setup stopped. Check SSH, Python 3.9+, Docker access and the callback address. No sudo is used.' if op.ephemeral
                    else 'Setup or its sudo prompt timed out. Check the host before retrying; completed steps are retained.' if isinstance(exc, TimeoutError)
                    else 'Setup stopped. Check SSH access, Python 3.9+, and the host service before retrying; completed steps are retained.')
+        if isinstance(exc, RuntimeError) and str(exc).startswith('Setup output exceeded its limit'):
+            message = 'Setup output exceeded its limit. Earlier output is retained; remote state is unconfirmed.'
+        if isinstance(exc, sqlite3.Error):
+            message = 'Setup stopped because Harbour could not save its Install artifact. Check local storage; remote state is unconfirmed.'
         if not op.cancel.is_set():
             try:
                 op.emit({'kind': 'result', 'ok': False, 'message': message})
+            except sqlite3.Error:
+                # Report storage failure without pretending an audit write worked.
+                op.queue_event({'kind': 'result', 'ok': False, 'message': message})
             except Exception:
                 pass
-        auth.log(username, address, 'collector_setup_stopped', op.server['id'] + ' · ' + op.kind + ' · ' + op.action)
+        auth.log(username, address, 'collector_setup_stopped', op.server['id'] + ' · ' + op.kind + ' · ' + op.action + ' · install:' + op.id)
     finally:
-        op.clear_secrets()
-        with op.state_lock:
-            op.prompt = None
-            while not op.replies.empty():
-                op.replies.get_nowait()
-        op.done.set()
-        op.lock.release()
-        with guard:
-            operations.pop(op.id, None)
+        try:
+            op.finish('stopped' if op.cancel.is_set() else 'failed',
+                      'Setup stopped. Completed steps remain on the host; remote state is unconfirmed.'
+                      if op.cancel.is_set() else 'Setup ended without a saved result. Check the host before retrying.')
+        except sqlite3.Error:
+            pass  # Previously committed chunks survive; startup marks the unfinished artifact interrupted.
+        finally:
+            op.clear_secrets()
+            op.redactor.clear()
+            with op.state_lock:
+                op.prompt = None
+                while not op.replies.empty():
+                    op.replies.get_nowait()
+            op.done.set()
+            op.lock.release()
+            with guard:
+                operations.pop(op.id, None)
 
 
 def close_all():
@@ -236,11 +298,15 @@ class SetupResponse(StreamingResponse):
         finally:
             self.op.cancel.stop()
             if not self.op.started:
-                self.op.clear_secrets()
-                self.op.lock.release()
-                self.op.done.set()
-                with guard:
-                    operations.pop(self.op.id, None)
+                try:
+                    self.op.finish('stopped', 'Connection closed before setup started. No remote command was run.')
+                finally:
+                    self.op.clear_secrets()
+                    self.op.redactor.clear()
+                    self.op.lock.release()
+                    self.op.done.set()
+                    with guard:
+                        operations.pop(self.op.id, None)
 
 
 @router.post('/api/servers/{id_}/collector/{kind}')
@@ -276,6 +342,16 @@ def start(id_: str, kind: Literal['resources', 'logins', 'call-endpoint'], body:
 
 
 def response(op, request, user, address):
+    try:
+        install_artifacts.create(op, user['name'])
+        op.artifact = True
+    except Exception:
+        op.clear_secrets()
+        op.redactor.clear()
+        op.lock.release()
+        with guard:
+            operations.pop(op.id, None)
+        raise HTTPException(503, 'Could not create the Install artifact. No deployment was started.') from None
     async def stream():
         try:
             yield json.dumps({'kind': 'started', 'id': op.id}) + '\n'

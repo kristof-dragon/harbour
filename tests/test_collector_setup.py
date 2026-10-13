@@ -325,9 +325,12 @@ def test_live_http_stream_and_disconnect_cancel(client, monkeypatch, disconnect)
                 assert not module.server_lock('atlas').locked()
                 if disconnect:
                     assert active[0].cancel.is_set() and received == []
+                    saved = store.one('SELECT status FROM install_artifacts WHERE id=?', (active[0].id,))
+                    assert saved['status'] == 'stopped'
                 else:
                     assert seen[-1]['ok'] and received == ['ephemeral-live']
                     assert 'ephemeral-live' not in str(seen)
+                    assert 'ephemeral-live' not in str(store.rows('SELECT * FROM install_output'))
         finally:
             server.should_exit = True; thread.join(timeout=5)
 

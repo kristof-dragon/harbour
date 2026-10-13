@@ -148,6 +148,9 @@ def test_one_shot_deployment_callback_and_password_lifetime(client, monkeypatch)
             op.password()
         id_ = op.server['id']
         token = op.endpoint_config['callback_token']
+        op.emit({'kind': 'output', 'text': 'Secret echo protection: ' + secret[:12]})
+        op.emit({'kind': 'output', 'text': secret[12:] + ' ' + token[:10]})
+        op.emit({'kind': 'output', 'text': token[10:] + '\n'})
         assert client.post('/api/call-endpoints/'+id_+'/ready', json={'boot_id':boot,'protocol':1}).status_code == 401
         response = client.post('/api/call-endpoints/'+id_+'/ready', headers={'Authorization':'Bearer '+token}, json={'boot_id':boot,'protocol':1})
         assert response.status_code == 200, response.text
@@ -165,6 +168,10 @@ def test_one_shot_deployment_callback_and_password_lifetime(client, monkeypatch)
     assert endpoint.saved(id_)['deployed'] and endpoint.saved(id_)['callback_received']
     assert secret not in str(store.rows('SELECT * FROM call_endpoints'))
     assert secret not in str(store.rows('SELECT * FROM auth_log'))
+    assert secret not in str(store.rows('SELECT * FROM install_output'))
+    assert not seen[0].redactor.secrets
+    artifact = client.get('/api/install-artifacts/' + seen[0].id + '/download')
+    assert artifact.status_code == 200 and '[REDACTED]' in artifact.text
     assert 'callback_hash' not in client.get('/api/call-endpoints').text
     csrf = client.headers.pop('X-CSRF-Token')
     assert client.post('/api/call-endpoints/deploy', json={'endpoint':'192.0.2.44','password':secret,'callback_url':'https://harbour.example.test'}).status_code == 403

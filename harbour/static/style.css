@@ -713,6 +713,8 @@ body.mobile-panel-open{overflow:hidden}
 .collector-sudo-form { display:grid;gap:12px; }
 .collector-sudo-form input { width:100%; }
 .collector-status { overflow-wrap:anywhere; }
+.collector-download { border:1px solid var(--line);border-radius:7px;padding:8px 12px;color:var(--text);background:var(--card);text-decoration:none; }
+.install-artifact-output { max-height:60vh; }
 @media(max-width:1000px){.login-table-heading{display:none}.login-event summary{grid-template-columns:1fr 100px 1fr}.login-event summary>.icon{display:none}.login-fingerprint{white-space:normal}.login-status .between,.logins-view>.between{flex-wrap:wrap;gap:10px}}
 @media(max-width:500px){.login-event summary{grid-template-columns:1fr 1fr}.login-filters>*{max-width:100%}.login-status{padding:12px}.login-event-detail dl{grid-template-columns:1fr}.login-filters label:first-child{width:100%}}
 /* OpenWRT diagnostics share a common time axis and preserve missing samples. */

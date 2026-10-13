@@ -3,12 +3,20 @@ import argparse
 import json
 import os
 import pwd
+import shlex
 import shutil
 import socket
 import subprocess
 from pathlib import Path
 
 FILES = ('Dockerfile', 'compose.yaml', 'build-iperf.sh', 'call_endpoint_service.py')
+
+
+def run(command, **kwargs):
+    # Only fixed Docker commands: configuration contents and credentials never
+    # become command arguments. This line is captured in Harbour's Install artifact.
+    print('$ ' + shlex.join(command), flush=True)
+    return subprocess.run(command, **kwargs)
 
 
 def install(reader, source):
@@ -31,9 +39,9 @@ def install(reader, source):
         if (root / name).is_symlink():
             raise RuntimeError('Deployment files must not be symlinks')
     compose = ['docker', 'compose', '--project-name', 'harbour-c-remote', '--project-directory', str(root)]
-    subprocess.run(['docker', 'compose', 'version'], check=True)
+    run(['docker', 'compose', 'version'], check=True)
     try:
-        info = subprocess.run(['docker', 'info', '--format', '{{json .SecurityOptions}}'], check=True,
+        info = run(['docker', 'info', '--format', '{{json .SecurityOptions}}'], check=True,
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         if 'name=rootless' in (getattr(info, 'stdout', '') or ''):
             # Namespace uid 0 maps to the SSH user with rootless Docker. No host
@@ -87,8 +95,8 @@ def install(reader, source):
         for path in (logs, root / 'endpoint.json'):
             os.chown(path, runtime_uid, runtime_gid)
     print('Building remote call endpoint in ' + str(root), flush=True)
-    subprocess.run([*compose, 'config', '--quiet'], check=True)
-    subprocess.run([*compose, 'up', '-d', '--build', '--wait', '--wait-timeout', '45'], check=True)
+    run([*compose, 'config', '--quiet'], check=True)
+    run([*compose, 'up', '-d', '--build', '--wait', '--wait-timeout', '45'], check=True)
     print('Endpoint ready. Logs: ~/harbour-c-remote/logs/YY-MM-DD (UTC). HTTP port: ' + str(config['http_port']), flush=True)
 
 

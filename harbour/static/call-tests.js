@@ -5,7 +5,7 @@ function renderCallTests(s,d){
   const tests=data.tests||[],running=tests.find(t=>t.status==='running');
   const metric=(t,direction,key,digits=2)=>networkNumber(t.result?.directions?.[direction]?.summary?.[key],digits);
   return `<section class="call-tests"><div class="between"><h3>Remote call flow tests</h3>${admin()?button('call-test-configure','Remote call flow test','activity','small',`data-server="${e(s.id)}" ${running?'disabled':''}`):''}</div>
-    <div class="endpoint-controls">${admin()?button('endpoint-setup','Deploy remote endpoint','','small'): ''}${button('endpoint-logs','Remote logs','download','small')}${admin()?button('call-schedule','Schedule','','small'):''}</div>${data.schedule?`<p class="hint"><b>Recurring:</b> ${e(data.schedule.config.profile_snapshot?.name||data.profiles.find(p=>p.id===data.schedule.config.profile)?.name||data.schedule.config.profile)} · every ${data.schedule.interval_seconds/60} minutes · ${data.schedule.config.duration/60} minute load · ${data.schedule.enabled?'next '+e(new Date(data.schedule.next_run*1000).toLocaleString()):'paused'} ${admin()?button('call-schedule-remove','Remove schedule','','small'):''}<br>${e(data.schedule.last_outcome||'Awaiting first run')}</p>`:''}<details class="network-notes"><summary>What this test measures</summary><p class="hint">Controlled UDP loads for FaceTime, Teams and Zoom. Runs from the on-site Harbour host to your test endpoint. A wired host tests its LAN/WAN path, not the caller’s Wi-Fi. These are traffic approximations, not real calls or video-quality scores.</p>
+    <div class="endpoint-controls">${admin()?button('endpoint-setup','Deploy remote endpoint','','small')+button('install-artifacts','Saved installs','','small'): ''}${button('endpoint-logs','Remote logs','download','small')}${admin()?button('call-schedule','Schedule','','small'):''}</div>${data.schedule?`<p class="hint"><b>Recurring:</b> ${e(data.schedule.config.profile_snapshot?.name||data.profiles.find(p=>p.id===data.schedule.config.profile)?.name||data.schedule.config.profile)} · every ${data.schedule.interval_seconds/60} minutes · ${data.schedule.config.duration/60} minute load · ${data.schedule.enabled?'next '+e(new Date(data.schedule.next_run*1000).toLocaleString()):'paused'} ${admin()?button('call-schedule-remove','Remove schedule','','small'):''}<br>${e(data.schedule.last_outcome||'Awaiting first run')}</p>`:''}<details class="network-notes"><summary>What this test measures</summary><p class="hint">Controlled UDP loads for FaceTime, Teams and Zoom. Runs from the on-site Harbour host to your test endpoint. A wired host tests its LAN/WAN path, not the caller’s Wi-Fi. These are traffic approximations, not real calls or video-quality scores.</p>
     </details>${!data.available?'<p class="hint">iperf3 is not installed on the Harbour host. Rebuild the container or install it for a native deployment.</p>':''}
     ${running?`<p role="status"><b>${e(running.config.profile_snapshot.name)}</b> · ${e(running.phase)} · ${Math.max(0,Math.floor(Date.now()/1000-running.created))} s elapsed ${admin()?button('call-test-stop','Stop test','','small',`data-server="${e(s.id)}" data-test="${e(running.id)}"`):''}</p>`:''}
     <p class="hint">Latest 20 tests · receiver loss and jitter · fixed-rate UDP approximation</p>
@@ -111,7 +111,8 @@ async function endpointSetup(server=current()){
     <div class="form-error" role="alert"></div><div class="form-actions"><button type="submit" class="primary">Deploy</button></div>
     </form>
     ${endpoints.filter(x=>!x.deployed).map(x=>`<div class="between"><span>${e(x.endpoint)} · awaiting confirmation</span>${button('endpoint-check','Check connection','','small',`data-endpoint="${e(x.id)}" data-server="${e(server?.id||'')}"`)}</div>`).join('')}
-    <section id="endpoint-progress" hidden class="collector-setup" data-kind="call-endpoint"><div class="collector-progress" hidden><p class="collector-status" role="status"></p><pre class="collector-output" tabindex="0" aria-label="Remote endpoint setup output"></pre><div class="collector-password"></div>${button('collector-cancel','Stop setup','','ghost small')}</div></section>`);
+    ${button('install-artifacts','Saved installs','','small')}
+    <section id="endpoint-progress" hidden class="collector-setup" data-kind="call-endpoint">${collectorProgress('Remote endpoint setup output')}<div class="endpoint-continue" hidden>${button('endpoint-continue','Continue to call test','','primary',`data-server="${e(server?.id||'')}"`)}</div></section>`);
 }
 document.addEventListener('submit',async event=>{
   const form=event.target;if(form.id!=='endpoint-form')return;event.preventDefault();
@@ -121,15 +122,21 @@ document.addEventListener('submit',async event=>{
   body.password=form.elements.password.value;form.elements.password.value='';markFormSaved(form);
   form.querySelector('.form-error').textContent='';
   form.querySelectorAll('input').forEach(el=>el.disabled=true);
+  form.querySelector('details').open=false;
   const root=$('#endpoint-progress');
   try{
     const result=await pushCollector(root,'install',{url:'/api/call-endpoints/deploy',body});
     if(result?.ok&&form.isConnected){
-      const server=state.data.servers.find(x=>x.id===form.dataset.server);
-      if(server)await callTestForm(server);
+      form.dataset.deployed='true';
+      root.querySelector('.endpoint-continue').hidden=false;
     }
   }catch(error){if(form.isConnected)form.querySelector('.form-error').textContent=error.message;}
-  finally{delete body.password;if(form.isConnected){submit.disabled=false;form.querySelectorAll('input').forEach(el=>el.disabled=false);}}
+  finally{delete body.password;if(form.isConnected){submit.disabled=form.dataset.deployed==='true';form.querySelectorAll('input').forEach(el=>el.disabled=submit.disabled);}}
+});
+document.addEventListener('click',async event=>{
+  const el=event.target.closest('[data-action=endpoint-continue]');if(!el)return;
+  const server=state.data.servers.find(x=>x.id===el.dataset.server);
+  try{if(server)await callTestForm(server);else closeOverlay();}catch(error){toast(error.message,true);}
 });
 document.addEventListener('click',async event=>{
   const el=event.target.closest('[data-action=endpoint-check]');if(!el)return;

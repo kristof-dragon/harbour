@@ -155,8 +155,9 @@ Use **Call tests → Remote call flow test** (Harbour 0.1.36+):
    that connection; it is not independent identity verification.
 5. After both traffic listeners are bound, the container posts a deployment-specific
    bearer challenge back to Harbour. Harbour verifies that callback and separately
-   checks the authenticated HTTP service's endpoint/boot identity. Only then does
-   the form move to call-profile selection. The callback retries for three minutes;
+   checks the authenticated HTTP service's endpoint/boot identity. Deployment
+   output stays open; press **Continue to call test** when ready to choose a
+   profile. The callback retries for three minutes;
    **Check connection** retries confirmation without an SSH password. If the
    callback address was wrong, redeploy with the correct address.
 6. Choose FaceTime, Teams or Zoom and start a test, or save an explicit recurring
@@ -169,6 +170,49 @@ Neither token is the one-shot SSH password. Startup confirmation does not claim
 that the UDP path is healthy; the traffic test establishes that evidence.
 Closing the deployment overlay stops its SSH connection; completed remote steps
 remain. It does not erase logs or install host packages or firewall rules.
+
+### Install artifacts (0.1.37+)
+
+**Download output** is available during and after setup. The deployment overlay
+does not close or switch to the call form automatically. Scrolling up stops the
+output from following new lines. For long output, the browser shows the latest
+150,000 characters; the download contains the complete saved transcript.
+
+Every accepted setup attempt creates an **Install** artifact on the Harbour
+server, including resource/login collector pushes and installations. Open
+**Saved installs** from Call tests, the installer, or the main Menu to view and
+download previous attempts. This is administrator-only and works without SSH
+or a reachable remote endpoint. Older artifacts remain available through the
+list's **Older** button.
+
+Harbour commits each sanitized output chunk to its local `HARBOUR_DATA/harbour.db`
+before sending it to the browser. The `install_artifacts` and `install_output`
+tables have no automatic expiry or cleanup and no dependency on the lifetime
+of a server, endpoint, or administrator account. They persist across container
+recreation through Harbour's existing data volume; include that database in
+normal backups. These are local audit records, not a tamper-proof external ledger.
+
+Artifacts include the initiating account, remote address and SSH account, pinned
+host fingerprint, Harbour version, bundle SHA-256, start/finish times, output and
+outcome. The transcript includes the installer invocation and its Docker
+commands, without configuration contents. Outcomes distinguish success, failure,
+stopping/disconnection and an interrupted Harbour process. At startup, unfinished
+attempts are marked interrupted with remote state explicitly unconfirmed. Output
+already committed remains available even if the browser disconnects or Harbour
+restarts. A snapshot downloaded during installation is labelled `running`.
+
+SSH/sudo passwords and endpoint/callback tokens are excluded. Known secrets are
+redacted before output is stored or streamed, including across output chunks;
+the temporary in-memory redaction state is cleared when the one-shot operation
+ends. Request bodies, authentication headers and submitted password responses
+are never copied into artifacts. Raw setup errors that might contain secrets
+retain the existing safe-message handling. If Harbour cannot create an artifact,
+it refuses to begin deployment; an output-storage failure stops setup and reports
+the storage problem. Previously committed output survives, subject to local
+storage availability. The existing 1 MB setup-stream limit still stops excessive
+output and records that limit, rather than silently treating a partial log as a
+successful install. This feature records new attempts after upgrading; previous
+versions' discarded output cannot be reconstructed.
 
 The deployment always lives in the SSH user's **`~/harbour-c-remote`**:
 
@@ -400,6 +444,20 @@ router, firewall or real-call path was changed or tested during this update.
 No user-owned endpoint or router was deployed or changed. Real WAN behavior,
 remote routing/firewall reachability and sustained-hour performance remain to be
 checked on the user's deployment.
+
+## Validation for retained Install artifacts (0.1.37)
+
+- Pinned Linux Python 3.15 regression suite: **502 passed, 1 skipped**; one
+  existing Starlette/httpx deprecation warning. Focused local installer and
+  artifact tests: **39 passed**.
+- Both collector and OpenWrt browser suites pass. They verify downloads during
+  and after streaming, preservation of output beyond the browser's visible tail,
+  an explicit Continue button after deployment, saved artifact browsing, failed
+  transcripts, safe text rendering, credential exclusion and mobile layout.
+- Persistence checks cover failed/cancelled attempts, a disconnect before response
+  headers, a real HTTP client disconnect, restart recovery, deleted hosts,
+  pagination, administrator-only retrieval, split-secret redaction, output limits
+  and storage failures. No user-owned remote host was deployed or changed.
 
 ## Reference index
 

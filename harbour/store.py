@@ -117,7 +117,8 @@ def initialize():
           PRIMARY KEY(server_id,kind),
           FOREIGN KEY(server_id,kind) REFERENCES notification_rules(server_id,kind) ON DELETE CASCADE);
         """)
-        from . import logins, recording
+        from . import install_artifacts, logins, recording
+        install_artifacts.initialize(con)
         logins.initialize(con)
         recording.initialize(con)
         def add_columns(table, columns):

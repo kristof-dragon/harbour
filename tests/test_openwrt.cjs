@@ -106,6 +106,13 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.screenshot({path:'test-results/remote-endpoint-deploy.png'});
   await page.locator('#endpoint-form [name=password]').fill('one-shot-browser-fixture');
   await page.getByRole('button',{name:'Deploy',exact:true}).click();
+  await page.getByRole('button',{name:'Continue to call test',exact:true}).waitFor();
+  assert.equal(await page.locator('#call-test-form').count(),0);
+  assert.equal(await page.locator('#endpoint-form [name=password]').inputValue(),'');
+  assert.equal(await page.getByRole('button',{name:'Deploy',exact:true}).isDisabled(),true);
+  assert.match(await page.getByRole('link',{name:'Download output',exact:true}).getAttribute('href'),/^\/api\/install-artifacts\/.+\/download$/);
+  await page.screenshot({path:'test-results/remote-endpoint-completed.png'});
+  await page.getByRole('button',{name:'Continue to call test',exact:true}).click();
   await page.locator('#call-test-form').waitFor();
   assert.match(await page.locator('#call-profile-note').textContent(),/Not an Apple specification/);
   await page.locator('#call-test-form [name=profile]').selectOption('teams-meeting');

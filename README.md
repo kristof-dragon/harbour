@@ -57,7 +57,11 @@ The **Call tests** tab includes the WebUI remote installer: deploy to
 `~/harbour-c-remote`, retain remote logs in `logs/YY-MM-DD` (UTC), and download
 them over token-authenticated HTTP without SSH. The log port and token are set
 during deployment. The test overlay accepts a one-shot SSH password, deploys
-without sudo or a saved server, and waits for startup confirmation. Tests support
+without sudo or a saved server, and waits for startup confirmation. Deployment
+output stays visible until you close it or continue. **Download output** saves the
+transcript; **Saved installs** (also in the main Menu) retains administrator-only
+Install artifacts on Harbour indefinitely, including failed and interrupted
+attempts, with credentials excluded. Tests support
 up to 60 minutes and recurring profile schedules. Analysis correlates local and
 remote evidence, with a combined compressed download. Network, Wireless, Incidents, Call tests, Archives and
 Activity have separate tabs; Recorder and Router probe cards adapt to the screen.
