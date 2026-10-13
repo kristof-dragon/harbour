@@ -19,19 +19,23 @@ function endCollectorTransfer(){
 document.addEventListener('harbour:overlay-close',endCollectorTransfer);
 window.addEventListener('pagehide',()=>collectorTransfer?.controller.abort());
 
-async function pushCollector(root,mode){
+async function pushCollector(root,mode,options={}){
   if(collectorTransfer)return;
   const active={root,controller:new AbortController(),id:null,prompt:null};collectorTransfer=active;
   const status=root.querySelector('.collector-status'),output=root.querySelector('.collector-output'),password=root.querySelector('.collector-password');
-  root.querySelector('.collector-progress').hidden=false;output.textContent='';password.replaceChildren();
+  root.hidden=false;root.querySelector('.collector-progress').hidden=false;output.textContent='';password.replaceChildren();
   root.querySelectorAll('[data-action=collector-push]').forEach(el=>el.disabled=true);
   root.querySelector('[data-action=collector-cancel]').hidden=false;
-  status.classList.remove('form-error');status.textContent='Connecting…';let finished=false;
+  status.classList.remove('form-error');status.textContent='Connecting…';let finished=false,result=null;
   const append=text=>{output.textContent=(output.textContent+text).slice(-150000);output.scrollTop=output.scrollHeight;};
   try{
-    const response=await fetch(`/api/servers/${encodeURIComponent(root.dataset.server)}/collector/${root.dataset.kind}`,{
+    let body=JSON.stringify(options.body||{action:mode});
+    if(options.body){delete options.body.password;options.body=null;}
+    const pendingResponse=fetch(options.url||`/api/servers/${encodeURIComponent(root.dataset.server)}/collector/${root.dataset.kind}`,{
       method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':state.user.csrf},
-      body:JSON.stringify({action:mode}),signal:active.controller.signal});
+      body,signal:active.controller.signal});
+    body=null;
+    const response=await pendingResponse;
     if(!response.ok){const data=await response.json();throw Error(typeof data.detail==='string'?data.detail:'Could not start collector setup.');}
     const reader=response.body.getReader(),decoder=new TextDecoder();let pending='';
     while(true){
@@ -46,11 +50,13 @@ async function pushCollector(root,mode){
         if(event.kind==='output')append(event.text);
         if(event.kind==='progress')status.textContent=`Uploading… ${Math.round(event.received/event.total*100)}%`;
         if(event.kind==='password'){
+          if(root.dataset.kind==='call-endpoint')throw Error('Unexpected password prompt: Docker deployment does not use sudo.');
           active.prompt=event.prompt;status.textContent='Waiting for sudo password';
           password.innerHTML=`<form class="collector-sudo-form" autocomplete="off"><p>${e(event.message)}</p><label>Sudo password<input type="password" name="sudo_password" autocomplete="off" maxlength="1024" required></label><p class="hint">Sent only to this host’s sudo prompt. It is never saved in Harbour or included in setup output.</p><div class="form-error" role="alert"></div><button type="submit" class="primary">Continue installation</button></form>`;
           password.querySelector('input').focus();
         }
         if(event.kind==='result'){
+          result=event;
           finished=true;status.textContent=event.message;append('\n'+event.message+'\n');password.replaceChildren();
           status.classList.toggle('form-error',!event.ok);
         }
@@ -66,6 +72,7 @@ async function pushCollector(root,mode){
     root.querySelectorAll('[data-action=collector-push]').forEach(el=>el.disabled=state.demo);
     root.querySelector('[data-action=collector-cancel]').hidden=true;
   }
+  return result;
 }
 document.addEventListener('click',event=>{
   const button=event.target.closest('[data-action]');

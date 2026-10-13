@@ -217,11 +217,15 @@ def test_full_bootstrap_protocol_in_subprocess(client, tmp_path, monkeypatch, ac
     original = Path.read_bytes
     def source(path):
         data = original(path)
+        if kind == 'call-endpoint' and path.name == 'call_endpoint_install.py':
+            return b"print('Fixture service started')\n"
         if path.name == 'remote_collector_setup.py':
             injection = ("from types import SimpleNamespace\n"
                          "pwd.getpwuid=lambda _: SimpleNamespace(pw_dir=" + repr(str(home)) + ")\n"
                          "shutil.which=lambda _: " + repr(str(fake_sudo)) + "\n"
                          "os.geteuid=lambda: 1000\n")
+            if kind == 'call-endpoint':
+                injection += "sys.platform='linux'\n"
             data = data.replace(b"if __name__ == '__main__':", injection.encode() + b"\nif __name__ == '__main__':")
         return data
     monkeypatch.setattr(Path, 'read_bytes', source)
@@ -259,7 +263,10 @@ def test_full_bootstrap_protocol_in_subprocess(client, tmp_path, monkeypatch, ac
         connections.append(server['id']); client = Client(); cancel.bind(client.close); return client
     monkeypatch.setattr(ssh, 'connect', connect)
     monkeypatch.setattr(ssh, 'stored_key', lambda _: 'fixture-key')
-    monkeypatch.setattr(setup.Operation, 'password', lambda _: 'one-time password')
+    def password(_):
+        assert kind != 'call-endpoint', 'Docker deployment must never ask for sudo'
+        return 'one-time password'
+    monkeypatch.setattr(setup.Operation, 'password', password)
     op = setup.Operation(module.get_server('atlas'), kind, action, {'session_token': 'test'}, threading.Lock())
     result = setup.transfer(op)
     assert result['ok'], result

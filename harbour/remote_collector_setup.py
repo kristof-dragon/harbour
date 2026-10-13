@@ -89,9 +89,9 @@ class SudoOutput:
             output(self.decoder.decode(text, final=final))
 
 
-def run_installer(command, stream):
+def run_installer(command, stream, elevate=True):
     marker = ('HARBOUR_SUDO_' + secrets.token_hex(16) + ':').encode()
-    if os.geteuid() != 0:
+    if elevate and os.geteuid() != 0:
         sudo = shutil.which('sudo')
         if not sudo:
             raise RuntimeError('sudo is not installed. Install manually using an administrator account.')
@@ -152,17 +152,20 @@ def main():
         if config['kind'] == 'call-endpoint':
             if sys.platform != 'linux':
                 raise RuntimeError('The remote call endpoint requires a Linux Docker host')
+            if Path('/etc/openwrt_release').exists():
+                raise RuntimeError('OpenWrt remains read-only; choose a separate Linux Docker host')
             target = folder / 'endpoint.json'
             target.write_text(json.dumps(config['endpoint']))
             target.chmod(0o600)
         command = [sys.executable, '-I', '-S', '-u', str(folder / config['installer']), '--reader', config['reader']]
         if config['kind'] == 'resources':
             command += ['--interval', str(config['interval'])]
-        output('Install command: ' + shlex.join(['sudo', *command]) + '\n')
+        elevate = config['kind'] != 'call-endpoint'
+        output('Install command: ' + shlex.join((['sudo'] if elevate else []) + command) + '\n')
         if config['action'] == 'install':
-            output('Installing the boot service…\n')
+            output('Starting the Docker endpoint…\n' if not elevate else 'Installing the boot service…\n')
             try:
-                code = run_installer(command, stream)
+                code = run_installer(command, stream, elevate=elevate)
             finally:
                 if config['kind'] == 'call-endpoint':
                     (folder / 'endpoint.json').unlink(missing_ok=True)

@@ -88,7 +88,7 @@ media retransmission/FEC, DSCP policies and jitter buffers are not reproduced.
 1. Keep the normal recorder probes running. Include the router LAN reference,
    remote test endpoint and useful independent destinations among the 12 targets.
 2. In **Call tests → Remote call flow test**, choose a profile and
-   supply the remote IP and first port. Check the displayed rates and data volume.
+   deploy an endpoint if needed, then check the profile rates and data volume.
 3. Default timing is 60 seconds idle, 180 seconds under load and 60 seconds
    recovery. Compare RTT, receiver loss/jitter and router CPU, queues and retries
    across these periods. A load-start marker links the surrounding router evidence.
@@ -104,22 +104,24 @@ stay unavailable. No universal pass/fail or MOS score is assigned. Published
 application diagnostic thresholds are not interchangeable acceptance criteria.
 
 Tests are explicit, one at a time across this Harbour installation, bounded to
-64–8000 kbps per direction and 10–300 seconds of load. The latest 20 results per
+64–8000 kbps per direction and 10–3600 seconds (up to 60 minutes) of load. The latest 20 results per
 router are retained. Exports preserve profile version/source, modified settings,
-iperf3 output and direction-specific timing. Interval times are relative to that
-iperf3 test; local process start is only an approximate wall-clock anchor.
+iperf3 output and direction-specific timing. Interval times are relative to that iperf3 test. Managed endpoints add
+independent remote records and bounded clock/timing correlation, described below.
 
 Closing the browser does not stop a test. Stop test, pausing monitoring or network
 recording, changing/removing the router connection, and graceful Harbour shutdown
-cancel it. A restarted Harbour marks unfinished tests interrupted and never
-resumes traffic automatically. A forced process/host failure can prevent result
+cancel it. A restarted Harbour marks unfinished tests interrupted; it never resumes
+those unfinished runs. Explicit schedules continue at a future interval, without
+replaying missed starts. A forced process/host failure can prevent result
 recovery; iperf3 duration limits still bound an orphaned client process. A failed
 or cancelled run is not reported as a clean test. The independent passive recorder
 continues when only the web service restarts.
 
 The incident window is two minutes before to five minutes after its marker,
-bounded to 60,000 rows. Long recovery periods can extend beyond it. Export the
-traffic test separately for the full test evidence. At 12 targets and 250 ms,
+bounded to 60,000 rows. Long recovery periods can extend beyond it. Use **Download evidence (.gz)** for the full test window, including hour-long
+calls. Its router analysis uses consecutive seven-minute windows throughout
+the call; it is not confined to the load-start incident marker. At 12 targets and 250 ms,
 normal recorder/router/reference/health rows total roughly 28,000 per seven-minute
 window; late replies and logs add more. Retention size caps may fill sooner with
 more targets. Router pings now share one SSH connection, but still run one bounded
@@ -128,25 +130,45 @@ actual router before adopting the fastest settings permanently.
 
 ## Remote Docker endpoint
 
-Use the existing **WebUI remote installer** (Harbour 0.1.34+):
+Use **Call tests → Remote call flow test** (Harbour 0.1.36+):
 
-1. Add the remote **Linux** host to Harbour as a Docker or plain server, with its
-   verified SSH connection. Docker Engine and the Compose plugin must already be
-   available; Harbour does not install or upgrade host packages.
-2. On the OpenWrt server, open **Call tests → Deploy remote endpoint** and select
-   that remote host. Set its reachable IP and the first traffic port (default
-   5201; the second is 5202). Choose the log HTTP port, initially a random number
-   between 20000 and 59999. If the remote port is occupied, choose another.
-3. Leave the token blank to generate one securely on first deployment, or supply
-   32–128 URL-safe characters. A blank token on subsequent deployments preserves
-   the saved token. Set retention (30 days by default).
-4. Select **Save & deploy endpoint**. The existing installer streams progress
-   over a separate, pinned SSH connection and asks for sudo only when needed.
-   Its sudo password is never saved. Closing the dialog cancels the setup
-   connection; completed deployment steps and logs remain on the host.
-5. Open **Remote logs** to choose a date and download files. These requests use
-   HTTP with `Authorization: Bearer …`; they do **not** open SSH. Saved endpoint
-   addresses and ports are also available in the call-test form.
+1. With no ready endpoint, the same overlay opens the deployment form. Enter
+   the remote Linux IP, SSH username and one-shot SSH password. No monitored
+   server entry or saved SSH credential is required. Docker Engine, Compose
+   and Python 3.9+ must already be available to this account.
+2. Set the Harbour callback address that the remote container can reach. The
+   browser's current origin is the starting value; replace it if that address
+   is not reachable remotely. Advanced fields cover SSH port, an independently
+   verified host fingerprint, consecutive traffic ports, a random HTTP log port
+   (20000–59999 initially), and retention days.
+3. Press **Deploy**. The installer runs directly as the SSH account with its
+   existing Docker access. **No sudo prompt or privilege escalation is used.**
+   A Docker permission failure stops deployment with an actionable message.
+   Normal Docker uses the SSH account's UID/GID in the container (10001 for a
+   root SSH account); rootless Docker maps container UID 0 to the SSH user.
+4. Harbour sends the SSH password only to SSH authentication on that target.
+   It is never written to the database, logs, export, installer archive, remote
+   configuration or Docker build context. Browser fields and operation-held
+   credentials are cleared after use/failure/cancellation. This is an application
+   lifetime guarantee, not a claim to physically erase Python/browser/OS memory.
+   Without a supplied fingerprint, discovery pins the first-seen host key for
+   that connection; it is not independent identity verification.
+5. After both traffic listeners are bound, the container posts a deployment-specific
+   bearer challenge back to Harbour. Harbour verifies that callback and separately
+   checks the authenticated HTTP service's endpoint/boot identity. Only then does
+   the form move to call-profile selection. The callback retries for three minutes;
+   **Check connection** retries confirmation without an SSH password. If the
+   callback address was wrong, redeploy with the correct address.
+6. Choose FaceTime, Teams or Zoom and start a test, or save an explicit recurring
+   schedule. **Remote logs** retrieves dated files over HTTP without SSH.
+
+The persistent log token is generated separately and encrypted in Harbour's
+DB. Callback challenges are stored there as hashes, expire after 20 minutes,
+and accept only the first boot identity (same-boot retries are idempotent).
+Neither token is the one-shot SSH password. Startup confirmation does not claim
+that the UDP path is healthy; the traffic test establishes that evidence.
+Closing the deployment overlay stops its SSH connection; completed remote steps
+remain. It does not erase logs or install host packages or firewall rules.
 
 The deployment always lives in the SSH user's **`~/harbour-c-remote`**:
 
@@ -159,6 +181,8 @@ harbour-c-remote/
     26-10-13/
       upload-HHMMSS-id.jsonl
       download-HHMMSS-id.jsonl
+      run-TESTID-upload.jsonl
+      run-TESTID-download.jsonl
     26-10-14/
       ...
 ```
@@ -166,7 +190,8 @@ harbour-c-remote/
 Dates use **UTC**, always `YY-MM-DD`. JSONL records have UTC timestamps and
 contain listener lifecycle events plus chunks of iperf's JSON output. The
 original iperf result can span consecutive output records; these are endpoint
-logs, while the test export remains the parsed receiver result. Files rotate at
+logs. Independently indexed run files retain complete remote JSON documents,
+run IDs, direction, boot ID and observation time, and survive container restart. Files rotate at
 3 MiB and date boundaries when output arrives. The next output after midnight
 is written into the new date folder. Completed files expire after the chosen
 retention or when the 1 GiB total cap is reached. Cleanup runs every 30 seconds;
@@ -175,11 +200,12 @@ cap. Existing logs survive container recreation and repeat deployments.
 
 Harbour encrypts the HTTP token in its database and never sends it back in
 settings, test exports or setup progress. The remote configuration and logs use
-owner-only permissions. A custom token can be selected during deployment for
-other HTTP clients; the generated token also remains in the protected remote
-configuration. Read-only Harbour users may download logs; only administrators
+owner-only permissions. The generated token remains in the protected remote
+configuration for administrative HTTP clients. Read-only Harbour users may download logs; only administrators
 can configure/deploy endpoints. The remote API provides `GET /logs`,
-`GET /logs/YY-MM-DD` and `GET /logs/YY-MM-DD/name.jsonl`, all token protected.
+`GET /logs/YY-MM-DD`, `GET /logs/YY-MM-DD/name.jsonl`, `GET /status` and
+`GET /runs/TESTID`, all token protected. Per-run documents are bounded to 16 MiB
+and a paired response to 32 MiB; client output is bounded to 24 MiB per direction.
 It has no execution or upload endpoints, rejects symlinks/traversal and bounds
 file size, socket wait time and concurrent connections. Tokens stay in headers,
 never URLs. Plain HTTP requires a trusted LAN or VPN: it does not encrypt the
@@ -192,7 +218,7 @@ traffic ports must allow **both TCP control and UDP data**; the log port needs
 TCP. Restrict all three published ports to the intended Harbour site using the
 host/cloud firewall. The installer does not change firewall rules. The HTTP
 token protects logs only; iperf itself remains source-restricted. Each listener
-has a 10 Mbps abort limit and rejects tests longer than 330 seconds, following
+has a 10 Mbps abort limit and rejects tests longer than 3630 seconds, following
 [ESnet's documented server options](https://software.es.net/iperf/invoking.html).
 The remote host needs spare CPU/bandwidth, and one endpoint pair serves one site
 at a time. Multiple sites need separate hosts/deployments.
@@ -224,7 +250,8 @@ python3 scripts/start.py
 
 This rebuilds and restarts Harbour, including its iperf3 client. The remote
 endpoint is deployed separately. Start a test from the Call tests tab only after
-that endpoint is reachable; enabling the feature does not start traffic by itself.
+that endpoint is reachable. Deploying an endpoint alone does not start traffic;
+starting a test or explicitly enabling a schedule does.
 
 ## Useful subsequent extensions
 
@@ -244,6 +271,70 @@ that endpoint is reachable; enabling the feature does not start traffic by itsel
 Docker gives us room to add those services later. The controlled UDP test is the
 first implementation; no WebRTC, RTP codec model or vendor-call emulator is
 included in this version.
+
+## Recurring tests and longer calls
+
+**Call tests → Schedule** uses the same profile/rate/duration controls. Loads can
+run for any integer duration from 10 seconds to 3600 seconds, with 30/60-minute
+suggestions. Choose a start-to-start interval in minutes (up to seven days).
+The interval must include both quiet periods, the load, and at least 30 seconds
+for result collection. For example, a 60-minute load with 60-second quiet periods
+fits a 120-minute interval. The displayed payload estimate is per run.
+
+The first run occurs one interval after saving. The tab shows the next due time
+and last scheduling outcome. One test can run at a time across Harbour; busy,
+paused/offline recording or unavailable-endpoint slots are skipped and reported,
+not queued. Scheduling pauses while Harbour is stopped and advances overdue
+slots on restart. Removing the schedule prevents future starts; **Stop test**
+ends an already running test. A saved schedule requires a confirmed managed
+endpoint and stores no SSH credential. No Codex/chat automation is involved.
+
+The latest 20 tests and their collected evidence are retained per router. Active
+runs protect their raw recorder window from cleanup until collection finishes.
+The aggregate capture is bounded to 300,000 rows / 128 MiB of serialized recorder
+samples (enough for the normal 12-target, 250 ms, hour-long collection pattern);
+exceptionally chatty logs or large router payloads can hit the cap, which is
+reported as partial evidence. Protection can temporarily exceed raw-retention
+size limits. Receiver parsing retains up to 7202 intervals per direction.
+
+## Correlation, analysis and aggregate export
+
+Each direction carries `harbour:TESTID:upload` or `:download` in iperf3's
+`--extra-data`. Harbour independently fetches the remote indexed logs using the
+HTTP token, then requires the run ID, direction **and matching iperf cookie** on
+both sides. Timestamp proximity alone never assigns an unrelated test's log.
+These fields are transmitted and emitted by the pinned implementation:
+[ESnet iperf3 3.22 source](https://github.com/esnet/iperf/blob/3.22/src/iperf_api.c).
+
+Three authenticated clock probes before and after the load bracket each remote
+clock observation with local send/receive times; the shortest exchange provides
+the offset estimate and half-round-trip uncertainty. Clock steps or changed boot
+IDs disable remote interval alignment while preserving identity matching.
+Connection timestamps precede packet flow: start bounds therefore span the
+connection timestamp through result-observation time minus measured duration.
+Those bounds retain handshake/output delay and timestamp precision. Remote
+bounds also include offset uncertainty/drift; they do not measure one-way latency.
+Unobserved clock changes between probes remain a limitation.
+
+**Analysis** displays directional receiver loss/jitter, remote match status,
+baseline/load/recovery probe comparisons, receiver intervals, clock/evidence
+limits and router findings across the complete call. Packet loss, summary or
+interval jitter above 30 ms, and a ≥20 ms rise in p95 RTT are review signals,
+not vendor pass/fail certification or MOS. Coincident UDP loss and probe issues
+are reported as overlap within stated timing uncertainty; fault location and
+root cause remain unestablished. Analysis runs locally without external AI calls.
+
+**Download all evidence (.json.gz)** contains a manifest, profile/version/source,
+actual rates and times, original client JSON, independently fetched remote JSON
+and dated log paths, clock measurements, recorder samples/settings/run metadata,
+and deterministic analysis. No SSH password, HTTP token or callback challenge is
+included. Collected evidence is compressed and saved in Harbour, so remote log
+retention or later endpoint loss does not erase an existing export. **Collect /
+retry evidence** retries HTTP retrieval and merges retained local samples without
+discarding earlier evidence. Missing/failed/cancelled directions stay explicit.
+
+Older endpoints must be redeployed from the WebUI to gain startup confirmation,
+indexed correlation and the 60-minute server limit. Existing daily logs survive.
 
 ## Validation for the initial implementation
 
@@ -284,6 +375,31 @@ see [stack versions and compatibility notes](DEPENDENCIES.md). The WebUI install
 
 The remote installer is ready to run from the WebUI. No user-owned remote host,
 router, firewall or real-call path was changed or tested during this update.
+
+## Validation for one-shot deployment, correlation and schedules (0.1.36)
+
+- Full pinned Linux Python 3.15 suite: **492 passed, 1 skipped**. Follow-up tests
+  cover the final jitter-spike and active-window retention changes; the affected
+  local suite passed **67 tests**, followed by **90 passing targeted tests** on
+  the pinned Linux runtime (including the no-sudo/rootless installer check). Existing deprecation/SSH fixture warnings do
+  not represent live endpoint observations.
+- Browser fixtures cover deployment with only an OpenWrt server in Harbour,
+  automatic transition to profiles, absence of a sudo prompt, long-duration
+  recurring scheduling, analysis, downloads and responsive layout. The existing
+  collector progress/cancellation/password workflow also passes independently.
+- Both production images build. A real isolated endpoint completed simultaneous
+  10-second UDP streams, sent its HTTP startup callback, and returned independent
+  remote records with cookies matching the client results. An actual 3600-second
+  request was accepted and deliberately stopped after three seconds: this checks
+  the server duration limit, **not** an hour of sustained WAN performance.
+- Production Harbour smoke tests passed authentication, key generation, 2FA,
+  permissions, durable restart and non-root/read-only operation. Password
+  lifetime, callback authentication, migration, export, clock-step rejection,
+  schedule restart/overlap and hour-long interval parsing have focused tests.
+
+No user-owned endpoint or router was deployed or changed. Real WAN behavior,
+remote routing/firewall reachability and sustained-hour performance remain to be
+checked on the user's deployment.
 
 ## Reference index
 

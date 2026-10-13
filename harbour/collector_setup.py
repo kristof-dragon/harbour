@@ -42,7 +42,7 @@ class PasswordInput(BaseModel):
 
 
 class Operation:
-    def __init__(self, server, kind, action, user, lock):
+    def __init__(self, server, kind, action, user, lock, credential=None, endpoint_config=None):
         self.id = secrets.token_urlsafe(24)
         self.server, self.kind, self.action = server, kind, action
         self.session, self.lock = user['session_token'], lock
@@ -53,6 +53,15 @@ class Operation:
         self.done = threading.Event()
         self.started = False
         self.deadline = time.monotonic() + 900
+        self.ephemeral = credential is not None
+        self.credential = credential
+        self.endpoint_config = endpoint_config
+
+    def clear_secrets(self):
+        if self.credential is not None:
+            self.credential.clear()
+        self.credential = None
+        self.endpoint_config = None
 
     def emit(self, event):
         self.cancel.check()
@@ -63,6 +72,8 @@ class Operation:
             raise RuntimeError('Progress reader is too slow') from None
 
     def password(self):
+        if self.kind == 'call-endpoint':
+            raise RuntimeError('Docker deployment does not use sudo')
         with self.state_lock:
             self.prompt = secrets.token_hex(16)
             prompt = self.prompt
@@ -92,9 +103,11 @@ def transfer(op):
               'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
     if op.kind == 'call-endpoint':
         from . import call_endpoint
-        config['endpoint'] = call_endpoint.saved(server['id'], secret=True)
+        config['endpoint'] = op.endpoint_config or call_endpoint.saved(server['id'], secret=True)
+    credential = None
     try:
-        credential = ({'password': store.cipher().decrypt(server['password_encrypted'].encode()).decode()}
+        credential = (op.credential if op.ephemeral else
+                      {'password': store.cipher().decrypt(server['password_encrypted'].encode()).decode()}
                       if server.get('auth_method') == 'password' else {'pkey': ssh.stored_key(server['key_id'])})
         op.emit({'kind': 'output', 'text': 'Opening a separate SSH connection…\n'})
         client = ssh.connect(server, cancel=op.cancel, **credential)
@@ -112,7 +125,7 @@ def transfer(op):
         checked = 0
         while time.monotonic() < op.deadline:
             op.cancel.check()
-            if time.monotonic() - checked >= 1:
+            if not op.ephemeral and time.monotonic() - checked >= 1:
                 current = store.one('SELECT * FROM servers WHERE id=?', (server['id'],))
                 if not current or logins.connection_signature(current) != logins.connection_signature(server):
                     raise ssh.Cancelled('Host connection changed')
@@ -152,6 +165,9 @@ def transfer(op):
             time.sleep(.02)
         raise TimeoutError('Setup timed out')
     finally:
+        if credential is not None:
+            credential.clear()
+        op.clear_secrets()
         if client:
             client.close()
         op.cancel.unbind()
@@ -161,13 +177,22 @@ def worker(op, username, address):
     try:
         result = transfer(op)
         if op.kind == 'call-endpoint' and result.get('ok'):
-            store.execute('UPDATE call_endpoints SET deployed=1 WHERE server_id=?', (op.server['id'],))
+            if op.ephemeral:
+                from . import call_endpoint
+                op.emit({'kind': 'output', 'text': 'Docker started. Waiting for its startup confirmation and checking HTTP access…\n'})
+                call_endpoint.confirm(op.server['id'], op.cancel)
+                result = {'kind': 'result', 'ok': True, 'endpoint_id': op.server['id'],
+                          'message': 'Endpoint confirmed and reachable. Choose a profile to start the test.'}
+            else:
+                store.execute('UPDATE call_endpoints SET deployed=1 WHERE server_id=?', (op.server['id'],))
         op.emit(result)
         auth.log(username, address, 'collector_setup_succeeded' if result.get('ok') else 'collector_setup_failed',
                  op.server['id'] + ' · ' + op.kind + ' · ' + op.action)
     except Exception as exc:
         message = ('Host fingerprint mismatch. Verify the server identity before retrying.' if isinstance(exc, ssh.HostKeyMismatch)
-                   else 'SSH sign-in failed. Check the saved connection credentials.' if isinstance(exc, paramiko.AuthenticationException)
+                   else 'SSH sign-in failed. Check the username and password.' if isinstance(exc, paramiko.AuthenticationException)
+                   else exc.detail if op.ephemeral and isinstance(exc, HTTPException)
+                   else 'Endpoint setup stopped. Check SSH, Python 3.9+, Docker access and the callback address. No sudo is used.' if op.ephemeral
                    else 'Setup or its sudo prompt timed out. Check the host before retrying; completed steps are retained.' if isinstance(exc, TimeoutError)
                    else 'Setup stopped. Check SSH access, Python 3.9+, and the host service before retrying; completed steps are retained.')
         if not op.cancel.is_set():
@@ -177,6 +202,7 @@ def worker(op, username, address):
                 pass
         auth.log(username, address, 'collector_setup_stopped', op.server['id'] + ' · ' + op.kind + ' · ' + op.action)
     finally:
+        op.clear_secrets()
         with op.state_lock:
             op.prompt = None
             while not op.replies.empty():
@@ -210,6 +236,7 @@ class SetupResponse(StreamingResponse):
         finally:
             self.op.cancel.stop()
             if not self.op.started:
+                self.op.clear_secrets()
                 self.op.lock.release()
                 self.op.done.set()
                 with guard:
@@ -245,6 +272,10 @@ def start(id_: str, kind: Literal['resources', 'logins', 'call-endpoint'], body:
             lock.release()
             raise
 
+    return response(op, request, user, address)
+
+
+def response(op, request, user, address):
     async def stream():
         try:
             yield json.dumps({'kind': 'started', 'id': op.id}) + '\n'

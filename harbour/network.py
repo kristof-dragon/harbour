@@ -296,6 +296,9 @@ def maintain(id_, stop=None):
     # Archive failures are visible and retried; they must not erase evidence.
     network_archives.maintain(id_, settings, stop)
     protected = 'AND archived=1' if settings['archive_enabled'] else ''
+    # Keep an active long call's complete window until its aggregate evidence
+    # has been collected, even with a one-hour raw-retention setting.
+    protected += " AND NOT EXISTS (SELECT 1 FROM network_call_tests ct WHERE ct.server_id=network_samples.server_id AND ct.status='running' AND network_samples.measured>=ct.created)"
     with store.db() as con:
         con.execute(f'DELETE FROM network_samples WHERE server_id=? AND measured<? {protected}',
                     (id_, now-settings['retention_hours']*3600))

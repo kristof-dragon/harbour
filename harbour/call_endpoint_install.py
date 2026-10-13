@@ -15,6 +15,8 @@ def install(reader, source):
     if not shutil.which('docker'):
         raise RuntimeError('Install Docker Engine and its Compose plugin on this Linux host first.')
     user = pwd.getpwnam(reader)
+    if user.pw_uid != os.getuid():
+        raise RuntimeError('Deploy using the SSH login account; privilege escalation is not supported.')
     runtime_uid, runtime_gid = (user.pw_uid, user.pw_gid) if user.pw_uid else (10001, 10001)
     root = Path(user.pw_dir) / 'harbour-c-remote'
     if root.is_symlink():
@@ -30,6 +32,15 @@ def install(reader, source):
             raise RuntimeError('Deployment files must not be symlinks')
     compose = ['docker', 'compose', '--project-name', 'harbour-c-remote', '--project-directory', str(root)]
     subprocess.run(['docker', 'compose', 'version'], check=True)
+    try:
+        info = subprocess.run(['docker', 'info', '--format', '{{json .SecurityOptions}}'], check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        if 'name=rootless' in (getattr(info, 'stdout', '') or ''):
+            # Namespace uid 0 maps to the SSH user with rootless Docker. No host
+            # privilege is gained, and bind-mounted private files stay readable.
+            runtime_uid, runtime_gid = 0, 0
+    except subprocess.CalledProcessError:
+        raise RuntimeError('This SSH account cannot access Docker. Give it Docker access and retry; Harbour does not use sudo.') from None
     # An existing service owns its published ports during an update. For a fresh
     # install check availability before building; Docker rechecks on startup.
     if not marker.exists():
@@ -48,7 +59,8 @@ def install(reader, source):
         with os.fdopen(fd, 'wb') as stream:
             stream.write(data)
         os.chmod(temporary, 0o600)
-        os.chown(temporary, user.pw_uid, user.pw_gid)
+        if os.getuid() == 0:
+            os.chown(temporary, user.pw_uid, user.pw_gid)
         temporary.replace(root / name)
     # Keep one protected previous configuration for failed-upgrade recovery.
     previous = root / 'previous'
@@ -69,10 +81,11 @@ def install(reader, source):
     write('.dockerignore', b'**\n!Dockerfile\n!build-iperf.sh\n!call_endpoint_service.py\n')
     write('.harbour-endpoint', b'1\n')
     logs = root / 'logs'; logs.mkdir(mode=0o700, exist_ok=True)
-    for path in (root, logs):
-        os.chown(path, user.pw_uid, user.pw_gid)
-    for path in (logs, root / 'endpoint.json'):
-        os.chown(path, runtime_uid, runtime_gid)
+    if os.getuid() == 0:
+        for path in (root, logs):
+            os.chown(path, user.pw_uid, user.pw_gid)
+        for path in (logs, root / 'endpoint.json'):
+            os.chown(path, runtime_uid, runtime_gid)
     print('Building remote call endpoint in ' + str(root), flush=True)
     subprocess.run([*compose, 'config', '--quiet'], check=True)
     subprocess.run([*compose, 'up', '-d', '--build', '--wait', '--wait-timeout', '45'], check=True)

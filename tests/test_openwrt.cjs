@@ -26,7 +26,7 @@ const callData={profiles:callProfiles,available:true,tests:[]};
 let callRequest=null,callStopped=false,endpointRequest=null,deployRequest=null;
 const remoteHost={...host,id:'remote',name:'Remote Docker host',host:'192.0.2.10',server_type:'docker'};
 const endpointData={endpoints:[]};
-let saved=null,markers=[];
+let saved=null,markers=[],scheduleRequest=null;
 const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(),'harbour/static',req.url==='/'?'index.html':req.url.replace('/static/',''));res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html');res.end(fs.readFileSync(file));}catch{res.writeHead(404).end();}});
 (async()=>{
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -38,12 +38,16 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
    const url=new URL(route.request().url()),method=route.request().method();let data;
    if(url.pathname==='/api/config')data={demo:false,version:'test'};
    else if(url.pathname==='/api/me')data={id:'admin',name:'admin',role:'admin',csrf:'test'};
-   else if(url.pathname==='/api/dashboard')data={servers:[host,remoteHost],thresholds,jobs:[]};
+   else if(url.pathname==='/api/dashboard')data={servers:[host],thresholds,jobs:[]};
    else if(url.pathname==='/api/session/activity')data={ok:true};
    else if(url.pathname==='/api/call-endpoints')data=endpointData;
-   else if(url.pathname==='/api/servers/remote/call-endpoint'&&method==='PUT'){endpointRequest=route.request().postDataJSON();data={...endpointRequest,server_id:'remote',deployed:false};endpointData.endpoints=[data];}
-   else if(url.pathname==='/api/servers/remote/collector/call-endpoint'&&method==='POST'){deployRequest=route.request().postDataJSON();await route.fulfill({contentType:'application/x-ndjson',body:[{kind:'started',id:'endpoint-fixture'},{kind:'output',text:'Building endpoint…\n'},{kind:'result',ok:true,message:'Remote call endpoint installed in ~/harbour-c-remote.'}].map(x=>JSON.stringify(x)).join('\n')+'\n'});return;}
-   else if(url.pathname==='/api/servers/remote/call-endpoint/logs')data=url.searchParams.has('day')?{files:[{name:'upload-fixture.jsonl',bytes:200}]}:{days:['26-10-13']};
+   else if(url.pathname==='/api/call-endpoints/deploy'&&method==='POST'){
+    endpointRequest=route.request().postDataJSON();
+    endpointData.endpoints=[{id:'remote',server_id:'remote',endpoint:endpointRequest.endpoint,port:endpointRequest.port,http_port:endpointRequest.http_port,deployed:true}];
+    await route.fulfill({contentType:'application/x-ndjson',body:[{kind:'started',id:'endpoint-fixture'},{kind:'output',text:'Building endpoint…\n'},{kind:'result',ok:true,endpoint_id:'remote',message:'Endpoint confirmed and reachable.'}].map(x=>JSON.stringify(x)).join('\n')+'\n'});return;
+   }
+   else if(url.pathname==='/api/call-endpoints/remote/logs')data=url.searchParams.has('day')?{files:[{name:'upload-fixture.jsonl',bytes:200}]}:{days:['26-10-13']};
+   else if(url.pathname.endsWith('/call-tests/load-example/analysis'))data={test:callData.tests[0],analysis:{summary:'Receiver impairment was recorded.',root_cause:'not_established',clock_aligned:true,remote_matches:['upload','download'],directions:[{direction:'upload',remote_match:true,summary:{lost_percent:2,jitter_ms:7}},{direction:'download',remote_match:true,summary:{lost_percent:0,jitter_ms:3}}],findings:[{kind:'observation',text:'Upload receiver measured 2.00% UDP packet loss.'}],paths:[],timeline:[],quality:['Fixture evidence'],method:'Run IDs and cookies.'}};
    else if(url.pathname.endsWith('/history'))data={points:[],hours:6,from:now-21600,to:now,resolution_seconds:60,poll_seconds:60};
    else if(url.pathname.endsWith('/network/samples'))data={start:now-120,end:now,samples:rows,truncated:false};
    else if(url.pathname.endsWith('/network/markers')){markers.push(route.request().postDataJSON());data={id:'new-event'};}
@@ -61,6 +65,8 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
     if(delayIncident)await new Promise(resolve=>{releaseIncident=resolve;});
     data={...incidentReport,incident:{...incidentReport.incident,id:url.pathname.split('/').at(-1)}};
    }
+   else if(url.pathname.endsWith('/network/call-tests/schedule')&&method==='PUT'){scheduleRequest=route.request().postDataJSON();callData.schedule={enabled:true,config:scheduleRequest.test,interval_seconds:scheduleRequest.interval_minutes*60,next_run:now+7200};data=callData.schedule;}
+   else if(url.pathname.endsWith('/network/call-tests/schedule')&&method==='DELETE'){callData.schedule=null;data={ok:true};}
    else if(url.pathname.endsWith('/network/call-tests')&&method==='POST'){
     callRequest=route.request().postDataJSON();callData.tests=[{id:'load-example',created:now,status:'running',phase:'baseline',config:{...callRequest,profile_snapshot:callProfiles.find(p=>p.id===callRequest.profile)},result:{}}];data={id:'load-example'};
    }else if(url.pathname.endsWith('/network/call-tests/load-example/stop')&&method==='POST'){
@@ -85,6 +91,21 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.doesNotMatch(await page.locator('.network-legend').allTextContents().then(x=>x.join(' ')),/example-tunnel/);
   await page.locator('[data-tab=calls]').click();
   await page.getByRole('button',{name:'Remote call flow test',exact:true}).click();
+  // No saved Linux server: the test overlay itself starts one-shot deployment.
+  await page.locator('#endpoint-form').waitFor();
+  assert.equal(await page.locator('#endpoint-form [name=host]').count(),0);
+  await page.locator('#endpoint-form [name=endpoint]').fill('192.0.2.50');
+  await page.locator('#endpoint-form [name=username]').fill('dockeruser');
+  await page.locator('#endpoint-form [name=password]').fill('one-shot-browser-fixture');
+  await page.locator('#endpoint-form details summary').click();
+  const deploymentPort=Number(await page.locator('#endpoint-form [name=http_port]').inputValue());assert(deploymentPort>=20000&&deploymentPort<60000);
+  await page.locator('#endpoint-form [name=http_port]').fill('25432');
+  fs.mkdirSync('test-results',{recursive:true});
+  // Capture only after clearing the fixture password field.
+  await page.locator('#endpoint-form [name=password]').fill('');
+  await page.screenshot({path:'test-results/remote-endpoint-deploy.png'});
+  await page.locator('#endpoint-form [name=password]').fill('one-shot-browser-fixture');
+  await page.getByRole('button',{name:'Deploy',exact:true}).click();
   await page.locator('#call-test-form').waitFor();
   assert.match(await page.locator('#call-profile-note').textContent(),/Not an Apple specification/);
   await page.locator('#call-test-form [name=profile]').selectOption('teams-meeting');
@@ -99,8 +120,11 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.setViewportSize({width:1440,height:1000});
   await page.locator('#call-test-form [name=profile]').selectOption('zoom-meeting');
   assert.equal(await page.locator('#call-test-form [name=download_kbps]').inputValue(),'1800');
-  await page.locator('#call-test-form [name=endpoint]').fill('192.0.2.50');
-  await page.locator('#call-test-form [name=duration]').selectOption('30');
+  assert.equal(await page.locator('#call-test-form [name=endpoint]').inputValue(),'192.0.2.50');
+  assert.equal(endpointRequest.password,'one-shot-browser-fixture');
+  assert.equal(endpointRequest.http_port,25432);
+  assert.equal(await page.locator('.collector-sudo-form').count(),0);
+  await page.locator('#call-test-form [name=duration]').fill('30');
   assert.match(await page.locator('#call-test-estimate').textContent(),/16.5 MB/);
   await page.getByRole('button',{name:'Start traffic test',exact:true}).click();
   await page.getByRole('button',{name:'Stop test',exact:true}).waitFor();
@@ -108,6 +132,15 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.getByRole('button',{name:'Stop test',exact:true}).click();
   await page.getByRole('button',{name:'Remote call flow test',exact:true}).waitFor();
   assert.equal(callStopped,true);
+  await page.getByRole('button',{name:'Schedule',exact:true}).click();
+  await page.locator('#call-test-form [name=duration]').fill('3600');
+  await page.locator('#call-test-form [name=interval_minutes]').fill('120');
+  await page.getByRole('button',{name:'Save schedule',exact:true}).click();
+  await page.getByRole('button',{name:'Remove schedule',exact:true}).waitFor();
+  assert.equal(scheduleRequest.test.duration,3600);assert.equal(scheduleRequest.interval_minutes,120);
+  assert.equal(scheduleRequest.test.endpoint_id,'remote');
+  await page.getByRole('button',{name:'Remove schedule',exact:true}).click();
+
   const sparse=await page.evaluate(()=>{
    const end=Date.now()/1000,start=end-120;
    const render=points=>new DOMParser().parseFromString(networkChart('Sparse readings','ms',[{name:'Example target',maxGap:1.5,points}],start,end),'text/html');
@@ -287,18 +320,16 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.locator('[data-tab=wireless]').click();
   assert.equal(await page.locator('.network-chart svg').count(),1);
   await page.locator('[data-tab=calls]').click();
-  await page.getByRole('button',{name:'Deploy remote endpoint',exact:true}).click();
-  await page.locator('#endpoint-form').waitFor();
-  const port=Number(await page.locator('#endpoint-form [name=http_port]').inputValue());assert(port>=20000&&port<60000);
-  await page.locator('#endpoint-form [name=http_port]').fill('25432');
-  await page.getByRole('button',{name:'Save & deploy endpoint',exact:true}).click();
-  await page.getByText('Remote call endpoint installed in ~/harbour-c-remote.',{exact:true}).first().waitFor();
-  assert.equal(endpointRequest.http_port,25432);assert.equal(endpointRequest.endpoint,'192.0.2.10');assert.deepEqual(deployRequest,{action:'install'});
-  await page.screenshot({path:'test-results/remote-endpoint-deploy.png'});
+  await page.getByRole('button',{name:'Analysis',exact:true}).click();
+  await page.locator('#call-analysis').waitFor();
+  assert.match(await page.locator('#call-analysis').textContent(),/Receiver impairment was recorded/);
+  assert.equal(await page.locator('#call-analysis a').getAttribute('href'),'/api/servers/router/network/call-tests/load-example/export');
+  assert.equal(await page.getByText('Remote session verified',{exact:true}).count(),2);
+  await page.screenshot({path:'test-results/call-flow-analysis.png'});
   await page.getByRole('button',{name:'Close dialog',exact:true}).click();
   await page.getByRole('button',{name:'Remote logs',exact:true}).click();
   await page.locator('.remote-log-list a').waitFor();
-  assert.equal(await page.locator('.remote-log-list a').getAttribute('href'),'/api/servers/remote/call-endpoint/logs/26-10-13/upload-fixture.jsonl');
+  assert.equal(await page.locator('.remote-log-list a').getAttribute('href'),'/api/call-endpoints/remote/logs/26-10-13/upload-fixture.jsonl');
   await page.getByRole('button',{name:'Close dialog',exact:true}).click();
   await page.evaluate(()=>onboard());
   assert.equal(await page.locator('[name=server_type] option').count(),3);

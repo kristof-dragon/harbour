@@ -354,10 +354,13 @@ async def lifespan(app):
     retention.start()
     telegram = threading.Thread(target=notifications.delivery_loop, args=(stop,), daemon=True)
     telegram.start()
+    call_scheduler = threading.Thread(target=call_tests.schedule_loop, args=(stop,), daemon=True)
+    call_scheduler.start()
     try:
         yield
     finally:
         stop.set()
+        call_scheduler.join(timeout=20)
         call_tests.close_all()
         collector_setup.close_all()
         scheduler_wake.set()
