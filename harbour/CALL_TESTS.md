@@ -187,7 +187,7 @@ Docker gives us room to add those services later. The controlled UDP test is the
 first implementation; no WebRTC, RTP codec model or vendor-call emulator is
 included in this version.
 
-## Validation for this implementation
+## Validation for the initial implementation
 
 Local validation passed 465 Python tests, the OpenWrt desktop/mobile browser
 fixture, syntax checks and Docker image/Compose checks. The runner also completed
@@ -197,6 +197,10 @@ both directions. Native iperf3 3.21 result formats were checked on loopback.
 No remote endpoint, monitored router, real call, Wi-Fi client or WAN path was
 tested or deployed. Actual-router CPU overhead and real-call correlation remain
 field-validation work.
+
+The subsequent 0.1.32 dependency upgrade pins iperf3 3.22 in both Docker images;
+see [stack versions and compatibility notes](DEPENDENCIES.md). The remote
+deployment directory now also needs `build-iperf.sh` when rebuilding its image.
 
 ## Reference index
 

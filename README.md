@@ -55,6 +55,10 @@ setup](harbour/CALL_TESTS.md). Tests run on the Harbour host and do not reproduc
 the caller’s Wi-Fi or a real vendor call.
 See [OpenWRT deployment, measurement limits and retention](harbour/OPENWRT.md).
 
+Harbour's container uses Python 3.15.0 with exact image references and hashed
+dependency locks. See [stack versions, compatibility notes and the update
+procedure](harbour/DEPENDENCIES.md), including the Paramiko 5 SSH requirements.
+
 ### Resource recording and reboot tracking
 
 Resource checks reuse a pinned SSH connection and a session-bound Python reader.

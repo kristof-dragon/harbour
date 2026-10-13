@@ -10,6 +10,7 @@ import http.cookiejar
 import pyotp
 
 name = "harbour-smoke-" + secrets.token_hex(4)
+image = os.environ.get("HARBOUR_TEST_IMAGE", "harbour:local")
 volume = name + "-data"
 env = {**os.environ, "HARBOUR_SECRET": secrets.token_urlsafe(48), "HARBOUR_PASSWORD": secrets.token_urlsafe(24)}
 password = env["HARBOUR_PASSWORD"]
@@ -45,7 +46,7 @@ def healthy():
 try:
     docker("run", "-d", "--name", name, "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
            "--tmpfs", "/tmp:size=32m,noexec,nosuid", "-v", volume + ":/data", "-p", "127.0.0.1::8080",
-           "-e", "HARBOUR_DATA=/data", "-e", "HARBOUR_SECRET", "-e", "HARBOUR_PASSWORD", "harbour:local")
+           "-e", "HARBOUR_DATA=/data", "-e", "HARBOUR_SECRET", "-e", "HARBOUR_PASSWORD", image)
     binding = docker("port", name, "8080/tcp")
     base = "http://" + binding
     healthy()

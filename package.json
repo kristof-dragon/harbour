@@ -1,0 +1,8 @@
+{
+  "name": "harbour-browser-tests",
+  "private": true,
+  "description": "Development-only browser checks; Harbour serves its own JavaScript without a Node runtime.",
+  "devDependencies": {
+    "playwright": "1.64.0"
+  }
+}
