@@ -47,7 +47,8 @@ function networkChart(label,unit,series,start,end){
   const tick=value=>new Intl.NumberFormat(undefined,{notation:'compact',maximumFractionDigits:1}).format(value);
   return `<article class="network-chart"><div class="between"><h3>${e(label)}</h3><span class="hint">${e(unit)}</span></div><div class="network-plot"><div class="network-axis"><span>${e(tick(high))}</span><span>${e(tick((high+low)/2))}</span><span>${e(tick(low))}</span></div><svg viewBox="0 0 1000 180" preserveAspectRatio="none" role="img" aria-label="${e(label)} over the last two minutes">${paths}</svg></div><div class="network-times"><span>${e(new Date(start*1000).toLocaleTimeString())}</span><span>${e(new Date(end*1000).toLocaleTimeString())}</span></div><div class="network-legend">${visible.map((s,i)=>`<span><i style="background:${colors[i%colors.length]}"></i>${e(s.name)}</span>`).join('')}</div></article>`;
 }
-function renderNetwork(s,section=['network','wireless','incidents','calls','archives'].includes(state.tab)?state.tab:'network'){
+function renderNetwork(s,section=['network','wireless','incidents','calls','analysis','archives'].includes(state.tab)?state.tab:'network'){
+  if(section==='analysis')return renderConnectionAnalysis(s);
   const v=networkView(s),d=v.data,r=v.readings,settings=d?.settings;
   if(section==='calls')return `<section class="network-view" data-key="calls:${e(s.id)}">${renderCallTests(s,d)}</section>`;
   const controls=admin()?`${button('network-settings','Recording settings','settings','small')}${button('network-degrade','Mark degradation','warning','small','data-label="Call degradation"')}${button('network-recover','Mark recovery','check','small','data-label="Call recovery"')}`:'';
@@ -113,6 +114,7 @@ function renderNetwork(s,section=['network','wireless','incidents','calls','arch
 }
 
 async function loadNetwork(s,force=false){
+  if(current()?.id===s.id&&state.tab==='analysis')return loadConnectionAnalysis(s,force);
   if(current()?.id===s.id&&state.tab==='calls')return refreshCallTests(s,force);
   const v=networkView(s);if(v.busy||(!force&&Date.now()-v.loaded<2000))return;
   v.busy=true;

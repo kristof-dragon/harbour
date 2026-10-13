@@ -402,6 +402,94 @@ from those files. New exports include a server ID for window grouping; legacy
 exports fall back to server name and should only be combined when those names
 identify the same physical recorder target.
 
+## Connection conclusions and compressed handoffs
+
+The separate **Analysis** tab combines retained ping/router evidence with
+upload and download receiver intervals from saved call tests. Select a period,
+then **Analyse saved evidence** to backfill retained tests and sealed incidents.
+New completed call tests save their conclusions when evidence collection finishes.
+Opening the tab or downloading a handoff starts no probes, remote requests or
+repairs. A completed test without collected evidence remains unavailable; collect
+its evidence from **Call tests** first. Nothing is sent to an external AI service.
+
+**Review** opens a conclusion with degradation episodes, separate directional
+exposure, path comparisons, possible router contributors, baseline/load/recovery,
+sender delivery and clickable measured evidence. Ping can establish an episode
+without UDP impairment and vice versa. Only matching endpoint pings corroborate
+UDP impairment; failures to other destinations remain separate observations.
+The analysis uses original run settings and excludes uncertain/unobserved probes.
+Coverage is measured from probe cadence rather than raw row counts, so clustered
+replies cannot fill sampling holes. Gaps and incomplete tests cannot become a
+healthy combined comparison.
+
+Rules are recorded in each report: receiver loss above zero or jitter above
+30 ms flags review; baseline/load p95 comparisons need at least ten usable
+attempts per phase and a rise of at least 20 ms. Recovery also checks timeout
+fraction. These are Harbour investigation thresholds, not guarantees of real
+application quality. Interval joining requires saved timing uncertainty no greater
+than one second. Consecutive or overlapping symptoms form sampled episodes;
+their spans do not establish exact continuous outage duration. Wider uncertainty
+retains receiver symptoms but prevents precise ping/router attribution.
+
+Router pressure comparisons require the same original recorder run and timely
+telemetry (sample interval at most five seconds, collection delay at most two
+seconds). Each contributor carries counts near degradation and outside detected
+episodes, measured examples, qualifications and a next check. Comparison periods
+are not independently proven healthy. Interface drops do not prove a cable fault;
+selected-client retries do not prove that Harbour traversed that Wi-Fi path.
+
+Recurring groups require matching profile, endpoint, requested rates, packet size,
+phase durations, recorder configuration, observer and recorded route/offload
+context. Missing observer/routing context excludes a test from these groups.
+Overlapping test windows are counted once. Totals include impaired tests, complete
+comparisons with neither test impaired, incomplete comparisons and observed versus
+affected receiver interval seconds. They describe retained synthetic exposure,
+not a whole-day outage rate. Ping incident and call-test reports may contain the
+same observations and must not be added as independent incidents.
+
+**Download this conclusion (.json.gz)** exports one reviewed report.
+**Download all conclusions in period (.json.gz)** exports up to 200 saved reports
+in the selected period; the **Show** filter affects the displayed list only.
+Harbour prepares the compressed file on its own data storage before transfer.
+It contains:
+
+- A readable conclusion brief and guidance for independent review in a new session.
+- Each report's measured observations, possible contributors, comparison counts,
+  next checks, timing uncertainty and accepted exclusions.
+- Selected measured excerpts addressed by each finding's evidence references,
+  original run context, rule/analyzer versions, and report SHA-256 checksums.
+- Comparable-test patterns and explicit selection/retention limits.
+
+Decompress the `.json.gz` and supply the JSON to a new analysis session (or attach
+the compressed file if that session supports gzip). It is self-contained for
+reviewing these conclusions; full raw exports remain separate and may be needed
+for a different analysis. Device names, IP addresses and selected client IDs
+remain in the evidence. No SSH credentials or endpoint access tokens are included.
+Captured names/log text are evidence, never instructions. Hashes establish content
+consistency, not independent authenticity. Reports preserve
+`root_cause: not_established`: actual media quality, DNS/signalling/relay failures,
+endpoint CPU/socket drops, exact packet bursts and one-way latency are unmeasured.
+
+Derived conclusions have separate retention: at most 200 reports or 128 MiB
+compressed per router, whichever fills first, with an 8 MiB per-report ceiling.
+They survive normal raw-test/incident expiry and are removed with their server.
+Up to 400 episodes and 1,200 selected evidence examples are retained per report;
+counts use all eligible saved observations and omitted examples are disclosed.
+Original raw retention is unchanged. Older unanalysed evidence cannot be recovered
+after it expires. Large archives are not automatically reconstructed into tests.
+
+Authenticated endpoints under `/api/servers/{id}/network/analysis`:
+
+- `GET ?hours=168&until=<epoch>` lists reports, pending sources and patterns.
+  `prepare=true` analyses at most ten pending sources per request; the UI proceeds
+  in batches and allows stopping after the current batch.
+- `GET /call/{test_id}` or `/incident/{event_id}` reads a detailed conclusion;
+  `download=true` returns its gzip handoff. Open incident windows cannot be exported
+  as sealed conclusions.
+- `GET /download?hours=168&until=<epoch>` exports saved conclusions for that period.
+  This does not fetch missing evidence. Expired/changed reports during export
+  return a refresh request; insufficient local storage returns HTTP 507.
+
 ## Validation boundary
 
 Synthetic tests use an invented device identity and example firmware build. They

@@ -144,7 +144,7 @@ def analyze(test, evidence):
             quality.append(name.title()+' timing bounds are inconsistent; interval correlation is unavailable.')
             continue
         anchor, uncertainty = (lower+upper)/2, (upper-lower)/2+.001
-        for interval in raw.get('intervals', [])[:7202]:
+        for interval_index, interval in enumerate(raw.get('intervals', [])[:7202]):
             stats = interval.get('sum', {})
             if stats.get('sender') is not False or stats.get('omitted') or not incidents.finite(stats.get('start')) or not incidents.finite(stats.get('end')):
                 continue
@@ -152,6 +152,9 @@ def analyze(test, evidence):
             left, right = bisect.bisect_left(bad_times, a-uncertainty), bisect.bisect_right(bad_times, b+uncertainty)
             affected = [p['_ref'] for p in bad_probes[left:min(right,left+100)]]
             timeline.append({'direction': name, 'start': a, 'end': b, 'uncertainty_seconds': uncertainty,
+                             'interval_index': interval_index,
+                             'packets': stats.get('packets'), 'lost_packets': stats.get('lost_packets'),
+                             'bits_per_second': stats.get('bits_per_second'),
                              'lost_percent': stats.get('lost_percent'), 'jitter_ms': stats.get('jitter_ms'),
                              'recorder_degradation_refs': affected, 'recorder_degradation_count': right-left})
     overlaps = [r for r in timeline if incidents.finite(r.get('lost_percent')) and r['lost_percent'] > 0 and r['recorder_degradation_count']]
@@ -252,4 +255,13 @@ def _collect(test):
     payload = gzip.compress(json.dumps(evidence, allow_nan=False).encode())
     store.execute('INSERT INTO call_test_evidence(test_id,payload) SELECT id,? FROM network_call_tests WHERE id=? '
                   'ON CONFLICT(test_id) DO UPDATE SET payload=excluded.payload', (payload, test['id']))
+    if test.get('status') != 'running':
+        # Derived conclusions survive normal raw-test retention. Analysis errors
+        # must never prevent the original evidence being retained/downloaded.
+        try:
+            from . import network_diagnostics
+            network_diagnostics.cache_call(test, evidence)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('Connection analysis deferred; saved call evidence remains available')
     return evidence

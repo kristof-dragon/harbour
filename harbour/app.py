@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from . import __version__, auth, call_endpoint, call_tests, collector_setup, cpu, demo, history, install_artifacts, logins, network, network_incidents, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
+from . import network_diagnostics
 
 pool = ThreadPoolExecutor(max_workers=4)
 resource_workers = None
@@ -338,6 +339,7 @@ async def lifespan(app):
     network.initialize()
     call_tests.initialize()
     call_endpoint.initialize()
+    network_diagnostics.initialize()
     with queue_guard:
         detail_refreshes.clear()
     if store.DEMO:
@@ -385,6 +387,7 @@ app.include_router(network.router)
 app.include_router(network_incidents.router)
 app.include_router(call_tests.router)
 app.include_router(call_endpoint.router)
+app.include_router(network_diagnostics.router)
 
 
 @app.exception_handler(RequestValidationError)

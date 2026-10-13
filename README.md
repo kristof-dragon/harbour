@@ -75,7 +75,14 @@ up to 60 minutes and multiple named recurring schedules, with **Edit**, **Start
 now**, **Pause / Resume** and per-schedule result history. Running tests show
 directional throughput, loss and jitter with in-place updates every five seconds.
 Redeploy older endpoints for live upload receiver readings. Analysis correlates local and
-remote evidence, with a combined compressed download. Network, Wireless, Incidents, Call tests, Archives and
+remote evidence, with a combined compressed download. The OpenWrt **Analysis** tab
+adds evidence-backed conclusions across ping and directional call flows, router
+associations, and comparable recurring-test totals. **Download all conclusions in
+period (.json.gz)** creates a self-contained handoff with readable conclusions,
+referenced measurements, timing limits, exclusions and content hashes for a new
+analysis session. Individual conclusions can also be downloaded. Analysis runs
+locally against saved evidence; use **Analyse saved evidence** to include older
+retained tests and sealed incidents. Network, Wireless, Incidents, Call tests, Analysis, Archives and
 Activity have separate tabs; Recorder and Router probe cards adapt to the screen.
 See [OpenWRT deployment, measurement limits and retention](harbour/OPENWRT.md).
 

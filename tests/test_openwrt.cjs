@@ -18,6 +18,25 @@ const incidentInput={schema:1,server_id:'router',server_name:'Example router',in
 const generated=require('node:child_process').spawnSync(process.env.HARBOUR_TEST_PYTHON||'.venv/bin/python',['-c','import json,sys; from harbour.incidents import analyze; from harbour.incident_brief import export; b=json.load(sys.stdin); print(json.dumps(dict(report=analyze(b), briefs={f+str(n)+str(r).lower():export(b,f,n,r) for f in ("markdown","json") for n in (1,3,6) for r in (True,False)})))'],{input:JSON.stringify(incidentInput),encoding:'utf8'});
 assert.equal(generated.status,0,generated.stderr);
 const {report:incidentReport,briefs:incidentBriefs}=JSON.parse(generated.stdout);
+const diagnosticGenerated=require('node:child_process').spawnSync(process.env.HARBOUR_TEST_PYTHON||'.venv/bin/python',['-c',`import sys,json,time
+sys.path.insert(0,'tests')
+from test_connection_analysis import fixture,result
+from harbour.network_diagnostics import summarize
+from harbour.connection_analysis import patterns
+t,e=fixture(120,losses={'upload':list(range(0,120,3))})
+shift=time.time()-1200
+for row in e['local']['samples']: row['at']+=shift
+for row in e['analysis']['timeline']:
+ row['start']+=shift;row['end']+=shift
+for key in ('start','end'): e['window'][key]+=shift
+for key in ('load_started','load_finished'): t['result'][key]+=shift
+r=result(t,e);r['server_id']='router'
+r['quality'].append('<img src=x onerror="window.analysisInjection=true">')
+print(json.dumps({'detail':r,'summary':summarize(r),'patterns':patterns([r])}))`],{encoding:'utf8'});
+assert.equal(diagnosticGenerated.status,0,diagnosticGenerated.stderr);
+const diagnostic=JSON.parse(diagnosticGenerated.stdout);
+let diagnosticPrepared=false,delayDiagnostic=false,releaseDiagnostic;
+const diagnosticListing=()=>({reports:diagnosticPrepared?[diagnostic.summary]:[],sources:[],pending:diagnosticPrepared?0:1,errors:[],patterns:diagnosticPrepared?diagnostic.patterns:[],retention:'Up to 200 reports / 128 MiB.',exclusions:diagnostic.detail.exclusions,scope:'Retained tests only.'});
 let briefFailure=false,delayBrief=false,releaseBrief;
 const incidentReports=Array.from({length:23},(_,i)=>({...incidentReport,incident:{...incidentReport.incident,id:i?`event-${i}`:'event',measured:now-60-i*1000,automatic:i<21?1:0}}));
 let delayIncident=false,releaseIncident;
@@ -49,6 +68,17 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
    }
    else if(url.pathname==='/api/call-endpoints/remote/logs')data=url.searchParams.has('day')?{files:[{name:'upload-fixture.jsonl',bytes:200}]}:{days:['26-10-13']};
    else if(url.pathname.endsWith('/call-tests/load-example/analysis'))data={test:callData.tests[0],analysis:{summary:'Receiver impairment was recorded.',root_cause:'not_established',clock_aligned:true,remote_matches:['upload','download'],directions:[{direction:'upload',remote_match:true,summary:{lost_percent:2,jitter_ms:7}},{direction:'download',remote_match:true,summary:{lost_percent:0,jitter_ms:3}}],findings:[{kind:'observation',text:'Upload receiver measured 2.00% UDP packet loss.'}],paths:[],timeline:[],quality:['Fixture evidence'],method:'Run IDs and cookies.'}};
+   else if(url.pathname.endsWith('/network/analysis/download')){
+    await route.fulfill({contentType:'application/gzip',headers:{'Content-Disposition':'attachment; filename="harbour-connection-analysis.json.gz"'},body:require('node:zlib').gzipSync(JSON.stringify({reports:[diagnostic.detail]}))});return;
+   }
+   else if(url.pathname.includes('/network/analysis/call/')){
+    if(delayDiagnostic)await new Promise(resolve=>{releaseDiagnostic=resolve;});
+    data=diagnostic.detail;
+   }
+   else if(url.pathname.endsWith('/network/analysis')){
+    if(url.searchParams.get('prepare')==='true')diagnosticPrepared=true;
+    data=diagnosticListing();
+   }
    else if(url.pathname.endsWith('/history'))data={points:[],hours:6,from:now-21600,to:now,resolution_seconds:60,poll_seconds:60};
    else if(url.pathname.endsWith('/network/samples'))data={start:now-120,end:now,samples:rows,truncated:false};
    else if(url.pathname.endsWith('/network/markers')){markers.push(route.request().postDataJSON());data={id:'new-event'};}
@@ -105,6 +135,44 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.match(await page.locator('.network-view').textContent(),/Memory buffer: 1.0 \/ 128 MiB/);
   assert.match(await page.locator('.network-view').textContent(),/Uncertain timing/);
   assert.doesNotMatch(await page.locator('.network-legend').allTextContents().then(x=>x.join(' ')),/example-tunnel/);
+  await page.locator('[data-tab=analysis]').click();
+  await page.getByText('No saved conclusions in this selection.',{exact:false}).waitFor();
+  await page.getByRole('button',{name:'Analyse saved evidence',exact:true}).click();
+  await page.getByRole('button',{name:'Review',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Review',exact:true}).click();
+  await page.locator('.analysis-detail').waitFor();
+  assert.match(await page.locator('.analysis-detail').textContent(),/Call-flow impairment with normal endpoint ping/);
+  assert.equal(await page.evaluate(()=>window.analysisInjection),undefined);
+  assert.equal(await page.locator('.analysis-detail .network-table').first().locator('tbody tr').count(),20);
+  await page.locator('[data-action=analysis-page][data-step="1"]').click();
+  assert.match(await page.locator('.analysis-detail').textContent(),/21–40 of 40/);
+  assert.equal(await page.locator('[data-action=analysis-page]').count(),2);
+  assert.equal(await page.locator('.analysis-detail .probe-card').first().locator('[data-action=analysis-evidence]').count(),4);
+  await page.locator('[data-action=analysis-evidence]').first().click();
+  assert(await page.locator('.analysis-evidence[open]').count()>0);
+  const downloadWait=page.waitForEvent('download');
+  await page.getByRole('link',{name:'Download all conclusions in period (.json.gz)',exact:true}).click();
+  const handoff=await downloadWait;
+  assert.equal(handoff.suggestedFilename(),'harbour-connection-analysis.json.gz');
+  assert.equal(JSON.parse(require('node:zlib').gunzipSync(fs.readFileSync(await handoff.path()))).reports.length,1);
+  await page.evaluate(()=>document.querySelector('.connection-analysis').scrollIntoView({block:'start'}));
+  fs.mkdirSync('test-results',{recursive:true});
+  await page.screenshot({path:'test-results/connection-analysis-desktop.png'});
+  await page.setViewportSize({width:390,height:844});
+  await page.waitForFunction(()=>document.documentElement.scrollWidth<=innerWidth);
+  await page.waitForFunction(()=>document.querySelector('#sidebar').getBoundingClientRect().right<=0);
+  await page.evaluate(()=>document.querySelector('.connection-analysis').scrollIntoView({block:'start'}));
+  await page.screenshot({path:'test-results/connection-analysis-mobile.png'});
+  await page.setViewportSize({width:1440,height:1000});
+  // A late detail response must not restore a report after changing period.
+  delayDiagnostic=true;
+  await page.getByRole('button',{name:'Review',exact:true}).click();
+  while(!releaseDiagnostic)await new Promise(resolve=>setTimeout(resolve,10));
+  await page.locator('[data-analysis-filter=hours]').selectOption('24');
+  const detailResponse=page.waitForResponse(r=>r.url().includes('/network/analysis/call/'));
+  releaseDiagnostic();delayDiagnostic=false;await detailResponse;
+  await page.waitForFunction(()=>document.querySelector('.analysis-detail')===null);
+  assert.equal(await page.locator('.analysis-detail').count(),0);
   await page.locator('[data-tab=calls]').click();
   await page.getByRole('button',{name:'Remote call flow test',exact:true}).click();
   // No saved Linux server: the test overlay itself starts one-shot deployment.
