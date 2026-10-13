@@ -9,9 +9,14 @@ import os
 import re
 import subprocess
 import codecs
+import errno
+import fcntl
+import pty
 import selectors
 import signal
+import struct
 import sys
+import termios
 import time
 from pathlib import Path
 
@@ -24,23 +29,157 @@ def run(argv, timeout=30, cwd=None):
     return result.stdout
 
 
+class TerminalOutput:
+    """Bounded, plain-text view of Docker's cursor-addressed progress output.
+
+    Keep parser state across SSH chunks. Interpret line editing and cursor
+    movement, but discard colour, terminal titles and other escape commands.
+    This is an output log, not an interactive terminal or an HTML renderer.
+    """
+    limit = 60000
+    max_rows = 1000
+    max_columns = 4096
+
+    def __init__(self):
+        self.lines = ['']
+        self.row = self.column = 0
+        self.state = 'text'
+        self.sequence = ''
+
+    def _position(self, row, column):
+        self.row = max(0, min(self.max_rows - 1, row))
+        self.column = max(0, min(self.max_columns - 1, column))
+        while len(self.lines) <= self.row:
+            self.lines.append('')
+
+    def _newline(self):
+        self.row += 1
+        self.column = 0
+        if self.row == self.max_rows:
+            self.lines.pop(0)
+            self.row -= 1
+        self._position(self.row, 0)
+
+    def _control(self, command):
+        if not re.fullmatch(r'[0-9;]*', self.sequence):
+            return
+        parts = self.sequence.split(';')
+        if any(len(value) > 5 for value in parts):
+            return
+        values = [min(int(value or '0'), self.max_columns) for value in parts]
+        value, amount = values[0], values[0] or 1
+        if command in 'ABCD':
+            dr, dc = {'A': (-amount, 0), 'B': (amount, 0), 'C': (0, amount), 'D': (0, -amount)}[command]
+            self._position(self.row + dr, self.column + dc)
+        elif command in 'EF':
+            self._position(self.row + (amount if command == 'E' else -amount), 0)
+        elif command in 'G`':
+            self._position(self.row, amount - 1)
+        elif command in 'Hf':
+            self._position(amount - 1, (values[1] or 1) - 1 if len(values) > 1 else 0)
+        elif command == 'K':
+            line = self.lines[self.row]
+            if value == 0:
+                self.lines[self.row] = line[:self.column]
+            elif value == 1:
+                self.lines[self.row] = ' ' * (self.column + 1) + line[self.column + 1:]
+            elif value == 2:
+                self.lines[self.row] = ''
+        elif command == 'J':
+            if value == 0:
+                self.lines[self.row] = self.lines[self.row][:self.column]
+                del self.lines[self.row + 1:]
+            elif value == 1:
+                self.lines[:self.row] = [''] * self.row
+                self.lines[self.row] = ' ' * (self.column + 1) + self.lines[self.row][self.column + 1:]
+            elif value in (2, 3):
+                self.lines = [''] * (self.row + 1)
+
+    def feed(self, text):
+        for char in text:
+            if self.state == 'string':
+                if char == '\x07':
+                    self.state = 'text'
+                elif char == '\x1b':
+                    self.state = 'string_escape'
+                continue
+            if self.state == 'string_escape':
+                self.state = 'text' if char == '\\' else 'string'
+                continue
+            if char == '\x1b':
+                self.state = 'escape'
+                continue
+            if self.state == 'escape':
+                self.sequence = ''
+                self.state = 'csi' if char == '[' else 'string' if char in ']P^_' else 'charset' if char in '()*+' else 'text'
+                continue
+            if self.state == 'charset':
+                self.state = 'text'
+                continue
+            if self.state == 'csi':
+                if '@' <= char <= '~':
+                    self._control(char)
+                    self.state = 'text'
+                elif len(self.sequence) < 128:
+                    self.sequence += char
+                continue
+            if char == '\r':
+                self.column = 0
+            elif char == '\n':
+                self._newline()
+            elif char == '\b':
+                self.column = max(0, self.column - 1)
+            elif char == '\t':
+                self.column = min(self.max_columns - 1, (self.column // 8 + 1) * 8)
+            elif char >= ' ' and not '\x7f' <= char <= '\x9f':
+                line = self.lines[self.row].ljust(self.column)
+                self.lines[self.row] = line[:self.column] + char + line[self.column + 1:]
+                self.column = min(self.max_columns - 1, self.column + 1)
+        # Trim old scrollback only after interpreting the current chunk, never
+        # cut a raw escape sequence and then try to replay its tail.
+        size = sum(len(line) + 1 for line in self.lines)
+        while size > self.limit and self.row > 0:
+            size -= len(self.lines.pop(0)) + 1
+            self.row -= 1
+
+    def text(self):
+        return '\n'.join(line.rstrip() for line in self.lines)[-self.limit:]
+
+
 def run_stream(argv, emit, timeout=300, cwd=None):
-    """Forward bounded output chunks while the command is still running."""
-    output = ''
+    """Give Docker terminal output, with no interactive input, over framed SSH."""
+    output = TerminalOutput()
     decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
-    with subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          start_new_session=True, bufsize=0) as process, selectors.DefaultSelector() as selector:
-        selector.register(process.stdout, selectors.EVENT_READ)
+    master, slave = pty.openpty()
+    try:
+        # A stable width keeps progress columns aligned on desktop and mobile;
+        # the browser scrolls horizontally. Enough rows for large Compose plans.
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 1000, 160, 0, 0))
+        process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=slave, stderr=slave,
+                                   env={**os.environ, 'TERM': 'xterm', 'COMPOSE_PROGRESS': 'tty'},
+                                   start_new_session=True, bufsize=0)
+    except BaseException:
+        os.close(master)
+        raise
+    finally:
+        os.close(slave)
+    with process, os.fdopen(master, 'rb', buffering=0) as stream, selectors.DefaultSelector() as selector:
+        selector.register(stream, selectors.EVENT_READ)
         deadline, heartbeat = time.monotonic() + timeout, time.monotonic()
         try:
             while selector.get_map():
                 if time.monotonic() > deadline:
                     raise TimeoutError('Command timed out. Check the server before retrying.')
                 for key, _ in selector.select(.1):
-                    chunk = os.read(key.fd, 4096)
+                    try:
+                        chunk = os.read(key.fd, 4096)
+                    except OSError as exc:
+                        if exc.errno != errno.EIO:
+                            raise
+                        chunk = b''  # Linux PTYs report EIO when the slave closes.
                     text = decoder.decode(chunk, final=not chunk)
                     if text:
-                        output = (output + text)[-60000:]
+                        output.feed(text)
                         emit({'kind': 'output', 'text': text})
                     if not chunk:
                         selector.unregister(key.fileobj)
@@ -48,12 +187,12 @@ def run_stream(argv, emit, timeout=300, cwd=None):
                     emit({'kind': 'heartbeat'})
                     heartbeat = time.monotonic()
             if process.wait(timeout=max(.1, deadline-time.monotonic())):
-                raise RuntimeError(output[-4000:] or 'Command failed')
+                raise RuntimeError(output.text()[-4000:] or 'Command failed')
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
-    return output
+    return output.text()
 
 
 def image_version(labels):

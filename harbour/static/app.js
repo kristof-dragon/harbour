@@ -316,6 +316,24 @@ async function openJob(id){
   modal('Operation progress',`<div id="job-live" data-id="${e(id)}"><div id="job-heading"></div><div id="job-targets"></div><div id="job-progress"></div><pre id="job-output" class="code-block" tabindex="0" aria-label="Live Docker output">Connecting…</pre><p id="job-poll-error" class="form-error" role="status"></p></div>`,true);
   $('.modal').classList.add('job-modal');await refreshJob(id);
 }
+const jobOutputText=new WeakMap();
+function renderJobOutput(output, text){
+  if(jobOutputText.get(output)===text)return;
+  const atEnd=output.scrollHeight-output.scrollTop-output.clientHeight<40;
+  const scrollTop=output.scrollTop,scrollLeft=output.scrollLeft;
+  if(!jobOutputText.has(output))output.replaceChildren();
+  const lines=text.split('\n');
+  lines.forEach((line,index)=>{
+    let row=output.children[index];
+    if(!row){row=document.createElement('span');row.className='job-output-line';output.append(row);}
+    const value=line+(index<lines.length-1?'\n':'');
+    if(row.textContent!==value)row.textContent=value;
+  });
+  while(output.children.length>lines.length)output.lastElementChild.remove();
+  jobOutputText.set(output,text);
+  output.scrollTop=atEnd?output.scrollHeight:scrollTop;
+  output.scrollLeft=scrollLeft;
+}
 async function refreshJob(id){
   const root=$('#job-live');if(!root||root.dataset.id!==id)return;
   let again=true;
@@ -324,9 +342,9 @@ async function refreshJob(id){
     updateHTML($('#job-heading',root),`<h3>${e(actionLabel(job.action))} · ${e(job.server_name)}</h3><span class="tag ${job.status==='succeeded'?'green':['failed','interrupted'].includes(job.status)?'red':''}">${e(job.status)}</span>`);
     updateText($('#job-targets',root),(job.target_names||[]).join(' · '));
     updateHTML($('#job-progress',root),jobProgress(job));
-    const output=$('#job-output',root),atEnd=output.scrollHeight-output.scrollTop-output.clientHeight<40;
+    const output=$('#job-output',root);
     const log=job.output||(job.status==='queued'?'Queued. Output will appear when this task starts.':'Waiting for Docker output…');
-    if(output.textContent!==log){output.textContent=log;if(atEnd)output.scrollTop=output.scrollHeight;}
+    renderJobOutput(output,log);
     updateText($('#job-poll-error',root),'');again=['queued','running'].includes(job.status);
   }catch(error){if($('#job-live')===root)$('#job-poll-error',root).textContent='Progress connection lost. Retrying… '+error.message;}
   if(again&&state.user&&$('#job-live')===root)setTimeout(()=>refreshJob(id),1000);

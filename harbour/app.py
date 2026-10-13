@@ -1169,24 +1169,31 @@ def queue_details(job, pending=None):
 
 def work_job(server, action, targets, commands, job_id, lock):
     progress = {'completed': 0, 'total': len(commands or []), 'label': 'Connecting to server', 'started': time.time(), 'phase': 'connecting', 'phase_started': time.time()}
-    live_output, last_saved = '', 0
+    live_output, previous_output, last_saved = '', '', 0
+    terminal = remote_probe.TerminalOutput()
+    has_streamed_output = False
     refresh_details = False
 
     def event_update(event):
-        nonlocal live_output, last_saved
+        nonlocal live_output, previous_output, terminal, last_saved, has_streamed_output
         kind = event.get('kind')
         if kind == 'phase':
             progress.update(phase=event['phase'], label=event['label'], phase_started=time.time())
         elif kind == 'step':
             progress.update({key: event[key] for key in ('completed', 'total', 'label')})
             progress.update(phase='executing', phase_started=time.time())
-            live_output = (live_output + '\n' + event['label'] + '\n')[-60000:]
+            # Each command gets its own cursor space. Compose can clear or
+            # rewrite its progress without erasing earlier commands/headings.
+            previous_output = ((live_output.rstrip('\n') + '\n\n' if live_output else '') + event['label'] + '\n')[-60000:]
+            terminal = remote_probe.TerminalOutput()
+            live_output = previous_output
         elif kind == 'completed':
             progress.update(completed=event['completed'], total=event['total'])
         elif kind == 'output':
             progress['last_output'] = time.time()
-            text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', str(event.get('text', ''))).replace('\r', '\n')
-            live_output = (live_output + text)[-60000:]
+            terminal.feed(str(event.get('text', '')))
+            has_streamed_output = True
+            live_output = (previous_output + terminal.text())[-60000:]
         elif kind != 'heartbeat':
             return
         progress['heartbeat'] = time.time()
@@ -1233,6 +1240,8 @@ def work_job(server, action, targets, commands, job_id, lock):
             refresh_details = True
             result = ssh.request(server, {"operation": "execute", "action": action, "targets": targets, "target_refs": target_refs, "expected": commands}, on_event=event_update)
             output, status = result["output"], "succeeded" if result["ok"] else "failed"
+            if result['ok'] and has_streamed_output:
+                output = live_output
         progress['label'] = 'Completed' if status == 'succeeded' else 'Failed'
         store.execute("UPDATE jobs SET status=?,output=?,finished=?,progress=? WHERE id=?", (status, output[-60000:], time.time(), json.dumps(progress), job_id))
     except Exception as exc:

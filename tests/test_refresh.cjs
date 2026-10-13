@@ -79,8 +79,36 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  job.output+='\nAnother layer';await page.waitForTimeout(2200);
  assert.deepEqual(await page.evaluate(()=>({node:bar===document.querySelector('#job-progress .job-indeterminate i'),animation:animation===bar.getAnimations()[0],start:animationStart===animation.startTime,scroll:output.scrollTop})),{node:true,animation:true,start:true,scroll:0});
  assert.match(await page.locator('#job-progress').textContent(),/Elapsed/);
+ // Polls patch individual terminal rows, preserve selections on unchanged
+ // rows, and keep scroll position while reading earlier output.
+ await page.evaluate(()=>{window.logRows=[...output.children];const selection=getSelection(),range=document.createRange();range.selectNodeContents(logRows[0]);selection.removeAllRanges();selection.addRange(range);});
+ job.output=job.output.replace('Download layer 99','Layer 99: Pull complete');
+ await page.waitForFunction(()=>document.querySelector('#job-output').textContent.includes('Layer 99: Pull complete'));
+ assert.deepEqual(await page.evaluate(()=>({same:logRows.every((row,i)=>row===output.children[i]),selection:getSelection().toString(),scroll:output.scrollTop})),{same:true,selection:'Download layer 0\n',scroll:0});
+ assert.equal(await page.evaluate(()=>{const observer=new MutationObserver(()=>{});observer.observe(output,{subtree:true,childList:true,characterData:true,attributes:true});renderJobOutput(output,output.textContent);const n=observer.takeRecords().length;observer.disconnect();return n;}),0);
+ await page.evaluate(()=>{getSelection().removeAllRanges();output.scrollTop=output.scrollHeight;});
+ job.output+='\nDigest: sha256:abc\nStatus: Downloaded newer image';
+ await page.waitForFunction(()=>document.querySelector('#job-output').textContent.includes('Status: Downloaded newer image'));
+ assert.equal(await page.evaluate(()=>output.scrollHeight-output.scrollTop-output.clientHeight<2),true);
+ job.output='pull · stack\naaaa: Pull complete\nbbbb: Pull complete\nDigest: sha256:abc\n\nup · stack\n[+] Running 2/2\n ✔ Container stack-web-1  Started\n ✔ Container stack-db-1   Healthy\n<script>window.compromised=true</script>\n'+ 'Long diagnostic: '+'x'.repeat(180);
+ await page.waitForFunction(()=>document.querySelector('#job-output').textContent.includes('stack-web-1'));
+ assert.equal(await page.locator('#job-output script').count(),0);
+ assert.equal(await page.evaluate(()=>window.compromised),undefined);
+ await page.setViewportSize({width:390,height:844});
+ assert.equal(await page.evaluate(()=>getComputedStyle(output).whiteSpace),'pre');
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+ await page.evaluate(()=>{output.scrollLeft=100;});
+ job.output=job.output.replace('Running 2/2','Running 3/3');
+ await page.waitForFunction(()=>document.querySelector('#job-output').textContent.includes('Running 3/3'));
+ assert.equal(await page.evaluate(()=>output.scrollLeft),100);
+ await page.setViewportSize({width:1280,height:800});
+ job.output=job.output.split('\n<script>')[0];
+ await page.waitForFunction(()=>!document.querySelector('#job-output').textContent.includes('<script>'));
  job.progress.completed=1;await page.waitForTimeout(1100);assert.equal(await page.locator('#job-progress progress').getAttribute('value'),'1');
  job.status='succeeded';job.progress.completed=2;job.finished=now+8;await page.waitForTimeout(1100);assert.equal(await page.locator('#job-progress progress').getAttribute('value'),'2');
+ fs.mkdirSync('test-results',{recursive:true});await page.screenshot({path:'test-results/docker-terminal-progress.png'});
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ await page.evaluate(()=>openJob('task'));assert.equal(await page.locator('#job-output').textContent(),job.output);
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
  // Hover, absent readings, multiple series, keyboard and touch inspection.
  await page.getByRole('button',{name:'Explore history',exact:true}).click();await page.locator('[data-chart-keys]').waitFor();

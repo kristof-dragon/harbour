@@ -19,6 +19,15 @@ For Nginx Proxy Manager on a separate instance, choose setup option **2**. In NP
 
 Open your configured URL and sign in. Use **Menu → Add server** to connect a Linux or macOS host with Python 3.9+. The OS is detected automatically. Choose **Docker host** (also requires Docker, Compose v2 and an SSH account with Docker access) or **Plain server** for resource monitoring. Fetch and accept its host fingerprint, then generate or import an SSH key and install it from the form using a one-time password, or copy it manually. Optional password login is available after acknowledging its warning. Use **Server settings → Edit SSH connection** to switch authentication methods or replace keys without deleting the server.
 
+### Docker operation output
+
+The operation progress dialog updates Docker pull layers and Compose container
+statuses in place. Output uses terminal cursor movements, with plain text kept
+in the job history (up to 60,000 characters). Closing and reopening the dialog
+restores the current view. Scroll up to read earlier output without following
+new lines; return to the bottom to follow again. Long lines scroll horizontally
+to keep progress columns aligned, including on mobile.
+
 ### OpenWRT routers and network diagnostics
 
 Choose **OpenWRT** as the third server type for read-only router inspection.
