@@ -246,7 +246,8 @@ def test_bundle_settings_permissions_and_host_removal(client):
     assert client.get('/api/resource-recorder/download').status_code == 403
 
 
-def test_real_ssh_resource_connection_and_python_reader_reused(client, monkeypatch):
+@pytest.mark.parametrize('live', [False, True])
+def test_real_ssh_resource_connection_and_python_reader_reused(client, monkeypatch, live):
     """Exercise the actual framed stdin/stdout protocol through pinned SSH."""
     monkeypatch.setattr(store, 'DEMO', False)
     source = b'''import sys,json
@@ -256,6 +257,14 @@ def serve_resources():
   print(json.dumps({'ready':True}),flush=True)
   print(json.dumps({'metrics':{'request':request},'recording':{'mode':'remote'}}),flush=True)
 '''
+    if live:
+        source = source.replace(b"'recording':{'mode':'remote'}", b"'recording':{'mode':'remote'},'logins':{'protocol':1,'collector_id':'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','version':'2','events':[],'pending':0,'dropped':0,'acknowledgement':None,'acked_through':0,'acknowledged_at':None,'status':{'notifications':True,'sources':{}}}")
+        source += b'''
+def serve_login_notifications():
+ print(json.dumps({'kind':'login-change','revision':1}),flush=True)
+ for line in iter(sys.stdin.buffer.readline,b''): pass
+'''
+        assert client.put('/api/bridge/settings', json={'enabled': True}).status_code == 200
     monkeypatch.setattr(ssh.Path, 'read_bytes', lambda _: source)
     host_key = paramiko.ECDSAKey.generate()
     connections, commands, errors, threads, processes = [], [], [], [], []
@@ -300,12 +309,24 @@ def serve_resources():
         server = module.get_server('atlas') | {'host': '127.0.0.1', 'port': listener.getsockname()[1],
             'auth_method': 'password', 'password_encrypted': store.cipher().encrypt(b'fixture').decode(),
             'fingerprint': ssh.host_fingerprint(host_key)}
+        if live:
+            store.execute('UPDATE servers SET host=?,port=?,auth_method=?,password_encrypted=?,fingerprint=? WHERE id=?',
+                tuple(server[k] for k in ('host','port','auth_method','password_encrypted','fingerprint','id')))
         try:
             for _ in range(2):
                 result = ssh.request(server, {'operation': 'resources'})
                 assert result['metrics']['request']['collection']['sample_seconds'] == 60
                 assert result['latency_ms'] is not None
-            assert len(connections) == len(commands) == 1
+            if live:
+                deadline = time.time()+5
+                while time.time()<deadline:
+                    state = store.one('SELECT status FROM host_login_state WHERE server_id=?', (server['id'],))
+                    if state and json.loads(state['status']).get('version') == '2':
+                        break
+                    time.sleep(.02)
+                assert json.loads(state['status'])['version'] == '2'
+            assert len(connections) == 1
+            assert len(commands) == (2 if live else 1)
             ssh.sync_resources([server | {'monitoring_enabled': False}])
             assert not ssh.resource_sessions
         finally:

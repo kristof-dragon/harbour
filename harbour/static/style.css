@@ -916,3 +916,23 @@ body.mobile-panel-open{overflow:hidden}
 .modal .data-table-controls label { flex-direction:row;align-items:center; }
 .footprint-modal>.modal-header { position:sticky;top:-26px;z-index:5;background:var(--panel);padding:12px 0;margin-top:-12px; }
 @media(max-width:700px){.footprint-modal>.modal-header{top:-20px}}
+
+/* Fleet login observation, kept compact inside the settings overlay. */
+.modal.bridge-modal{width:min(1480px,100%)}
+#bridge-settings label.check{flex-direction:row;align-items:center}
+#bridge-root .data-table-scroll table{width:100%;border-collapse:collapse}
+#bridge-root .data-table-scroll td{padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+#bridge-settings{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.bridge-connected{background:color-mix(in srgb,var(--accent) 8%,transparent)}
+.bridge-key{max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)}
+.bridge-label{display:block;margin-bottom:3px}
+.bridge-stats{display:flex;gap:20px;align-items:center;flex-wrap:wrap;padding:14px 0}
+.bridge-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin:12px 0 18px}
+.bridge-fields dt{font-size:12px;color:var(--muted)}
+.bridge-fields dd{margin:3px 0;overflow-wrap:anywhere}
+.bridge-editors{display:grid;grid-template-columns:1fr 1fr;gap:20px;border-top:1px solid var(--line);padding-top:14px}
+.bridge-editors form{display:grid;gap:10px}
+.bridge-editors textarea{min-height:70px;resize:vertical}
+.bridge-evidence{margin-top:18px}
+#bridge-record pre{white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:700px){.bridge-editors{grid-template-columns:1fr}.bridge-fields{grid-template-columns:1fr 1fr}.bridge-stats{gap:12px}}

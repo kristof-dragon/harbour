@@ -91,6 +91,7 @@ async function load(initial=false){
       return;
     }
     state.data=next;
+    if(typeof bridgeSync==='function')bridgeSync();
     if(!current()){state.server=state.data.servers[0]?.id;state.selected.clear();}
     for(const job of state.data.jobs){
       const old=state.lastJobs.get(job.id);
@@ -103,6 +104,7 @@ async function load(initial=false){
 }
 
 function renderLogin(){
+  if(typeof bridgeStream!=='undefined'){bridgeStream?.close();bridgeStream=null;}
   document.dispatchEvent(new Event('harbour:overlay-close'));
   state.mobile=false;document.body.classList.remove('mobile-panel-open');
   state.modal=null;state.notices=null;$('#overlay').innerHTML='';
@@ -154,7 +156,7 @@ function renderSidebar(){
     <details id="server-filters-panel" class="server-filters-panel" ${state.filtersOpen?'open':''}><summary class="sidebar-heading between" title="Show or hide server filters"><span class="eyebrow">Your servers</span><span class="count" id="server-count" aria-live="polite">${active?servers.length+' / ':''}${state.data.servers.length}</span>${icon('down','filter-chevron')}</summary>
     <div class="server-filters">${filterControl('warnings','Warnings',[['with','With warnings'],['without','No warnings']])}${filterControl('status','Status',[['up','Up'],['down','Down'],['paused','Paused']])}${filterControl('updates','Updates',[['with','Available'],['without','None']])}</div></details>
     <nav class="server-list" aria-label="Servers">${serverCards(servers)}</nav>
-    <div class="sidebar-bottom"><details class="sidebar-menu" id="sidebar-menu" ${state.menuOpen?'open':''}><summary>${icon('menu')}<span>Menu</span>${icon('down','menu-chevron')}</summary><nav aria-label="Workspace menu">${admin()?button('onboard','Add server','plus','ghost sidebar-link'):''}${button('visuals','Visuals','sun','ghost sidebar-link')}${admin()?button('global-settings','Global settings','settings','ghost sidebar-link')+button('notification-settings','Notifications','bell','ghost sidebar-link')+button('users','Manage users','users','ghost sidebar-link')+button('security','Security & sign-ins','shield','ghost sidebar-link')+button('install-artifacts','Saved installs','download','ghost sidebar-link')+button('footprint','Harbour footprint','activity','ghost sidebar-link'):''}${button('account','My account','users','ghost sidebar-link')}<div class="connection-note"><span class="dot"></span><span id="connection-status">${state.demo?'Demo workspace':'Background monitoring active'}</span></div></nav></details>
+    <div class="sidebar-bottom"><details class="sidebar-menu" id="sidebar-menu" ${state.menuOpen?'open':''}><summary>${icon('menu')}<span>Menu</span>${icon('down','menu-chevron')}</summary><nav aria-label="Workspace menu">${admin()?button('onboard','Add server','plus','ghost sidebar-link'):''}${button('visuals','Visuals','sun','ghost sidebar-link')}${admin()?button('global-settings','Global settings','settings','ghost sidebar-link')+button('notification-settings','Notifications','bell','ghost sidebar-link')+button('users','Manage users','users','ghost sidebar-link')+button('security','Security & sign-ins','shield','ghost sidebar-link')+button('install-artifacts','Saved installs','download','ghost sidebar-link')+button('footprint','Harbour footprint','activity','ghost sidebar-link'):''}${state.data.bridge_enabled?button('bridge','The Bridge','users','ghost sidebar-link'):''}${button('account','My account','users','ghost sidebar-link')}<div class="connection-note"><span class="dot"></span><span id="connection-status">${state.demo?'Demo workspace':'Background monitoring active'}</span></div></nav></details>
     <div class="sidebar-footer"><span class="app-version">Harbour v${e(state.version)}</span><span class="footer-account" title="${e(state.user.name)} · ${admin()?'Administrator':'Read-only user'}">${e(state.user.name)}</span>${iconButton('logout','Sign out','logout')}</div></div><div class="resize-handle" role="separator" aria-label="Resize server pane" aria-orientation="vertical" aria-valuemin="280" aria-valuemax="408" aria-valuenow="${Math.round(parseFloat(document.documentElement.style.getPropertyValue('--sidebar'))||280)}" tabindex="0"></div>`);
 }
 function visuals(){
@@ -372,7 +374,7 @@ function finishDiscard(discard){
 }
 window.addEventListener('beforeunload',event=>{if(overlayDirty()){event.preventDefault();event.returnValue='';}});
 // Guard navigation between overlays as well as closing by X, Escape or backdrop.
-const overlayNavigation=new Set(['recorder-setup','recorder-remove','boot-history','resource-card-settings','notification-settings','job','prune','visuals','global-settings','server-settings','onboard','edit-connection','account','users','remove-user','remove-server','monitoring','security','security-policy','security-log','install-artifacts','install-artifact','footprint','mfa-begin','mfa-disable','mfa-recovery','warnings','updates','notifications','select-server','notice-server','logout']);
+const overlayNavigation=new Set(['recorder-setup','recorder-remove','boot-history','resource-card-settings','notification-settings','job','prune','visuals','global-settings','server-settings','onboard','edit-connection','account','users','remove-user','remove-server','monitoring','security','security-policy','security-log','install-artifacts','install-artifact','footprint','bridge','bridge-record','bridge-matches','bridge-profile-history','bridge-identity-remove','bridge-profile-edit','mfa-begin','mfa-disable','mfa-recovery','warnings','updates','notifications','select-server','notice-server','logout']);
 document.addEventListener('click',event=>{const action=event.target.closest('[data-action]')?.dataset.action;if(overlayNavigation.has(action)&&overlayDirty()){event.preventDefault();event.stopImmediatePropagation();const target=event.target.closest('[data-action]');requestDiscard(()=>target.click());}},true);
 let previousFocus=null;
 function modal(title,content,wide=false){
@@ -390,7 +392,7 @@ const formError = message => {const el=$('.form-error',$('#overlay'))||$('.form-
 function thresholdFields(t){return `<div class="form-grid"><label>CPU warning (%)<input name="cpu" type="number" min="1" max="100" step="0.1" value="${t.cpu}" required></label><label>Memory warning (%)<input name="memory" type="number" min="1" max="100" step="0.1" value="${t.memory}" required></label><label>Disk warning (%)<input name="disk" type="number" min="1" max="100" step="0.1" value="${t.disk}" required></label><label>Disk free-space warning (GB)<input name="disk_free_gb" type="number" min="0" max="1000000" step="0.1" value="${t.disk_free_gb}" required></label><label>Temperature warning (°C)<input name="temperature" type="number" min="1" max="180" step="0.1" value="${t.temperature??80}" required></label></div>`;}
 function settings(server=false){
   if(server)return serverSettings(current());
-  modal('Global settings',`<form id="threshold-form" data-server=""><h3>${fieldCaption('Warning thresholds','Default warning thresholds for every server without an override. Disk warnings trigger on either usage or free space. CPU temperature uses package / SoC sensors; other device sensors warn separately.')}</h3>${thresholdFields(state.data.thresholds)}<div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">Save thresholds</button></div></form><hr class="section-rule"><h3>${fieldCaption('Monitoring & history','Polling intervals, staged resolution and data retention.')}</h3>${button('monitoring','Configure monitoring','activity','small')}<hr class="section-rule"><h3>${fieldCaption('Notifications','Dismissals are personal. Updates return for a different image; warnings return after the issue clears and happens again. Server warning indicators stay visible.')}</h3>${button('restore-dismissals','Restore my dismissed notifications','bell','small')}`);
+  modal('Global settings',`<form id="threshold-form" data-server=""><h3>${fieldCaption('Warning thresholds','Default warning thresholds for every server without an override. Disk warnings trigger on either usage or free space. CPU temperature uses package / SoC sensors; other device sensors warn separately.')}</h3>${thresholdFields(state.data.thresholds)}<div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">Save thresholds</button></div></form><hr class="section-rule"><h3>${fieldCaption('Monitoring & history','Polling intervals, staged resolution and data retention.')}</h3>${button('monitoring','Configure monitoring','activity','small')}<hr class="section-rule"><h3>${fieldCaption('Notifications','Dismissals are personal. Updates return for a different image; warnings return after the issue clears and happens again. Server warning indicators stay visible.')}</h3>${button('restore-dismissals','Restore my dismissed notifications','bell','small')}${bridgeSettings()}`);
 }
 function onboard(){
   state.connection=null;state.key=null;state.keyMode='generate';state.authMethod='key';state.hostProbe=null;state.acceptedHost=null;
@@ -510,7 +512,7 @@ document.addEventListener('click',async event=>{
   finally{busyViewNodes.delete(el);if(el.isConnected)el.disabled=false;if(a==='dismiss-all'&&state.notices)renderNotices();}
 });
 document.addEventListener('submit',async event=>{
-  if(['login-filter','incident-filters','incident-brief-form','endpoint-form','call-test-form'].includes(event.target.id)||event.target.matches('.collector-sudo-form'))return;
+  if(['bridge-settings','bridge-annotation','bridge-identity','bridge-profile-form','login-filter','incident-filters','incident-brief-form','endpoint-form','call-test-form'].includes(event.target.id)||event.target.matches('.collector-sudo-form'))return;
   event.preventDefault();const form=event.target;if(form.dataset.busy)return;const data=Object.fromEntries(new FormData(form));const submit=$('[type=submit]',form);const restoreForm=busyOnboarding(form);$('.form-error',form).textContent='';
   try{
     if(monitorForms.has(form.id)){await handleMonitorForm(form,data);return;}

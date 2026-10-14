@@ -70,7 +70,7 @@ def observe(key, sample):
     return clean
 
 
-def ingest(server_id, result, signature):
+def ingest(server_id, result, signature, login_only=False):
     # Serialized received data is a useful attribution signal, not disk writes.
     size = len(json.dumps(result, ensure_ascii=True, separators=(',', ':')).encode())
     with lock:
@@ -84,7 +84,7 @@ def ingest(server_id, result, signature):
         if isinstance(value, dict):
             remote[server_id] = {'signature': signature, 'received_at': time.time(),
                                  'samples': {k: sanitize(value.get(k)) for k in ('probe', 'resources', 'logins')}}
-        else:
+        elif not login_only:
             remote.pop(server_id, None)
 
 

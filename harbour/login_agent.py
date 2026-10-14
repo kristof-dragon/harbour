@@ -24,7 +24,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-VERSION = '1'
+VERSION = '2'
 SOCKET = '/var/run/harbour-logins/collector.sock'
 MAX_BATCH = 200
 MAX_LINE = 32768
@@ -120,6 +120,8 @@ def parse_auth(message, service='sshd', occurred_at=None, pid=None):
 class Spool:
     def __init__(self, path, max_events=20000):
         self.path, self.max_events = str(path), max_events
+        self.changed = threading.Condition()
+        self.generation, self.revision = secrets.token_hex(16), 0
         with self.db() as con:
             con.execute('PRAGMA journal_mode=WAL')
             con.executescript('''
@@ -161,15 +163,26 @@ class Spool:
             self.set(con, key, value)
 
     def append(self, event, source_key, checkpoint=None):
+        inserted = False
         with self.db() as con:
             con.execute('BEGIN IMMEDIATE')
             if event and not con.execute('SELECT 1 FROM events WHERE source_key=?', (source_key,)).fetchone():
+                inserted = True
                 event = dict(event)
                 self.correlate(con, event)
                 con.execute('INSERT OR IGNORE INTO events(source_key,captured_at,payload) VALUES (?,?,?)',
                             (source_key, time.time(), json.dumps(event, ensure_ascii=True)))
             if checkpoint:
                 self.set(con, *checkpoint)
+        if inserted:
+            with self.changed:
+                self.revision += 1
+                self.changed.notify_all()
+
+    def watch(self, generation, revision, stop):
+        with self.changed:
+            self.changed.wait_for(lambda: self.generation != generation or self.revision != revision or stop.is_set(), 20)
+            return dict(kind='login-change', generation=self.generation, revision=self.revision)
 
     @staticmethod
     def correlate(con, event):
@@ -262,7 +275,7 @@ class Collector:
     def status(self):
         with self.guard:
             sources = json.loads(json.dumps(self.sources))
-        return dict(started_at=self.started_at, checked_at=time.time(), platform=self.platform, sources=sources,
+        return dict(started_at=self.started_at, checked_at=time.time(), platform=self.platform, sources=sources, notifications=True,
                     coverage=['ssh', 'pam-authentication', 'pam-sessions'] if self.platform == 'linux' else
                     ['ssh-logs', 'os-authentication', 'graphical-sessions', 'screen-sharing'] if self.endpoint_helper else ['ssh-logs'],
                     limitations=(['Coverage depends on services writing authentication records.'] if self.platform == 'linux' else
@@ -515,10 +528,13 @@ def serve(collector, socket_path=SOCKET, reader_uid=None):
             self.request.settimeout(3)
             try:
                 request = json.loads(self.rfile.readline(4097))
-                if request.get('operation') != 'exchange':
+                if request.get('operation') == 'watch':
+                    result = collector.spool.watch(request.get('generation'), request.get('revision'), collector.stop)
+                elif request.get('operation') == 'exchange':
+                    result = collector.spool.exchange(request.get('acknowledgement'))
+                    result['status'] = collector.status()
+                else:
                     raise ValueError('Unknown operation')
-                result = collector.spool.exchange(request.get('acknowledgement'))
-                result['status'] = collector.status()
             except Exception as exc:
                 result = {'error': clean(str(exc), 300)}
             self.wfile.write(json.dumps(result, ensure_ascii=True).encode() + b'\n')
@@ -532,7 +548,27 @@ def serve(collector, socket_path=SOCKET, reader_uid=None):
         os.chmod(path.parent, 0o755)
     if path.exists():
         path.unlink()
-    server = socketserver.UnixStreamServer(str(path), Handler)
+    class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
+        slots = threading.BoundedSemaphore(8)
+
+        def process_request(self, request, address):
+            if not self.slots.acquire(blocking=False):
+                self.shutdown_request(request)
+                return
+            try:
+                super().process_request(request, address)
+            except Exception:
+                self.slots.release()
+                raise
+
+        def process_request_thread(self, request, address):
+            try:
+                super().process_request_thread(request, address)
+            finally:
+                self.slots.release()
+
+    server = Server(str(path), Handler)
     os.chmod(path, 0o600)
     if reader_uid is not None:
         os.chown(path, reader_uid, -1)
@@ -542,6 +578,8 @@ def serve(collector, socket_path=SOCKET, reader_uid=None):
             server.handle_request()
             collector.spool.maintain()
     finally:
+        with collector.spool.changed:
+            collector.spool.changed.notify_all()
         server.server_close()
         path.unlink(missing_ok=True)
 

@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from . import __version__, auth, call_endpoint, call_tests, collector_setup, cpu, demo, history, install_artifacts, logins, network, network_incidents, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
-from . import network_diagnostics, footprint
+from . import network_diagnostics, footprint, bridge
 
 pool = ThreadPoolExecutor(max_workers=4)
 resource_workers = None
@@ -399,6 +399,7 @@ app.include_router(call_tests.router)
 app.include_router(call_endpoint.router)
 app.include_router(network_diagnostics.router)
 app.include_router(footprint.router)
+app.include_router(bridge.router)
 
 
 @app.exception_handler(RequestValidationError)
@@ -582,7 +583,7 @@ def dashboard(user=Depends(authenticated)):
         job['target_names'] = stored_target_names(job)
         queue_details(job, pending.get(job['server_id'], []))
     return {"servers": [public_server(s, user) for s in store.rows("SELECT * FROM servers ORDER BY sort_order,rowid")],
-            "thresholds": {**store.DEFAULTS, **json.loads(store.one("SELECT value FROM settings WHERE key='thresholds'")["value"])}, "jobs": jobs}
+            "thresholds": {**store.DEFAULTS, **json.loads(store.one("SELECT value FROM settings WHERE key='thresholds'")["value"])}, "jobs": jobs, "bridge_enabled": bridge.enabled()}
 
 
 class Thresholds(Input):

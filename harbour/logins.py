@@ -49,7 +49,10 @@ def initialize(con):
 
 def payload(server_id, signature):
     row = store.one('SELECT * FROM host_login_state WHERE server_id=?', (server_id,))
+    from . import bridge
     request = {'operation': 'resources'}
+    if bridge.enabled():
+        request['login_os_sessions'] = True
     if row and row['connection'] == signature and row['acknowledgement']:
         request['logins_ack'] = json.loads(row['acknowledgement'])
     return request
@@ -161,6 +164,35 @@ def validate_presence(value):
     return dict(state='ok', checked_at=value['checked_at'], boot_id=value['boot_id'], sessions=result, scope='ssh')
 
 
+def validate_os_presence(value):
+    unavailable = dict(state='unavailable', detail='Console/desktop presence has not been verified.')
+    try:
+        if not isinstance(value, dict) or value.get('state') != 'ok':
+            return unavailable
+        finite(value.get('checked_at'))
+        if not isinstance(value.get('boot_id'), str) or not 1 <= len(value['boot_id']) <= 128:
+            return unavailable
+        rows = value.get('sessions')
+        if not isinstance(rows, list) or len(rows) > 128:
+            return unavailable
+        seen, clean = set(), []
+        fields = ('session_id', 'username', 'uid', 'service', 'method', 'source_ip', 'tty')
+        for row in rows:
+            if not isinstance(row, dict) or any(row.get(k) is not None and (not isinstance(row[k], str) or len(row[k]) > 512) for k in fields):
+                return unavailable
+            if not row.get('username') or not row.get('session_id') or row['session_id'] in seen:
+                return unavailable
+            seen.add(row['session_id'])
+            finite(row.get('started_at'), optional=True)
+            if row.get('started_at') and row['started_at'] > value['checked_at']:
+                return unavailable
+            clean.append({**{k: row.get(k) for k in fields}, 'started_at': row.get('started_at'),
+                'presence_source': 'Linux logind', 'result': 'opened'})
+        return dict(state='ok', checked_at=value['checked_at'], boot_id=value['boot_id'], sessions=clean)
+    except (ValueError, TypeError):
+        return unavailable
+
+
 def collect(server, batch, signature, is_current):
     """Persist the entire batch and its next-probe acknowledgement atomically.
 
@@ -186,6 +218,7 @@ def collect(server, batch, signature, is_current):
         status['current_sessions'] = validate_presence(batch.get('current_sessions'))
     except (ValueError, TypeError, AttributeError):
         status['current_sessions'] = {'state': 'unavailable', 'detail': 'Host session information was invalid.'}
+    status['os_sessions'] = validate_os_presence(batch.get('os_sessions'))
     with store.db() as con:
         con.execute('BEGIN IMMEDIATE')
         row = con.execute('SELECT * FROM servers WHERE id=?', (server['id'],)).fetchone()
@@ -193,6 +226,13 @@ def collect(server, batch, signature, is_current):
             return
         previous = con.execute('SELECT * FROM host_login_state WHERE server_id=?', (server['id'],)).fetchone()
         now = time.time()
+        if previous and previous['connection'] == signature:
+            old = json.loads(previous['status'])
+            # A slower ordinary poll must not replace a more recent live snapshot.
+            if (old.get('current_sessions', {}).get('checked_at', 0) > status['current_sessions'].get('checked_at', float('inf'))):
+                status['current_sessions'] = old['current_sessions']
+            if old.get('os_sessions', {}).get('checked_at', 0) > status['os_sessions'].get('checked_at', float('inf')):
+                status['os_sessions'] = old['os_sessions']
         if error or batch.get('state'):
             # Keep the pending ACK through outages, but never carry it to another connection.
             con.execute('''INSERT INTO host_login_state(server_id,connection,status,fetched_at) VALUES (?,?,?,?)
@@ -211,6 +251,8 @@ def collect(server, batch, signature, is_current):
                 event['captured_at'], now, event.get('username'), event['service'], event['result'], event.get('source_ip'),
                 event.get('key_fingerprint'), int(own), json.dumps(event)))
         login_sessions.project(con, server['id'])
+        from . import bridge
+        bridge.reconcile(con, server['id'])
         if batch['acknowledged_at'] is not None:
             con.execute('''UPDATE host_login_events SET acknowledged_at=? WHERE server_id=? AND collector_id=?
                 AND seq<=? AND acknowledged_at IS NULL''', (batch['acknowledged_at'], server['id'], batch['collector_id'], batch['acked_through']))
@@ -219,6 +261,8 @@ def collect(server, batch, signature, is_current):
             collector_id=excluded.collector_id,acknowledgement=excluded.acknowledgement,status=excluded.status,fetched_at=excluded.fetched_at''',
             (server['id'], signature, batch['collector_id'], json.dumps(batch['acknowledgement']) if batch['acknowledgement'] else None,
              json.dumps(status), now))
+    from . import bridge
+    bridge.publish()
 
 
 def summary(server):
@@ -231,6 +275,8 @@ def summary(server):
 def compact():
     store.execute('DELETE FROM host_login_events WHERE collected_at<?', (time.time() - 90*86400,))
     store.execute('DELETE FROM host_login_sessions WHERE collected_at<?', (time.time() - 90*86400,))
+    from . import bridge
+    bridge.compact()
 
 
 def seed_demo():
@@ -316,7 +362,12 @@ def event_table(server_id: str, page: int = Query(1, ge=1, le=1000000), size: in
     presence = login_sessions.presence(server, status)
     records, pagination = login_sessions.table_listing(server_id, presence, view=view, outcome=outcome,
         search=search, hide_harbour=hide_harbour, page=page, size=size, sort=sort, order=order, filters=filters)
+    current = login_sessions.current(server_id,presence)
+    from . import bridge
+    if bridge.enabled():
+        records = bridge.enrich(records)
+        current = bridge.current_for_server(server, presence)
     return dict(events=records, pagination=pagination, status=status, paused=not server['monitoring_enabled'],
         host_checked_at=server['checked'], host_error=bool(server['error']), retention_days=90,
-        current_sessions=login_sessions.current(server_id,presence),
+        current_sessions=current,
         session_presence={k:v for k,v in presence.items() if k != 'sessions'})

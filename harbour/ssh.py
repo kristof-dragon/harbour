@@ -358,6 +358,8 @@ class ResourceSession:
         self.retired = threading.Event()
 
     def close(self):
+        from . import login_live
+        login_live.close_session(self)
         client, self.client = self.client, None
         if client:
             client.close()
@@ -442,7 +444,11 @@ def resource_request(server, payload, cancel=None):
             else:
                 session = resource_sessions[server['id']] = ResourceSession(signature)
     try:
-        return session.exchange(server, recording.payload(server, payload), cancel)
+        result = session.exchange(server, recording.payload(server, payload), cancel)
+        if isinstance(session, ResourceSession):
+            from . import login_live
+            login_live.ensure(session, server, (result.get('logins') or {}).get('status', {}))
+        return result
     except Cancelled:
         raise
     except ProbeError:

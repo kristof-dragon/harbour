@@ -19,6 +19,61 @@ For Nginx Proxy Manager on a separate instance, choose setup option **2**. In NP
 
 Open your configured URL and sign in. Use **Menu → Add server** to connect a Linux or macOS host with Python 3.9+. The OS is detected automatically. Choose **Docker host** (also requires Docker, Compose v2 and an SSH account with Docker access) or **Plain server** for resource monitoring. Fetch and accept its host fingerprint, then generate or import an SSH key and install it from the form using a one-time password, or copy it manually. Optional password login is available after acknowledging its warning. Use **Server settings → Edit SSH connection** to switch authentication methods or replace keys without deleting the server.
 
+### The Bridge
+
+Enable **The Bridge** in **Menu → Global settings**. Its menu is hidden while off.
+The Bridge brings connected sessions, searchable/sortable/paginated login history,
+identity labels and collector coverage into one settings overlay. Administrators
+can edit labels, tags and notes; other signed-in users can inspect observations.
+Disabling the feature keeps the existing login history and annotations.
+
+Current sessions require an installed login collector and a fresh host check.
+SSH sessions are verified against host processes. Linux hosts with readable
+logind also report non-SSH console/desktop user sessions; macOS console/desktop
+presence is currently unavailable. Missing collectors, paused/offline hosts,
+restricted process visibility and collection gaps remain explicit coverage limits.
+OpenWrt's SSH-only probes do not install this collector, so routers are excluded
+from the connected list. An unpaired login event is never proof of current presence.
+
+Update each host's **Logins → Collector setup** to login collector **version 2**
+for event-driven delivery. The collector signals committed events through its
+private Unix socket. Harbour opens an additional channel on the **existing pinned
+SSH connection**, not another SSH login or a public listening port. A notice fetches
+only login evidence and session presence; it does not trigger a resource sample.
+Bursts are coalesced, pending events are drained in bounded batches, and evidence
+is committed before acknowledgement. A 20-second heartbeat verifies presence even
+when a close event is missing. Reconnection resumes durable replay. Older collectors
+continue ordinary polling and are labelled as needing an update for live delivery.
+The browser receives authenticated change notices and retains periodic refresh as
+fallback. This is near-real-time observation, not a guaranteed latency or lossless
+capture of events the OS never logged. Live presence checks add some read traffic
+and status writes; use Harbour footprint to measure the deployment's actual cost.
+
+A verified **SSH key fingerprint + account** matches a credential across hosts.
+It does not prove a person: shared keys, agent forwarding and shared accounts can
+represent several users. Failed/offered keys cannot join verified credentials.
+Without a verified key, matches are explicitly weaker **host + account + source IP
++ service + method** contexts. Source ports, boot IDs and process IDs distinguish
+sessions, not recurring people. Counts and first/last observations cover the
+retained 90 days, not lifetime usage. Identity labels survive retention so the
+same credential/context can be recognised later.
+
+**Session/event tags** and notes work without creating an identity. **Identity tags**
+follow matching past and future observations. Inspect a session to see matching
+history, connection counts, source, timestamps, duration, certificate fields and
+original evidence. Tagged snapshot-only observations remain reviewable after they
+end; a later unambiguous matching login inherits their tags. Unknown logout times
+and durations stay unknown. No automatic suspicious-activity classification is
+made in this release.
+
+Additional useful identity context already recorded where available includes
+SSH key algorithm, certificate ID/serial/CA fingerprint, host/account UID,
+authentication method and timestamps; optional macOS native events can include
+directory and token identifiers. Future integrations could add SSH certificate
+principals, managed device IDs, VPN identities, and DHCP/ARP context. MAC addresses
+are useful only within the relevant local network; these future additions are not
+collected by The Bridge yet.
+
 ### Harbour footprint and storage sizing
 
 Open **Menu → Harbour footprint** as an administrator to inspect the current

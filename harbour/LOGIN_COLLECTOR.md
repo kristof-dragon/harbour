@@ -212,3 +212,24 @@ failures, permissions, API isolation, migrations and the browser view. Native
 helper compilation is checked on macOS. End-to-end deployment on a signed,
 Full-Disk-Access-approved Mac and real Linux authentication sources requires a
 controlled host test; synthetic fixtures are not claimed as live coverage.
+
+
+## Live delivery to The Bridge
+
+Login collector version 2 adds committed-event notifications on the same private
+Unix socket. Update an existing installation through **Logins → Collector setup**;
+its spool and acknowledgements are retained. No additional network port, inbound
+firewall rule or separate SSH login is required.
+
+Enable **The Bridge** in Global settings. Harbour listens through another channel
+of its existing pinned monitoring SSH connection, coalesces bursts, and fetches
+login batches and current presence only. A 20-second heartbeat also refreshes
+presence. The collector remains the durable source during disconnects; Harbour
+acknowledges only after storing the evidence. Older installations keep working
+through the configured polling interval. Disable The Bridge to close live notice
+channels without disabling ordinary login collection.
+
+The socket serves a bounded number of concurrent readers so waiting for a notice
+does not block normal fetch/acknowledgement. Notices contain only a generation and
+revision; they cannot request commands. The Bridge and per-server Logins views
+receive authenticated browser refresh notices after storage commits.

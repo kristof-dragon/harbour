@@ -1125,9 +1125,11 @@ def current_ssh_sessions():
         return dict(state='unavailable', detail='The host could not verify its current SSH sessions.')
 
 
-def login_events(acknowledgement=None):
+def login_events(acknowledgement=None, include_os=False):
     result = collected_login_events(acknowledgement)
     result['current_sessions'] = current_ssh_sessions()
+    if include_os:
+        result['os_sessions'] = current_os_sessions()
     return result
 
 
@@ -1328,7 +1330,7 @@ def resource_response(request):
         if recorded.get('protocol') == 1:
             recorded.update(mode='fallback', state='stale', detail='Recorder has no fresh sample; using remote probes.')
         result = {'metrics': resource_sampler.sample(request.get('collection')), 'samples': samples, 'recording': recorded}
-    result['logins'] = login_events(request.get('logins_ack'))
+    result['logins'] = login_events(request.get('logins_ack'), request.get('login_os_sessions', False))
     result['harbour_footprint'] = {'probe': harbour_self_footprint(allow_cgroup=False), **harbour_collector_footprints()}
     return result
 
@@ -1342,7 +1344,7 @@ def serve_resources():
                 break
             request = json.loads(line)
             print(json.dumps({'ready': True}), flush=True)
-            result = resource_response(request)
+            result = {'logins': login_events(request.get('logins_ack'), request.get('login_os_sessions', False))} if request.get('operation') == 'logins' else resource_response(request)
         except Exception as exc:
             result = {'error': str(exc)[:1000]}
         print(json.dumps(result, allow_nan=False), flush=True)
@@ -1352,7 +1354,7 @@ def handle(request, emit=None):
     operation = request["operation"]
     if operation == 'resources':
         # No Docker commands: resource polling must also work during daemon operations.
-        return {'metrics': metrics(docker=False), 'logins': login_events(request.get('logins_ack'))}
+        return {'metrics': metrics(docker=False), 'logins': login_events(request.get('logins_ack'), request.get('login_os_sessions', False))}
     docker = request.get("server_type", "docker") == "docker"
     if not docker and operation != "snapshot":
         raise ValueError("Docker operations are disabled for plain servers")
@@ -1394,3 +1396,70 @@ def handle(request, emit=None):
                 return {"ok": False, "output": "\n".join(completed + [command["label"] + ": " + str(exc)])[-60000:], "completed": len(completed)}
         return {"ok": True, "output": "\n".join(completed)[-60000:], "completed": len(completed)}
     raise ValueError("Unsupported operation")
+
+
+def serve_login_notifications():
+    """Blocking local notices, carried only by our existing authenticated SSH connection."""
+    import socket
+    generation, revision = None, None
+    while True:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(25)
+            connection.connect('/var/run/harbour-logins/collector.sock')
+            connection.sendall(json.dumps(dict(operation='watch', generation=generation, revision=revision)).encode()+b'\n')
+            data = bytearray()
+            while not data.endswith(b'\n'):
+                chunk = connection.recv(4096)
+                if not chunk or len(data)+len(chunk) > 4096:
+                    return
+                data.extend(chunk)
+            notice = json.loads(data)
+            if notice.get('kind') != 'login-change':
+                return
+            generation, revision = notice.get('generation'), notice.get('revision')
+            print(json.dumps(notice), flush=True)
+            time.sleep(.25)  # Coalesce journal bursts before asking for another revision.
+
+
+def current_os_sessions():
+    """logind's current non-SSH user sessions, separately from SSH process evidence."""
+    if sys.platform != 'linux':
+        return dict(state='unavailable', detail='Console/desktop presence requires Linux logind; SSH verification remains separate.')
+    try:
+        env = {**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC'}
+        listed = subprocess.run(['loginctl', 'list-sessions', '--no-legend', '--no-pager'], capture_output=True, text=True, timeout=3, env=env)
+        if listed.returncode or len(listed.stdout) > 65536:
+            raise ValueError()
+        ids = [line.split()[0] for line in listed.stdout.splitlines() if line.split()]
+        if len(ids) > 128 or any(not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', x) for x in ids):
+            raise ValueError()
+        rows = []
+        if ids:
+            output = subprocess.run(['loginctl', 'show-session', *ids, '--no-pager'], capture_output=True, text=True, timeout=3, env=env)
+            if output.returncode or len(output.stdout) > 500000:
+                raise ValueError()
+            rows = parse_os_sessions(output.stdout)
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        return dict(state='ok', checked_at=time.time(), boot_id=boot, sessions=rows, scope='linux-logind')
+    except Exception:
+        return dict(state='unavailable', detail='Linux logind sessions could not be read; console/desktop presence is unverified.')
+
+
+def parse_os_sessions(output):
+    rows = []
+    for block in output.strip().split('\n\n'):
+        values = dict(line.split('=', 1) for line in block.splitlines() if '=' in line)
+        if (values.get('State') not in ('active', 'online') or values.get('Class') not in ('user', 'user-early')
+                or values.get('Service', '').startswith('ssh') or not values.get('Name') or not values.get('Id')):
+            continue
+        started = None
+        try:
+            import calendar
+            started = calendar.timegm(time.strptime(values['Timestamp'], '%a %Y-%m-%d %H:%M:%S %Z'))
+        except (KeyError, ValueError):
+            pass
+        rows.append(dict(session_id=values['Id'], username=values['Name'], uid=values.get('User'),
+            service=values.get('Service') or 'login', method=values.get('Type') or 'console',
+            source_ip=values.get('RemoteHost') or None, tty=values.get('TTY') or None,
+            started_at=started, result='opened', presence_source='Linux logind'))
+    return rows
