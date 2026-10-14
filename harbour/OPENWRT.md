@@ -478,6 +478,33 @@ counts use all eligible saved observations and omitted examples are disclosed.
 Original raw retention is unchanged. Older unanalysed evidence cannot be recovered
 after it expires. Large archives are not automatically reconstructed into tests.
 
+**Review** opens a bounded overlay with **Summary**, **Episodes**, **Comparisons**
+and **Evidence** tabs. The underlying page keeps its position. Summary puts the
+verdict and upload/download measurements first; supporting evidence and limitations
+remain expandable. Evidence links open the exact measurement inside the overlay.
+
+The episode column's **Observation meanings** info menu explains its five values:
+
+- **Ping and call-flow impairment**: both measurements show impairment.
+- **Call-flow impairment with normal endpoint ping**: receiver impairment with
+  sufficient normal endpoint-ping coverage.
+- **Ping impairment with normal call flow**: ping impairment with sufficient
+  normal, aligned evidence in both receiver directions.
+- **Call-flow impairment; ping comparison incomplete**: receiver impairment is
+  measured but ping coverage/timing cannot establish the comparison.
+- **Ping impairment; call-flow comparison incomplete**: ping impairment is
+  measured but call-flow coverage/timing cannot establish the comparison.
+
+Receiver impairment means packet loss or jitter above 30 ms; ping impairment
+means timeout or RTT above the recorded run threshold. Normal comparisons require
+at least 80% eligible coverage and aligned receiver intervals with at most one
+second of timing uncertainty. No-impairment and insufficient-comparison outcomes
+apply to whole reports, not degradation episode rows. None proves a root cause.
+
+For deployment I/O, memory and separate logical volume per monitored router,
+see **Menu → Harbour footprint** and the README's storage-sizing section. Router
+process I/O itself remains unavailable for SSH-only OpenWrt probes.
+
 Authenticated endpoints under `/api/servers/{id}/network/analysis`:
 
 - `GET ?hours=168&until=<epoch>` lists reports, pending sources and patterns.

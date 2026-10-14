@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from . import __version__, auth, call_endpoint, call_tests, collector_setup, cpu, demo, history, install_artifacts, logins, network, network_incidents, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
-from . import network_diagnostics
+from . import network_diagnostics, footprint
 
 pool = ThreadPoolExecutor(max_workers=4)
 resource_workers = None
@@ -212,6 +212,11 @@ def poll_resources(server, lock, cancel=None, background=False, raise_errors=Fal
                 # A recovered local sample is not evidence that SSH was reachable
                 # at its capture time. Record this transport check separately.
                 history.record(id_, latency_ms=result.get('latency_ms'), up=True, now=now, connection=con)
+        try:
+            footprint.ingest(id_, result, connection_signature(server))
+        except Exception:
+            # Optional diagnostics cannot turn a committed resource sample into a failed poll.
+            pass
         clear_resolved_warning_dismissals(id_)
         observe_notifications(id_)
         # Login collection failures are independent of resource/host health.
@@ -352,6 +357,9 @@ async def lifespan(app):
     with scheduler_guard:
         inventory_attempts.clear()
         resource_workers = polling.ServerWorkers(run_resource_worker)
+    footprint.reset()
+    footprint_thread = threading.Thread(target=footprint.run, args=(stop,), daemon=True)
+    footprint_thread.start()
     thread = threading.Thread(target=poll_loop, daemon=True)
     thread.start()
     retention = threading.Thread(target=retention_loop, daemon=True)
@@ -364,6 +372,7 @@ async def lifespan(app):
         yield
     finally:
         stop.set()
+        footprint_thread.join(timeout=20)
         call_scheduler.join(timeout=20)
         call_tests.close_all()
         collector_setup.close_all()
@@ -389,6 +398,7 @@ app.include_router(network_incidents.router)
 app.include_router(call_tests.router)
 app.include_router(call_endpoint.router)
 app.include_router(network_diagnostics.router)
+app.include_router(footprint.router)
 
 
 @app.exception_handler(RequestValidationError)

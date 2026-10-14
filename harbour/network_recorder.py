@@ -255,7 +255,7 @@ class Pipeline:
     def health(self):
         stalled = self.inflight is not None and time.monotonic()-self.inflight > 5
         # Exclude settings and credentials from the web-facing runtime snapshot.
-        return {id_:{**worker.health(), 'recorder_online':True, 'runtime_updated':time.time(),
+        return {id_:{**worker.health(), 'signature':worker.signature, 'recorder_online':True, 'runtime_updated':time.time(),
                      'writer_stalled':stalled} for id_, worker in self.active.items()}
 
     def close(self):

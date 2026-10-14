@@ -19,6 +19,49 @@ For Nginx Proxy Manager on a separate instance, choose setup option **2**. In NP
 
 Open your configured URL and sign in. Use **Menu → Add server** to connect a Linux or macOS host with Python 3.9+. The OS is detected automatically. Choose **Docker host** (also requires Docker, Compose v2 and an SSH account with Docker access) or **Plain server** for resource monitoring. Fetch and accept its host fingerprint, then generate or import an SSH key and install it from the form using a one-time password, or copy it manually. Optional password login is available after acknowledging its warning. Use **Server settings → Edit SSH connection** to switch authentication methods or replace keys without deleting the server.
 
+### Harbour footprint and storage sizing
+
+Open **Menu → Harbour footprint** as an administrator to inspect the current
+deployment. The view separates:
+
+- **Deployment components:** memory (including file cache), disk read/write rates,
+  observed windows and projected daily writes for Harbour web/workers and the
+  network recorder. Dedicated Linux cgroup v2 counters include child processes.
+  A process-only fallback is labelled partial; missing counters stay unavailable.
+- **Load added by each server:** serialized incoming resource/login data and
+  acknowledged OpenWrt network-sample bytes. These are **logical data volumes**,
+  not physical disk I/O attributed to a server. Shared indexes, WAL/checkpoints,
+  retention and archives prevent exact per-server physical attribution.
+- **Collectors on monitored machines:** disk traffic from Linux resource/login
+  collector service cgroups, separately from the deployment. The SSH probe reports
+  only its own process I/O, excluding commands it starts. Existing Linux collectors
+  need no reinstall when their standard cgroup paths are readable. macOS, cgroup v1,
+  stopped/missing collectors and OpenWrt SSH-only router probes show unavailable
+  where scoped counters cannot be read.
+
+The sampler runs every 30 seconds; the open view refreshes every 15 seconds.
+Remote measurements follow the host's monitoring interval and become unavailable
+when stale, paused or reconfigured. Rates need two samples and reset after counter
+resets, process/service replacement or a long gap. Baselines are held in RAM for
+up to 24 hours and restart with Harbour; no footprint history is written to SQLite.
+Measurements do not scan retained history. The database file-size change is
+shown separately because growth is not the same as bytes written.
+
+Daily figures extrapolate the observed average, **not** a measured full day or an
+SD-card lifetime prediction. Observe representative tests, retention and archive
+activity. Device-internal write amplification, unrelated host services and
+external Docker/system logging are outside these counters. Backing device
+counters are used to avoid double-counting stacked storage; ambiguous device
+coverage remains unavailable. Update both Compose services to obtain complete
+deployment coverage.
+
+SQLite remains the default database. More reads/writes alone do not establish a
+need for another engine: measure sustained writer contention and reduce needless
+writes/batch transactions first. PostgreSQL remains a possible future deployment
+option; it is not included in this release, and switching engines would not by
+itself reduce SD-card wear. See [SQLite's deployment guidance](https://www.sqlite.org/whentouse.html)
+and [WAL concurrency](https://www.sqlite.org/wal.html).
+
 ### Docker operation output
 
 The operation progress dialog updates Docker pull layers and Compose container

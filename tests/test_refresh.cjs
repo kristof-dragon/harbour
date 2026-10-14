@@ -96,7 +96,7 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  assert.equal(await page.evaluate(()=>window.compromised),undefined);
  await page.setViewportSize({width:390,height:844});
  assert.equal(await page.evaluate(()=>getComputedStyle(output).whiteSpace),'pre');
- assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+ await page.waitForFunction(()=>document.documentElement.scrollWidth<=innerWidth);
  await page.evaluate(()=>{output.scrollLeft=100;});
  job.output=job.output.replace('Running 2/2','Running 3/3');
  await page.waitForFunction(()=>document.querySelector('#job-output').textContent.includes('Running 3/3'));

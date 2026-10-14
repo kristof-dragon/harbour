@@ -153,6 +153,7 @@ class Buffer:
         self.limit, self.size, self.dropped = limit, 0, 0
         self.rows = collections.deque()
         self.sequence = 0
+        self.committed_bytes, self.committed_samples = 0, 0
 
     def append(self, payload):
         # Drop the newest arrival when full: outstanding batches remain stable
@@ -177,9 +178,12 @@ class Buffer:
 
     def acknowledge(self, through):
         while self.rows and self.rows[0][0] <= through:
-            self.size -= len(self.rows.popleft()[2])
+            size = len(self.rows.popleft()[2])
+            self.size -= size
+            self.committed_bytes += size
+            self.committed_samples += 1
 
     def status(self):
-        return {'buffer_bytes':self.size, 'buffer_limit_bytes':self.limit,
+        return {'committed_bytes':self.committed_bytes, 'committed_samples':self.committed_samples, 'buffer_bytes':self.size, 'buffer_limit_bytes':self.limit,
                 'buffer_samples':len(self.rows), 'buffer_dropped':self.dropped,
                 'oldest_unsaved_seconds':round(max(0, time.monotonic()-self.rows[0][1]), 1) if self.rows else 0}

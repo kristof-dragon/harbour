@@ -1232,6 +1232,92 @@ def recorder_exchange(request):
         return {'mode': 'fallback', 'state': 'error', 'detail': 'Local recorder could not be read; using remote probes.'}
 
 
+def harbour_block_leaves(device, depth=0):
+    """Resolve dm/md layers without adding the same traffic at each layer."""
+    if depth > 8:
+        raise ValueError('Block device nesting exceeds measurement limit')
+    root = Path('/sys/dev/block') / device
+    if (root / 'partition').exists():
+        root = root.resolve().parent
+    children = list((root / 'slaves').iterdir())
+    if children:
+        leaves = set()
+        for child in children:
+            leaves.update(harbour_block_leaves((child / 'dev').read_text().strip(), depth+1))
+        return leaves
+    return {(root / 'dev').read_text().strip()}
+
+
+def harbour_cgroup_footprint(directory):
+    """Read a dedicated Linux service/container group, including child processes."""
+    root = Path(directory)
+    try:
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        memory = int((root / 'memory.current').read_text())
+        memory_stat = dict(line.split() for line in (root / 'memory.stat').read_text().splitlines())
+        devices = []
+        try:
+            lines = (root / 'io.stat').read_text().splitlines()
+        except OSError:
+            lines = None
+        for line in lines or []:
+            device, *fields = line.split()
+            values = dict(item.split('=', 1) for item in fields)
+            try:
+                leaves = harbour_block_leaves(device)
+            except (OSError, ValueError):
+                leaves = None
+            devices.append({'device': device, 'read_bytes': int(values.get('rbytes', 0)),
+                            'write_bytes': int(values.get('wbytes', 0)), 'leaves': sorted(leaves) if leaves is not None else None})
+        # Avoid counting a write once on dm/md and again on its backing device.
+        known = {d['device'] for d in devices}
+        selected = [d for d in devices if d['leaves'] == [d['device']]]
+        certain = lines is not None and all(d['leaves'] is not None and set(d['leaves']) <= known for d in devices)
+        return {'scope': 'cgroup', 'identity': boot+':'+str(root.stat().st_ino),
+                'sampled_at': time.time(), 'clock': time.monotonic(),
+                'memory_bytes': memory, 'cache_bytes': int(memory_stat.get('file', 0)),
+                'read_bytes': sum(d['read_bytes'] for d in selected) if certain else None,
+                'write_bytes': sum(d['write_bytes'] for d in selected) if certain else None,
+                'devices': devices, 'io_available': certain,
+                'detail': 'Service/container and children; memory includes file cache.' if certain else
+                          'Block I/O unavailable or backing-device counters cannot be distinguished. Memory remains available.'}
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def harbour_self_footprint(allow_cgroup=True):
+    """Never substitute whole-machine counters for Harbour's own footprint."""
+    if sys.platform == 'linux':
+        try:
+            group = next((line[3:] for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::')), '')
+            # A namespaced container root is dedicated; a host root/user slice is not.
+            if allow_cgroup and ((group == '/' and Path('/.dockerenv').exists()) or 'harbour' in group.lower()):
+                result = harbour_cgroup_footprint(Path('/sys/fs/cgroup') / group.lstrip('/'))
+                if result:
+                    return result
+            fields = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()
+            values = dict(line.split(': ', 1) for line in Path('/proc/self/io').read_text().splitlines())
+            memory = int(Path('/proc/self/statm').read_text().split()[1])*os.sysconf('SC_PAGE_SIZE')
+            return {'scope': 'process', 'identity': Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+str(os.getpid())+':'+fields[19],
+                    'sampled_at': time.time(), 'clock': time.monotonic(), 'memory_bytes': memory, 'cache_bytes': None,
+                    'read_bytes': int(values['read_bytes']), 'write_bytes': int(values['write_bytes']),
+                    'io_available': True, 'devices': [],
+                    'detail': 'This process only; child processes and external logging are excluded. Writes are bytes charged by the kernel, not NAND wear.'}
+        except (OSError, ValueError, KeyError, StopIteration, IndexError):
+            pass
+    return {'scope': 'unavailable', 'sampled_at': time.time(), 'io_available': False,
+            'detail': 'Scoped memory and disk I/O counters are unavailable on this host.'}
+
+
+def harbour_collector_footprints():
+    result = {}
+    for key, unit in [('resources', 'harbour-resources.service'), ('logins', 'harbour-logins.service')]:
+        value = harbour_cgroup_footprint(Path('/sys/fs/cgroup/system.slice') / unit) if sys.platform == 'linux' else None
+        result[key] = value or {'scope': 'unavailable', 'sampled_at': time.time(), 'io_available': False,
+                                'detail': 'Collector service counters unavailable: not installed, a different service path, or unsupported OS/cgroup version.'}
+    return result
+
+
 def resource_response(request):
     recorded = recorder_exchange(request)
     latest = recorded.pop('latest', None)
@@ -1243,6 +1329,7 @@ def resource_response(request):
             recorded.update(mode='fallback', state='stale', detail='Recorder has no fresh sample; using remote probes.')
         result = {'metrics': resource_sampler.sample(request.get('collection')), 'samples': samples, 'recording': recorded}
     result['logins'] = login_events(request.get('logins_ack'))
+    result['harbour_footprint'] = {'probe': harbour_self_footprint(allow_cgroup=False), **harbour_collector_footprints()}
     return result
 
 

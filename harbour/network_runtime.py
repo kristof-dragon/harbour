@@ -57,7 +57,13 @@ class StatusServer:
                 with connection:
                     connection.settimeout(.1)
                     request = connection.recv(256).decode().strip()
-                    row = self.snapshot.get(request, {})
+                    if request == '__footprint__':
+                        from .remote_probe import harbour_self_footprint
+                        row = {'runtime_updated': time.time(), 'process': harbour_self_footprint(),
+                               'servers': {key: {name: value.get(name) for name in ('run_id', 'signature', 'runtime_updated', 'committed_bytes', 'committed_samples')}
+                                           for key, value in self.snapshot.items()}}
+                    else:
+                        row = self.snapshot.get(request, {})
                     if row and time.time()-row['runtime_updated'] > 5:
                         row = {**row, 'recorder_online':False}
                     connection.sendall(json.dumps(row).encode())
