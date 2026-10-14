@@ -103,7 +103,8 @@ def storage():
     now = time.time()
     if storage_baseline is None and size is not None:
         storage_baseline = (now, size)
-    return {'files': files, 'bytes': size, 'since': storage_baseline[0] if storage_baseline else None,
+    from . import storage_usage
+    return {'files': files, 'bytes': size, 'volume': storage_usage.collect(), 'since': storage_baseline[0] if storage_baseline else None,
             'net_change_bytes': size-storage_baseline[1] if storage_baseline and size is not None else None}
 
 

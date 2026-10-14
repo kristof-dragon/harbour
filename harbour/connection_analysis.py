@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 
 from . import incidents
 
-VERSION = 1
+VERSION = 2
 RULES = {'jitter_ms': 30, 'rtt_rise_ms': 20, 'max_alignment_seconds': 1,
          'minimum_coverage': .8, 'sender_shortfall_fraction': .9,
          'cpu_percent': 90, 'softirq_percent': 50, 'memory_percent': 90,
@@ -59,14 +59,15 @@ def union_seconds(ranges):
 
 
 class Evidence:
-    def __init__(self):
+    def __init__(self, limit=1200):
         self.rows = {}
         self.omitted = 0
+        self.limit = limit
 
     def add(self, key, value):
         if key in self.rows:
             return key
-        if len(self.rows) >= 1200:
+        if self.limit is not None and len(self.rows) >= self.limit:
             self.omitted += 1
             return None
         self.rows[key] = value
@@ -211,7 +212,7 @@ def analyze(source, identity, server, start, end, samples, runs, settings, *, te
         cadence = cfg(r).get('interval', 1)
         cadence = cadence if valid(cadence) and .1 <= cadence <= 2 else 1
         bad_ranges.append({'start': r['at'], 'end': min(end, r['at']+cadence), 'ping': True,
-                           'run_id': r.get('run_id'), 'ref': proof.sample(r) if index < 300 else None, 'target': r.get('target')})
+                           'run_id': r.get('run_id'), 'ref': proof.sample(r) if index < 300 else None, 'target': r.get('target'), 'sample': r})
     proof.omitted += max(0, len(bad)-300)
     intervals, matches = receiver_intervals(test, evidence) if test else ([], {})
     endpoint = test.get('config', {}).get('endpoint') if test else None
@@ -225,7 +226,7 @@ def analyze(source, identity, server, start, end, samples, runs, settings, *, te
             receiver_examples += 1
             if i['aligned']:
                 bad_ranges.append({'start': i['start'], 'end': i['end'], 'ping': False,
-                                   'direction': i['direction'], 'ref': i['ref'], 'uncertainty': i['uncertainty_seconds']})
+                                   'direction': i['direction'], 'ref': i['ref'], 'uncertainty': i['uncertainty_seconds'], 'interval': i})
     episodes = []
     for r in sorted(bad_ranges, key=lambda r: (r['start'], r['end'])):
         if not episodes or r['start'] > episodes[-1]['end']+.001:
@@ -271,6 +272,19 @@ def analyze(source, identity, server, start, end, samples, runs, settings, *, te
             episode['evidence_refs'] += [ref for r in relevant[:3] if (ref := proof.sample(r))]
         if udp_normal:
             episode['evidence_refs'] += [ref for i in normal_refs if (ref := proof.add('receiver:'+i['direction']+':'+str(i['interval_index']), dict(i)))]
+        # Every identified episode retains at least one actual observation even
+        # after the general example budget is reached. Daily reports must not
+        # silently lose later episodes from a long-running test.
+        if not any(member.get('ref') for member in episode['members']):
+            member = episode['members'][0]
+            selected = Evidence(limit=None)
+            if member['ping']:
+                ref = selected.sample(member['sample'])
+            else:
+                value = member['interval']
+                ref = selected.add('receiver:'+value['direction']+':'+str(value['interval_index']), dict(value))
+            proof.rows.update(selected.rows)
+            episode['evidence_refs'].append(ref)
         del episode['members']
     directions = []
     for d in ('upload', 'download') if test else ():
@@ -358,7 +372,7 @@ def analyze(source, identity, server, start, end, samples, runs, settings, *, te
             'status': test.get('status') if test else 'saved', 'context': context, 'run_context': observers,
             'conclusion': conclusion, 'root_cause': 'not_established', 'symptoms_observed': symptoms,
             'comparison_complete': complete, 'endpoint_ping_coverage': ping_coverage, 'quality': sorted(set(issues)), 'exclusions': EXCLUSIONS,
-            'rules': RULES, 'episodes': episodes[:400], 'episode_count': len(episodes), 'episodes_omitted': max(0, len(episodes)-400),
+            'rules': RULES, 'episodes': episodes, 'episode_count': len(episodes), 'episodes_omitted': 0,
             'directions': directions, 'probe_summary': probe_summary, 'contributors': contributors, 'path_findings': path_findings,
             'load_response': phases, 'delivery': delivery, 'cohort': digest(cohort_basis) if cohort_known else None,
             'cohort_basis': cohort_basis if test else None, 'evidence': proof.rows,

@@ -189,6 +189,20 @@ analysis session. Individual conclusions can also be downloaded. Analysis runs
 locally against saved evidence; use **Analyse saved evidence** to include older
 retained tests and sealed incidents. Network, Wireless, Incidents, Call tests, Analysis, Archives and
 Activity have separate tabs; Recorder and Router probe cards adapt to the screen.
+OpenWRT servers also have a **Reports** tab. Harbour checkpoints compact facts
+alongside each raw archive append, then publishes the previous calendar day's
+evidence timeline and statistics on a configurable schedule (03:00 Europe/London
+by default). Archive rotation and raw-file cleanup follow that schedule. Raw
+files are removed only after report publication succeeds; the bounded live
+SQLite cache is still maintained throughout the day.
+
+Reports include incident markers, grouped probe/router observations, collection
+gaps, call-test episodes, selected supporting measurements and coverage limits.
+Late data revises the measurement day it belongs to. Choose a day, a calendar
+week or custom dates, open the HTML report, and use browser Print to save a PDF.
+No PDF engine or external analysis service is installed on the server. Missing
+days remain explicitly unavailable. Full details: [scheduled evidence reports](harbour/REPORTS.md).
+
 See [OpenWRT deployment, measurement limits and retention](harbour/OPENWRT.md).
 
 Harbour's container uses Python 3.15.0 with exact image references and hashed

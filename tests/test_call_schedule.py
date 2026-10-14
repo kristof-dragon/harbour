@@ -166,7 +166,7 @@ def test_pause_resume_explicit_time_and_cross_server_access(client,monkeypatch):
     assert call_tests.schedule('atlas',first['id']) is not None
 
 
-def test_result_retention_preserves_each_schedule_history(client,monkeypatch):
+def test_result_retention_waits_for_scheduled_report_processing(client,monkeypatch):
     import json
     from test_call_tests import prepare as prepare_test
     prepare_test(client,monkeypatch)
@@ -178,7 +178,7 @@ def test_result_retention_preserves_each_schedule_history(client,monkeypatch):
     call_tests.start_test('atlas',call_tests.Settings(endpoint='192.0.2.45'),source='schedule',
                           schedule_row={'id':'first','name':'First'})
     rows=call_tests.listing('atlas','first')['tests']
-    assert len(rows)==20 and 'first-0' not in [r['id'] for r in rows]
+    assert len(rows)==21 and 'first-0' in [r['id'] for r in rows]
     assert len(call_tests.listing('atlas','second')['tests'])==20
     assert store.one("SELECT COUNT(*) AS n FROM network_call_tests WHERE json_extract(config,'$.schedule_id') IS NULL")['n']==20
     call_tests.active.clear()

@@ -53,6 +53,8 @@ def persist(report, source_digest):
             measured=excluded.measured,version=excluded.version,digest=excluded.digest,summary=excluded.summary,payload=excluded.payload''',
             (report['server_id'], report['source'], report['source_id'], report.get('selection_time', report['start']), analysis.VERSION, source_digest,
              json.dumps(summarize(report), allow_nan=False), payload))
+        from . import network_reports
+        network_reports.capture_call(report, con)
         retained = con.execute('SELECT source,source_id,length(payload) AS size FROM network_diagnostics WHERE server_id=? ORDER BY measured DESC,source,source_id', (report['server_id'],)).fetchall()
         used = 0
         for index, row in enumerate(retained):

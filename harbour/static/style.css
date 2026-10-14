@@ -936,3 +936,11 @@ body.mobile-panel-open{overflow:hidden}
 .bridge-evidence{margin-top:18px}
 #bridge-record pre{white-space:pre-wrap;overflow-wrap:anywhere}
 @media(max-width:700px){.bridge-editors{grid-template-columns:1fr}.bridge-fields{grid-template-columns:1fr 1fr}.bridge-stats{gap:12px}}
+
+.report-storage { border:1px solid var(--line);border-radius:12px;padding:18px;margin:18px 0; }
+.report-storage progress { width:100%;height:14px;accent-color:var(--accent); }
+.report-storage-parts { display:flex;flex-wrap:wrap;gap:10px 24px; }
+.report-storage-parts span { display:grid;gap:4px; }
+.report-range { display:flex;align-items:end;gap:14px;flex-wrap:wrap;padding:18px 0; }
+.report-range label { flex:1;min-width:160px; }
+.report-view .between { gap:16px;flex-wrap:wrap; }

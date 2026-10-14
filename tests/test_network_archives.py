@@ -230,6 +230,9 @@ def test_disabled_archive_allows_pruning_and_completed_file_retention(client, mo
     cfg = settings(client, archive_enabled=False, retention_hours=1, archive_retention_days=1)
     clock(monkeypatch, day+3*86400+60)
     network.maintain('atlas')
+    # Rotation alone no longer removes files; scheduled publication owns cleanup.
+    assert archives.path(files[0]).exists() and archives.path(files[1]).exists()
+    archives.trim('atlas', cfg, day+3*86400+61, processed_only=True)
     assert not archives.path(files[0]).exists() and not archives.path(files[1]).exists()
     assert archives.path(files[2]).exists()
     assert not store.rows('SELECT * FROM network_samples')

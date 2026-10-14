@@ -327,7 +327,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.deepEqual(sparse,{dots:3,lines:0,brokenLines:1,brokenDots:1,missing:0});
   await page.locator('[data-tab=archives]').click();
   assert.equal(await page.getByRole('link',{name:'Download .jsonl.gz',exact:true}).getAttribute('href'),'/api/servers/router/network/archives/yesterday');
-  assert.match(await page.locator('.network-view').textContent(),/Collecting · available after midnight/);
+  assert.match(await page.locator('.network-view').textContent(),/Collecting · available after scheduled rotation/);
   await page.getByRole('button',{name:'Mark degradation',exact:true}).click();
   await page.waitForTimeout(100);assert.equal(markers[0].label,'Call degradation');
   await page.getByRole('button',{name:'Recording settings',exact:true}).click();

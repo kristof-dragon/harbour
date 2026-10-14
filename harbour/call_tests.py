@@ -454,8 +454,8 @@ def start_test(id_, body, source='manual', shutdown=None, schedule_row=None):
                 raise HTTPException(409, 'A traffic test is already running; stop it before starting another')
             con.execute('INSERT INTO network_call_tests(id,server_id,created,status,phase,config) VALUES (?,?,?,\'running\',\'baseline\',?)',
                         (id_test, id_, time.time(), json.dumps(config)))
-            con.execute('''DELETE FROM network_call_tests WHERE server_id=? AND status!='running' AND id NOT IN
-                (SELECT id FROM (SELECT id,ROW_NUMBER() OVER (PARTITION BY COALESCE(json_extract(config,'$.schedule_id'),'') ORDER BY created DESC,id DESC) AS n FROM network_call_tests WHERE server_id=?) WHERE n<=20)''', (id_, id_))
+            # Full test evidence is trimmed by the scheduled report worker after
+            # its independently retained conclusion has been saved.
         cancel = threading.Event()
         thread = threading.Thread(target=execute, args=(id_test, id_, config, executable, cancel), daemon=True)
         active[id_test] = (cancel, thread)

@@ -1,4 +1,4 @@
-"""Durable, incremental gzip archives, sealed once per UTC day.
+"""Durable, incremental gzip archives, rotated at the processing schedule.
 
 Only the recorder's archive process writes these files. SQLite checkpoints
 the fsynced file length together with the archived flags. After an interrupted
@@ -33,6 +33,12 @@ def initialize():
           server_id TEXT PRIMARY KEY REFERENCES servers(id) ON DELETE CASCADE,
           updated REAL NOT NULL, error TEXT);
         ''')
+        con.execute('BEGIN IMMEDIATE')
+        if 'closed_at' not in {r['name'] for r in con.execute('PRAGMA table_info(network_archives)')}:
+            con.execute('ALTER TABLE network_archives ADD COLUMN closed_at REAL')
+            con.execute('UPDATE network_archives SET closed_at=day+86400 WHERE complete=1')
+    from . import network_reports
+    network_reports.initialize()
 
 
 def root():
@@ -59,7 +65,7 @@ def line(stream, value):
 
 
 def append(row, readings, events, settings, server, now):
-    from . import network
+    from . import network, network_reports
     root().mkdir(mode=0o700, parents=True, exist_ok=True)
     destination = path(row, partial=True)
     fd = os.open(destination, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -70,9 +76,12 @@ def append(row, readings, events, settings, server, now):
         raw.seek(row['size'])
         with gzip.GzipFile(fileobj=raw, mode='wb', compresslevel=6, mtime=0, filename='') as compressed:
             if row['size'] == 0:
-                line(compressed, {'type': 'header', 'schema': 1, 'archive_id': row['id'],
+                processing = network_reports.policy(server['id'])
+                line(compressed, {'type': 'header', 'schema': 2, 'archive_id': row['id'],
                      'server_name': server['name'], 'day_start_utc': row['day'],
-                     'day_end_utc': row['day']+86400, 'day_basis': 'archive receipt time',
+                     'day_end_utc': network_reports.next_slot(row['day'], processing),
+                     'day_basis': 'scheduled archive cycle; planned end can change with the processing schedule',
+                     'processing_time': processing['process_at'], 'timezone': processing['timezone'],
                      'scope': 'Recorder-to-target ICMP and router telemetry; not FaceTime media measurements',
                      'note': 'Original measurement times are preserved; delayed/backfilled readings may precede this day.'})
             samples = [{'id': r['id'], 'at': r['measured'], 'kind': r['kind'], 'target': r['target'],
@@ -97,6 +106,8 @@ def append(row, readings, events, settings, server, now):
           WHERE id=? AND size=? AND complete=0''', (size, len(readings), now, row['id'], row['size']))
         if result.rowcount != 1:
             raise RuntimeError('Archive checkpoint changed or server was removed')
+        network_reports.checkpoint(con, row, size, samples, events, settings,
+                                   network.run_metadata(server['id'], samples))
         con.executemany('UPDATE network_samples SET archived=1 WHERE id=?', [(r['id'],) for r in readings])
         con.executemany('UPDATE network_events SET archived_version=? WHERE id=?', [(e['complete'], e['id']) for e in events])
 
@@ -120,16 +131,20 @@ def seal(row):
     # Handles a crash after rename but before the completion transaction.
     if not destination.is_file() or destination.stat().st_size != row['size']:
         raise OSError('Daily archive file is missing or incomplete')
-    store.execute('UPDATE network_archives SET complete=1 WHERE id=?', (row['id'],))
+    store.execute('UPDATE network_archives SET complete=1,closed_at=? WHERE id=?', (time.time(), row['id']))
 
 
-def trim(id_, settings, today):
+def trim(id_, settings, today, processed_only=False):
     kept = 0
     for row in store.rows('SELECT * FROM network_archives WHERE server_id=? AND complete=1 ORDER BY day DESC', (id_,)):
         kept += row['size']
-        expired = row['day'] < today-settings['archive_retention_days']*86400
+        expired = (row.get('closed_at') or row['day']+86400) < today-settings['archive_retention_days']*86400
         oversized = settings['archive_max_mib'] and kept > settings['archive_max_mib']*1024*1024
         if expired or oversized:
+            if processed_only:
+                from . import network_reports
+                if not network_reports.ready(row):
+                    continue
             path(row).unlink(missing_ok=True)
             store.execute('DELETE FROM network_archives WHERE id=?', (row['id'],))
 
@@ -137,7 +152,9 @@ def trim(id_, settings, today):
 def maintain(id_, settings, stop=None):
     """Archive before retention; leave pending rows protected on any failure."""
     now = time.time()
-    today = int(now//86400)*86400
+    from . import network_reports
+    report_policy = network_reports.policy(id_)
+    today = int(network_reports.slot(now, report_policy))
     try:
         # Work continues for paused routers, so their last daily file is sealed.
         for row in store.rows('SELECT * FROM network_archives WHERE server_id=? AND complete=0 AND day<?', (id_, today)):
@@ -155,13 +172,21 @@ def maintain(id_, settings, stop=None):
                   WHERE server_id=? AND archived_version!=complete ORDER BY measured,id LIMIT ?''', (id_, BATCH_SIZE))
                 if not readings and not events:
                     break
-                row = store.one('SELECT * FROM network_archives WHERE server_id=? AND day=?', (id_, today))
+                row = store.one('SELECT * FROM network_archives WHERE server_id=? AND complete=0 ORDER BY day DESC LIMIT 1', (id_,))
                 if not row:
+                    # Moving a schedule earlier, or a clock correction, must
+                    # never reopen a sealed file with the same cycle key.
+                    cycle = today
+                    if store.one('SELECT 1 FROM network_archives WHERE server_id=? AND day=?', (id_, cycle)):
+                        cycle = max(int(now), cycle+1)
+                        while store.one('SELECT 1 FROM network_archives WHERE server_id=? AND day=?', (id_, cycle)):
+                            cycle += 1
                     store.execute('INSERT INTO network_archives(id,server_id,day,updated) VALUES (?,?,?,?)',
-                                  (uuid.uuid4().hex, id_, today, now))
-                    row = store.one('SELECT * FROM network_archives WHERE server_id=? AND day=?', (id_, today))
+                                  (uuid.uuid4().hex, id_, cycle, now))
+                    row = store.one('SELECT * FROM network_archives WHERE server_id=? AND day=?', (id_, cycle))
                 append(row, readings, events, settings, server, now)
-        trim(id_, settings, today)
+        # Raw files are removed only after scheduled report publication succeeds.
+        # Pausing processing retains them and surfaces the pending volume.
         store.execute('INSERT OR REPLACE INTO network_archive_status VALUES (?,?,NULL)', (id_, now))
     except Exception:
         logging.exception('Network daily archiving failed')

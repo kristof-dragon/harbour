@@ -148,7 +148,7 @@ SQLite pages/indexes/WAL add overhead, and allocated disk space can remain after
 pruning. The UI shows a two-minute window; raw data retains its original precision.
 Increasing retention cannot restore readings already deleted by an older version.
 
-### Automatic daily files
+### Scheduled archive files
 
 Daily archiving is enabled by default. It runs in the independent recorder, with
 the browser closed. Files live in **`HARBOUR_DATA/network-archives/`**: with the
@@ -158,12 +158,14 @@ their configured data directory. No files or configuration are written to the ro
 
 The recorder appends compressed batches throughout the day **before pruning raw
 readings**, so even a one-hour raw-history setting can preserve a whole day's
-evidence. After midnight **UTC** it seals one `.jsonl.gz` file per router with data;
-the first day can be partial. This happens on the next maintenance sweep, or on
+evidence. At the configurable processing time (**03:00 Europe/London** by default)
+it seals one `.jsonl.gz` file per router with data; the first cycle can be partial.
+This happens on the next maintenance sweep, or on
 restart if the recorder was stopped. Pausing recording does not prevent sealing.
 The current `.part` file is not offered as a finished download. Finished files
 appear under **Archives** with download links, sizes
-and sample counts. Retention applies to finished files; the growing current file
+and sample counts. Retention runs after successful report publication and applies
+to finished files; the growing current file
 is additional to the archive size cap.
 
 Archives contain newline-delimited JSON: a `header`, recording `context` records
@@ -171,7 +173,7 @@ Archives contain newline-delimited JSON: a `header`, recording `context` records
 markers, including completion updates. Each line is a complete JSON object.
 Standard gzip tools/Python's `gzip` reader decompress the full stream. Compression
 is lossless; its ratio depends on the observations and does not downsample them.
-The archive date is the UTC day readings were copied into that file. Delayed
+The archive date is the UTC date the scheduled cycle started. Delayed
 readings and upgrade backfills can belong to earlier measurement dates; every
 sample retains its original `at` timestamp and recorder run identity. An updated
 incident is identified by the same incident ID. `archive_sequence` numbers each
@@ -535,3 +537,11 @@ full buffers, nonblocking IPC, commit acknowledgement retries, and stale setting
 ICMP timestamps, stopped and killed child processes, live buffer status, settings
 changes and shutdown. Run that integration check in a disposable container with
 `--network none`; it uses loopback and documentation addresses, never a site.
+
+## Scheduled reports (v0.1.42)
+
+Archive rotation now follows Reports → Processing & retention, replacing the
+fixed midnight UTC rotation described in older versions. Retention age for a
+completed raw archive runs from its actual close time. Completed files are only
+trimmed after scheduled report publication succeeds. See [REPORTS.md](REPORTS.md)
+for calendar boundaries, late evidence, printable output and processing limits.

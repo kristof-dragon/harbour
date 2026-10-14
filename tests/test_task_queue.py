@@ -82,7 +82,7 @@ def test_resource_probe_never_calls_docker(monkeypatch):
         assert docker is False
         return {'cpu':42}
     monkeypatch.setattr(remote_probe,'metrics',metrics)
-    monkeypatch.setattr(remote_probe,'login_events',lambda ack=None:{'state':'not_installed'})
+    monkeypatch.setattr(remote_probe,'login_events',lambda ack=None,os_sessions=False:{'state':'not_installed'})
     assert remote_probe.handle({'operation':'resources'})=={'metrics':{'cpu':42},'logins':{'state':'not_installed'}}
 
 

@@ -21,7 +21,7 @@ from .network_probe import Echo, checksum  # retained as the public probe helper
 
 def maintenance(stop, data_directory=None, demo=None):
     from pathlib import Path
-    from . import network_archives
+    from . import network_archives, network_reports
     if data_directory is not None:
         store.DATA, store.DEMO = Path(data_directory), demo
     while not stop.is_set():
@@ -31,6 +31,7 @@ def maintenance(stop, data_directory=None, demo=None):
                     if stop.is_set():
                         break
                     network.maintain(server['id'], stop)
+                    network_reports.run_due(server['id'], stop)
                 network_archives.cleanup_removed()
         except Exception:
             logging.exception('Network history maintenance failed; will retry')

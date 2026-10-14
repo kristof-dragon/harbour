@@ -104,8 +104,8 @@ stay unavailable. No universal pass/fail or MOS score is assigned. Published
 application diagnostic thresholds are not interchangeable acceptance criteria.
 
 Tests are explicit, one at a time across this Harbour installation, bounded to
-64–8000 kbps per direction and 10–3600 seconds (up to 60 minutes) of load. The latest 20 results per
-router are retained. Exports preserve profile version/source, modified settings,
+64–8000 kbps per direction and 10–3600 seconds (up to 60 minutes) of load. Full results use the age and byte limits in Reports → Processing & retention.
+Cleanup runs after a durable independent conclusion has been saved. Exports preserve profile version/source, modified settings,
 iperf3 output and direction-specific timing. Interval times are relative to that iperf3 test. Managed endpoints add
 independent remote records and bounded clock/timing correlation, described below.
 
@@ -348,8 +348,8 @@ pauses while Harbour is stopped and advances overdue slots on restart. A saved
 schedule requires a confirmed managed endpoint and stores no SSH credential.
 No Codex/chat automation is involved.
 
-The latest 20 runs and collected evidence are retained per recurring schedule,
-plus 20 one-off tests per router. The combined view displays up to 50 recent runs;
+Runs and collected evidence use the scheduled age and byte retention policy
+for both scheduled and one-off tests. The combined view displays up to 50 recent runs;
 select a schedule to see its retained history. Active
 runs protect their raw recorder window from cleanup until collection finishes.
 The aggregate capture is bounded to 300,000 rows / 128 MiB of serialized recorder
