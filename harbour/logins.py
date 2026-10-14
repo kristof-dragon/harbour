@@ -172,23 +172,31 @@ def validate_os_presence(value):
         finite(value.get('checked_at'))
         if not isinstance(value.get('boot_id'), str) or not 1 <= len(value['boot_id']) <= 128:
             return unavailable
+        scope = value.get('scope', 'linux-logind')
+        sources = {'linux-logind': 'Linux logind', 'macos-console': 'macOS console registry'}
+        if scope not in sources:
+            return unavailable
         rows = value.get('sessions')
         if not isinstance(rows, list) or len(rows) > 128:
             return unavailable
         seen, clean = set(), []
-        fields = ('session_id', 'username', 'uid', 'service', 'method', 'source_ip', 'tty')
+        fields = ('session_id', 'presence_id', 'username', 'uid', 'service', 'method', 'source_ip', 'tty', 'session_type')
         for row in rows:
             if not isinstance(row, dict) or any(row.get(k) is not None and (not isinstance(row[k], str) or len(row[k]) > 512) for k in fields):
                 return unavailable
-            if not row.get('username') or not row.get('session_id') or row['session_id'] in seen:
+            identity = row.get('presence_id') or row.get('session_id')
+            if not row.get('username') or not row.get('session_id') or not row.get('service') or identity in seen:
                 return unavailable
-            seen.add(row['session_id'])
+            seen.add(identity)
+            if any(row.get(k) is not None and type(row[k]) is not bool for k in ('locked', 'on_console')):
+                return unavailable
             finite(row.get('started_at'), optional=True)
             if row.get('started_at') and row['started_at'] > value['checked_at']:
                 return unavailable
             clean.append({**{k: row.get(k) for k in fields}, 'started_at': row.get('started_at'),
-                'presence_source': 'Linux logind', 'result': 'opened'})
-        return dict(state='ok', checked_at=value['checked_at'], boot_id=value['boot_id'], sessions=clean)
+                'presence_source': sources[scope], 'result': 'opened',
+                'locked': row.get('locked'), 'on_console': row.get('on_console')})
+        return dict(state='ok', checked_at=value['checked_at'], boot_id=value['boot_id'], sessions=clean, scope=scope, source=sources[scope])
     except (ValueError, TypeError):
         return unavailable
 
@@ -367,6 +375,10 @@ def event_table(server_id: str, page: int = Query(1, ge=1, le=1000000), size: in
     if bridge.enabled():
         records = bridge.enrich(records)
         current = bridge.current_for_server(server, presence)
+        current.extend(bridge.current_os_for_server(server, status, presence))
+        presence = {**presence, 'os_available': bridge.os_presence_available(status, presence),
+            'os_checked_at': status.get('os_sessions', {}).get('checked_at'),
+            'os_source': status.get('os_sessions', {}).get('source')}
     return dict(events=records, pagination=pagination, status=status, paused=not server['monitoring_enabled'],
         host_checked_at=server['checked'], host_error=bool(server['error']), retention_days=90,
         current_sessions=current,

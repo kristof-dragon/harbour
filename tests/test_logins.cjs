@@ -112,7 +112,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.equal(await page.evaluate(()=>sessionNode===document.querySelector('[data-key="session:900"]')&&sessionNode.open),true);
   assert.match(await historyRow.locator('>summary').textContent(),/192.0.2.1/);
   assert.match(await historyRow.locator('>summary').textContent(),/29s/);
-  assert.match(await page.locator('.login-current').textContent(),/No active SSH sessions/);
+  assert.match(await page.locator('.login-current').textContent(),/No current sessions were reported within the verified coverage/);
   sessionClosed=false;await page.getByRole('button',{name:'Refresh',exact:true}).click();
   await page.locator('.login-current').getByText('Connected',{exact:true}).waitFor();
   fail=true;await page.getByRole('button',{name:'Refresh',exact:true}).click();

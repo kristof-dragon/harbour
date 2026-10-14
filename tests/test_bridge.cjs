@@ -3,8 +3,10 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),http=require('n
 const {chromium}=require('playwright');
 const now=Date.now()/1000;
 const servers=[{id:'atlas',name:'Atlas',server_type:'plain',host:'example.invalid',username:'harbour',port:22,checked:now,connection_status:'up',monitoring_enabled:true,poll_seconds:60,warnings:[],updates:0,services:[],metrics:null,thresholds:{},latency_ms:1}];
-let enabled=false,settingsWrites=0,annotationWrites=0,identityWrites=0,liveRequests=0,loginRequests=0;
+let enabled=false,settingsWrites=0,annotationWrites=0,identityWrites=0,liveRequests=0,loginRequests=0,desktopMode=false,sshVerified=true;
 const record={id:12,ref:'session:12',record_type:'session',kind:'session',event_count:2,server_id:'atlas',server_name:'Atlas',username:'dragon',service:'ssh',method:'publickey',result:'success',session_status:'active',started_at:now-50,time:now-50,source_ip:'192.0.2.2',key_fingerprint:'SHA256:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890',credential_verified:true,tags:[],identity_tags:[],notes:'',label:'',match_basis:'credential'};
+const desktop={id:'live:desktop',ref:'live:desktop',record_type:'session',event_count:0,server_id:'atlas',server_name:'Atlas',username:'desktop-user',service:'graphical-login',session_type:'desktop',result:'opened',session_status:'active',started_at:null,source_ip:null,locked:true,on_console:false,presence_source:'macOS console registry',tags:[],identity_tags:[]};
+const current=()=>[...(sshVerified?[record]:[]),...(desktopMode?[desktop]:[])];
 const coverage=[{id:'atlas',name:'Atlas',state:'connected',verified:true,checked_at:now,mode:'live',sources:{journal:{state:'listening',detail:''}},limitations:[],os_sessions:'unavailable'}];
 const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(),'harbour/static',req.url==='/'?'index.html':req.url.replace('/static/',''));res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html');res.end(fs.readFileSync(file));}catch{res.writeHead(404).end();}});
 (async()=>{
@@ -21,7 +23,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
    else if(url.pathname==='/api/dashboard')data={servers,jobs:[],thresholds:{},bridge_enabled:enabled};
    else if(url.pathname==='/api/session/activity')data={ok:true};
    else if(url.pathname==='/api/bridge/settings'&&method==='PUT'){enabled=route.request().postDataJSON().enabled;settingsWrites++;data={enabled};}
-   else if(url.pathname==='/api/bridge'){liveRequests++;data={active:[record],coverage};}
+   else if(url.pathname==='/api/bridge'){liveRequests++;data={active:current(),coverage:coverage.map(c=>({...c,verified:sshVerified,os_verified:desktopMode,os_source:desktopMode?'macOS console registry':null,os_checked_at:desktopMode?now:null}))};}
    else if(url.pathname==='/api/bridge/history')data={records:[record],pagination:{page:1,total:60,size:25,pages:3}};
    else if(url.pathname.endsWith('/annotation')&&method==='PUT'){const body=route.request().postDataJSON();Object.assign(record,body);annotationWrites++;data={ok:true};}
    else if(url.pathname.endsWith('/identity')&&method==='PUT'){const body=route.request().postDataJSON();Object.assign(record,{label:body.label,identity_tags:body.tags,profile_id:'profile1'});identityWrites++;data={ok:true};}
@@ -31,7 +33,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
     else data={id:'profile1',label:record.label,tags:record.identity_tags,notes:'',match:['credential','dragon',record.key_fingerprint]};
    }
    else if(url.pathname==='/api/bridge/identities')data={profiles:[{id:'profile1',label:record.label,tags:record.identity_tags,basis:'credential',username:'dragon',notes:''}]};
-   else if(url.pathname.endsWith('/logins/table')){loginRequests++;data={events:[record],current_sessions:[record],session_presence:{available:true,fetched_at:now,checked_at:now},status:{state:'connected',fetched_at:now,sources:{}},pagination:{page:1,total:1,size:25,pages:1}};}
+   else if(url.pathname.endsWith('/logins/table')){loginRequests++;data={events:[record],current_sessions:current(),session_presence:{available:sshVerified,fetched_at:now,checked_at:now,...(desktopMode?{os_available:true,os_checked_at:now,os_source:'macOS console registry'}:{})},status:{state:'connected',fetched_at:now,sources:{}},pagination:{page:1,total:1,size:25,pages:1}};}
    else data={};
    await route.fulfill({json:data});
   });
@@ -77,6 +79,14 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   const before=liveRequests;
   await page.evaluate(()=>testStream.dispatchEvent(new Event('changed')));
   await page.waitForTimeout(500);assert.ok(liveRequests>before);
+  desktopMode=true;
+  await page.getByRole('button',{name:'Refresh',exact:true}).click();
+  await page.getByText('Desktop · Locked · Background',{exact:true}).waitFor();
+  assert.equal(await page.locator('#bridge-root .bridge-connected').count(),2);
+  assert.match(await page.locator('#bridge-root tr').filter({hasText:'desktop-user'}).textContent(),/Unavailable.*Unknown/);
+  await page.getByRole('button',{name:'Coverage',exact:true}).click();
+  await page.getByText('macOS console registry',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'Connected',exact:true}).click();
   for(const theme of ['light','dark']){
    await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
    await page.setViewportSize({width:390,height:844});await page.waitForTimeout(100);
@@ -86,9 +96,23 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.screenshot({path:'/tmp/harbour-bridge.png',fullPage:true});
   await page.getByRole('button',{name:'Close dialog',exact:true}).click();
   await page.locator('[data-tab=logins]').click();await page.locator('.logins-view').waitFor();
+  await page.locator('.login-current summary').getByText('Desktop · Locked · Background',{exact:true}).waitFor();
+  assert.equal(await page.locator('.login-current .is-connected').count(),2);
+  assert.match(await page.locator('.login-current-heading').textContent(),/2 sessions/);
   const beforeLogins=loginRequests;
+  sshVerified=false;
   await page.evaluate(()=>testStream.dispatchEvent(new Event('changed')));
   await page.waitForTimeout(500);assert.ok(loginRequests>beforeLogins);
+  assert.equal(await page.locator('.login-current .is-connected').count(),1);
+  assert.match(await page.locator('.login-current .is-connected').textContent(),/desktop-user/);
+  await page.getByRole('button',{name:'Session coverage help',exact:true}).click();
+  assert.match(await page.locator('#help-tooltip').textContent(),/SSH: unverified.*Console\/desktop: verified/);
+  await page.keyboard.press('Escape');
+  await page.evaluate(()=>showBridge());
+  await page.locator('#bridge-root .bridge-connected').waitFor();
+  assert.equal(await page.locator('#bridge-root .bridge-connected').count(),1);
+  assert.match(await page.locator('#bridge-root').textContent(),/1 \/ 1 hosts checked/);
+  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
   await page.locator('#sidebar-menu').evaluate(el=>el.open=true);
   await page.getByRole('button',{name:'Global settings',exact:true}).click();
   await page.locator('#bridge-settings [name=enabled]').uncheck();
@@ -98,6 +122,6 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.equal(await page.evaluate(()=>testStream.closed),true);
   assert.equal(await page.evaluate(()=>window.compromised),undefined);
   assert.deepEqual(errors,[]);
-  console.log('Bridge enablement, labels, independent tags, matching history, tables, live notices, mobile and escaping passed');
+  console.log('Bridge enablement, labels, independent tags, matching history, tables, live notices, SSH/desktop coverage, mobile and escaping passed');
  }finally{await browser.close();server.close();}
 })().catch(error=>{console.error(error);server.close();process.exitCode=1;});

@@ -1422,9 +1422,11 @@ def serve_login_notifications():
 
 
 def current_os_sessions():
-    """logind's current non-SSH user sessions, separately from SSH process evidence."""
+    """OS-verified console/desktop sessions, separately from SSH process evidence."""
+    if sys.platform == 'darwin':
+        return current_macos_sessions()
     if sys.platform != 'linux':
-        return dict(state='unavailable', detail='Console/desktop presence requires Linux logind; SSH verification remains separate.')
+        return dict(state='unavailable', detail='Console/desktop presence is unsupported on this host.')
     try:
         env = {**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC'}
         listed = subprocess.run(['loginctl', 'list-sessions', '--no-legend', '--no-pager'], capture_output=True, text=True, timeout=3, env=env)
@@ -1440,7 +1442,7 @@ def current_os_sessions():
                 raise ValueError()
             rows = parse_os_sessions(output.stdout)
         boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-        return dict(state='ok', checked_at=time.time(), boot_id=boot, sessions=rows, scope='linux-logind')
+        return dict(state='ok', checked_at=time.time(), boot_id=boot, sessions=rows, scope='linux-logind', source='Linux logind')
     except Exception:
         return dict(state='unavailable', detail='Linux logind sessions could not be read; console/desktop presence is unverified.')
 
@@ -1461,5 +1463,61 @@ def parse_os_sessions(output):
         rows.append(dict(session_id=values['Id'], username=values['Name'], uid=values.get('User'),
             service=values.get('Service') or 'login', method=values.get('Type') or 'console',
             source_ip=values.get('RemoteHost') or None, tty=values.get('TTY') or None,
-            started_at=started, result='opened', presence_source='Linux logind'))
+            started_at=started, result='opened', presence_source='Linux logind',
+            session_type='desktop' if values.get('Type') in ('x11', 'wayland') else 'console' if values.get('Type') == 'tty' else 'other',
+            locked={'yes': True, 'no': False}.get(values.get('LockedHint')),
+            on_console={'yes': True, 'no': False}.get(values.get('Active'))))
+    return rows
+
+
+def current_macos_sessions():
+    """Read loginwindow's current console users, including locked/switched-out users.
+
+    Apple defines these IORegistry keys in xnu/iokit/IOKit/IOKitKeysPrivate.h.
+    Missing/changed registry fields mean unavailable, never an empty session list.
+    No login timestamp or SSH credential is inferred from a desktop snapshot.
+    """
+    try:
+        import plistlib
+        result = subprocess.run(['/usr/sbin/ioreg', '-n', 'Root', '-d', '1', '-a'],
+            capture_output=True, timeout=3)
+        if result.returncode or len(result.stdout) > 2_000_000:
+            raise ValueError('Console registry could not be read')
+        rows = parse_macos_sessions(plistlib.loads(result.stdout))
+        boot = run(['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'], timeout=2).strip()
+        if not boot:
+            raise ValueError('Missing boot identity')
+        return dict(state='ok', checked_at=time.time(), boot_id=boot, sessions=rows,
+            scope='macos-console', source='macOS console registry')
+    except Exception:
+        return dict(state='unavailable', detail='macOS console/desktop sessions could not be verified from the console registry.')
+
+
+def parse_macos_sessions(data):
+    roots = [data] if isinstance(data, dict) else data
+    if not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], dict):
+        raise ValueError('Invalid console registry')
+    users = roots[0].get('IOConsoleUsers')
+    if not isinstance(users, list) or len(users) > 128:
+        raise ValueError('Missing console session list')
+    rows, seen = [], set()
+    for user in users:
+        if not isinstance(user, dict) or type(user.get('kCGSessionLoginDoneKey')) is not bool:
+            raise ValueError('Invalid console login state')
+        if not user['kCGSessionLoginDoneKey']:
+            continue  # loginwindow / incomplete login, not a logged-in user.
+        uid, audit = user.get('kCGSSessionUserIDKey'), user.get('kCGSSessionAuditIDKey')
+        name, session = user.get('kCGSSessionUserNameKey'), user.get('kCGSSessionIDKey')
+        if (type(uid) is not int or uid < 0 or type(audit) is not int or audit <= 0
+                or not isinstance(name, str) or not 1 <= len(name) <= 512 or audit in seen):
+            raise ValueError('Invalid console session identity')
+        if session is not None and (type(session) is not int or session < 0):
+            raise ValueError('Invalid graphical session identity')
+        seen.add(audit)
+        rows.append(dict(session_id=str(session) if session is not None else 'audit:'+str(audit),
+            presence_id='audit:'+str(audit), username=name, uid=str(uid), service='graphical-login',
+            method=None, session_type='desktop', source_ip=None, tty='console', started_at=None,
+            result='opened', presence_source='macOS console registry',
+            locked=user.get('CGSSessionScreenIsLocked') if type(user.get('CGSSessionScreenIsLocked')) is bool else None,
+            on_console=user.get('kCGSSessionOnConsoleKey') if type(user.get('kCGSSessionOnConsoleKey')) is bool else None))
     return rows

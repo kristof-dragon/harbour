@@ -205,6 +205,25 @@ def current_for_server(server, snapshot):
     return enrich(records)
 
 
+def os_presence_available(status, snapshot):
+    return bool(status.get('state') == 'connected' and snapshot['fresh'] and status.get('os_sessions', {}).get('state') == 'ok')
+
+
+def current_os_for_server(server, status, snapshot):
+    if not os_presence_available(status, snapshot):
+        return []
+    os_snapshot, records = status['os_sessions'], []
+    for item in os_snapshot.get('sessions', []):
+        item = {**item, 'server_id': server['id'], 'server_name': server['name'], 'session_status': 'active',
+                'record_type': 'session', 'event_count': 0, 'confirmed_at': os_snapshot['checked_at'],
+                'boot_id': os_snapshot['boot_id']}
+        # Audit identity prevents a recycled graphical session ID inheriting tags.
+        key = json.dumps([server['id'], os_snapshot['boot_id'], item.get('presence_id') or item['session_id'], item.get('started_at')])
+        item['id'] = item['ref'] = 'live:'+hashlib.sha256(key.encode()).hexdigest()
+        records.append(item)
+    return enrich(records)
+
+
 def fleet():
     from . import login_live
     active, coverage = [], []
@@ -217,18 +236,13 @@ def fleet():
             mode=login_live.mode(server['id'], status), paused=not server['monitoring_enabled'],
             sources=status.get('sources', {}), dropped=status.get('dropped', 0),
             detail=status.get('detail'), limitations=status.get('limitations', []),
-            os_sessions=status.get('os_sessions', {}).get('state', 'unavailable')))
+            os_sessions=status.get('os_sessions', {}).get('state', 'unavailable'),
+            os_verified=os_presence_available(status, snapshot), os_source=status.get('os_sessions', {}).get('source'),
+            os_checked_at=status.get('os_sessions', {}).get('checked_at')))
         if not installed:
             continue
         active.extend(current_for_server(server, snapshot))
-        os_snapshot = status.get('os_sessions', {})
-        if snapshot['fresh'] and os_snapshot.get('state') == 'ok':
-            for item in os_snapshot.get('sessions', []):
-                item = {**item, 'server_id': server['id'], 'server_name': server['name'], 'session_status': 'active',
-                        'record_type': 'session', 'event_count': 0, 'confirmed_at': os_snapshot['checked_at']}
-                key = json.dumps([server['id'], os_snapshot['boot_id'], item['session_id'], item.get('started_at')])
-                item['id'] = item['ref'] = 'live:'+hashlib.sha256(key.encode()).hexdigest()
-                active.append(decorate(item))
+        active.extend(current_os_for_server(server, status, snapshot))
     return active, coverage
 
 

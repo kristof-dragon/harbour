@@ -233,3 +233,12 @@ The socket serves a bounded number of concurrent readers so waiting for a notice
 does not block normal fetch/acknowledgement. Notices contain only a generation and
 revision; they cannot request commands. The Bridge and per-server Logins views
 receive authenticated browser refresh notices after storage commits.
+
+With The Bridge enabled, current presence includes SSH plus non-SSH user sessions
+from Linux logind or the macOS console registry. Locked and switched-out desktops
+remain logged in; greeters and incomplete logins are excluded. The Bridge and
+per-server Logins views report SSH and console/desktop verification separately.
+Unavailable providers, stale checks and paused hosts never imply an empty host.
+macOS registry snapshots do not supply a login timestamp, so desktop start time
+and duration remain unknown. Detection was checked against a native macOS console
+session; lock/switch behavior and Linux sessions are covered by synthetic fixtures.

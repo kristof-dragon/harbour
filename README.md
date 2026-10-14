@@ -29,9 +29,16 @@ Disabling the feature keeps the existing login history and annotations.
 
 Current sessions require an installed login collector and a fresh host check.
 SSH sessions are verified against host processes. Linux hosts with readable
-logind also report non-SSH console/desktop user sessions; macOS console/desktop
-presence is currently unavailable. Missing collectors, paused/offline hosts,
-restricted process visibility and collection gaps remain explicit coverage limits.
+logind report non-SSH console/desktop user sessions; macOS uses the current
+console-session registry, including locked and switched-out desktops. Both
+The Bridge and each server's Logins view show these sessions. Coverage is reported
+separately for SSH and console/desktop sessions. macOS desktop login times stay
+unknown when the registry provides no timestamp; no duration is inferred from
+process uptime. Detection uses Apple's
+[console-session registry fields](https://github.com/apple-oss-distributions/xnu/blob/main/iokit/IOKit/IOKitKeysPrivate.h).
+Registry formats or permissions that cannot be verified remain unavailable.
+Missing collectors, paused/offline hosts, restricted process visibility and
+collection gaps remain explicit coverage limits.
 OpenWrt's SSH-only probes do not install this collector, so routers are excluded
 from the connected list. An unpaired login event is never proof of current presence.
 
