@@ -1074,7 +1074,64 @@ def plan(services, action, targets):
     return commands
 
 
+def ssh_session_processes(output):
+    """Require an authenticated sshd child and its root-owned privileged parent."""
+    processes = {}
+    for line in output.splitlines():
+        parts = line.split(None, 9)
+        if len(parts) != 10 or Path(parts[8]).name not in ('sshd', 'sshd-session'):
+            continue
+        try:
+            pid, parent, uid = map(int, parts[:3])
+            started = datetime.datetime.strptime(' '.join(parts[3:8]), '%a %b %d %H:%M:%S %Y').replace(tzinfo=datetime.timezone.utc).timestamp()
+        except ValueError:
+            continue
+        processes[pid] = dict(pid=pid, parent=parent, uid=uid, started=started, title=parts[9])
+    sessions = {}
+    for process in processes.values():
+        match = re.fullmatch(r'sshd(?:-session)?: ([^\s@]+)@(\S+)', process['title'])
+        if not match:
+            continue
+        parent = processes.get(process['parent'])
+        if (not parent or parent['uid'] != 0 or
+                parent['title'] not in ('sshd: '+match[1]+' [priv]', 'sshd-session: '+match[1]+' [priv]')):
+            continue
+        sessions[parent['pid']] = dict(pid=str(parent['pid']), username=match[1],
+            process_started_at=parent['started'], terminal=match[2])
+    return list(sessions.values())
+
+
+def current_ssh_sessions():
+    """Read-only host snapshot; no collector upgrade or privileged command needed."""
+    try:
+        if sys.platform == 'linux':
+            boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            mounts = Path('/proc/mounts').read_text()
+            if re.search(r'\bhidepid=(?:[12]|invisible|noaccess)\b', mounts):
+                return dict(state='unavailable', detail='Host process visibility is restricted.')
+        elif sys.platform == 'darwin':
+            boot = run(['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'], timeout=2).strip()
+        else:
+            return dict(state='unavailable', detail='Live SSH verification is unavailable on this host.')
+        result = subprocess.run(['ps', '-ax', '-o', 'pid=,ppid=,uid=,lstart=,comm=,args='],
+            capture_output=True, text=True, timeout=2, env={**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC'})
+        if result.returncode or len(result.stdout) > 2_000_000 or not boot:
+            raise ValueError('Incomplete process snapshot')
+        sessions = ssh_session_processes(result.stdout)
+        if len(sessions) > 256:
+            raise ValueError('Session snapshot exceeds the limit')
+        return dict(state='ok', checked_at=time.time(), boot_id=boot, sessions=sessions, scope='ssh')
+    except Exception:
+        return dict(state='unavailable', detail='The host could not verify its current SSH sessions.')
+
+
 def login_events(acknowledgement=None):
+    result = collected_login_events(acknowledgement)
+    result['current_sessions'] = current_ssh_sessions()
+    return result
+
+
+def collected_login_events(acknowledgement=None):
     """Bounded local exchange; never needs sudo or an extra SSH connection."""
     import socket
     def exchange(ack):

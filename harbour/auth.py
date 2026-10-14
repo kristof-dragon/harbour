@@ -13,7 +13,7 @@ import time
 import pyotp
 import qrcode
 import qrcode.image.svg
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import store
@@ -387,11 +387,18 @@ def set_policy(body: PolicyInput, request: Request, response: Response, user=Dep
 
 
 @router.get("/security/log")
-def login_log(offset: int = 0, user=Depends(admin)):
-    offset = max(0, min(offset, 10_000_000))
-    return {"entries": store.rows("SELECT * FROM auth_log ORDER BY id DESC LIMIT 50 OFFSET ?", (offset,)),
-            "total": store.one("SELECT COUNT(*) AS n FROM auth_log")["n"],
-            "bans": store.rows("SELECT address,until FROM ip_bans WHERE until>? ORDER BY until DESC", (time.time(),))}
+def login_log(offset: int = 0, page: int | None = Query(None, ge=1, le=1000000),
+              size: int = 50, sort: str = 'time', order: str = 'desc',
+              filters: str = Query('{}', max_length=3000), user=Depends(admin)):
+    from . import table_query
+    with store.db() as con:
+        con.execute('BEGIN')
+        rows, pagination = table_query.select(con,
+            "SELECT *,created AS time,address AS source,outcome||' '||coalesce(detail,'') AS result FROM auth_log", (),
+            dict(time='date',username='text',source='text',result='text'), filters=filters,sort=sort,order=order,
+            page=page if page is not None else max(0,min(offset,10000000))//max(1,size)+1,size=size)
+        return {"entries": [dict(r) for r in rows], "total": pagination['total'], 'pagination':pagination,
+            "bans": [dict(r) for r in con.execute("SELECT address,until FROM ip_bans WHERE until>? ORDER BY until DESC", (time.time(),))]}
 
 
 class UnbanInput(BaseModel):

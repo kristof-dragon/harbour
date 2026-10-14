@@ -5,7 +5,7 @@ const now=Date.now()/1000;
 const servers=['docker','plain'].map((type,i)=>({id:type,name:type==='docker'?'Atlas':'Mac workstation',server_type:type,
  host:'example.invalid',username:'harbour',port:22,checked:now,connection_status:'up',monitoring_enabled:true,poll_seconds:60,
  warnings:[],updates:0,services:[],metrics:null,thresholds:{},latency_ms:1}));
-let requests=[],delayResponse=false,releaseResponse=null,fail=false;
+let requests=[],delayResponse=false,releaseResponse=null,fail=false,sessionMode=false,sessionClosed=false;
 let status={state:'connected',fetched_at:now,sources:{journal:{state:'listening',detail:''}},pending:0,dropped:0,limitations:[]};
 const records=Array.from({length:105},(_,i)=>({id:105-i,seq:105-i,username:i===0?'<img src=x onerror=alert(1)>':'example-user',
  occurred_at:now-i,captured_at:now-i,collected_at:now,acknowledged_at:i?now:null,service:'ssh',
@@ -25,20 +25,30 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
    else if(url.pathname==='/api/me')data={id:'admin',name:'admin',role:'admin',csrf:'test'};
    else if(url.pathname==='/api/dashboard')data={servers,jobs:[],thresholds:{}};
    else if(url.pathname==='/api/session/activity')data={ok:true};
-   else if(url.pathname.endsWith('/logins')){
+   else if(url.pathname.endsWith('/logins/table')){
     requests.push(url);if(delayResponse){delayResponse=false;await new Promise(r=>releaseResponse=r);}
     if(fail){await route.fulfill({status:503,json:{detail:'Temporary connection failure'}});return;}
     let found=url.pathname.includes('/plain/')?[]:records.filter(e=>(!Number(url.searchParams.get('before'))||e.id<Number(url.searchParams.get('before')))
      &&(url.searchParams.get('outcome')==='all'||e.result===url.searchParams.get('outcome'))
      &&(!url.searchParams.get('search')||JSON.stringify(e).includes(url.searchParams.get('search')))
      &&(url.searchParams.get('hide_harbour')!=='true'||!e.harbour_key));
-    data={events:found.slice(0,100),next_before:found.length>100?found[99].id:null,status,paused:!servers.find(s=>url.pathname.includes('/'+s.id+'/')).monitoring_enabled,retention_days:90};
+    const size=Number(url.searchParams.get('size')||25),page=Number(url.searchParams.get('page')||1);
+    data={events:found.slice((page-1)*size,page*size),pagination:{page,size,total:found.length,pages:Math.max(1,Math.ceil(found.length/size))},status,paused:!servers.find(s=>url.pathname.includes('/'+s.id+'/')).monitoring_enabled,retention_days:90};
+    if(sessionMode){
+     const session={...records[0],id:900,record_type:'session',username:'dragon',started_at:now-30,opened_at:now-29,
+      ended_at:sessionClosed?now:null,duration_seconds:sessionClosed?29:null,session_status:sessionClosed?'closed':'active',
+      event_count:sessionClosed?3:2,pid:'3856041',boot_id:'example-boot',confirmed_at:now,
+      evidence_events:[{...records[0],id:900,username:'dragon'},{...records[0],id:901,username:'dragon',result:'opened',method:'pam',source_ip:null,key_fingerprint:null}]};
+     data={...data,events:[session],pagination:{page:1,size:25,total:1,pages:1},current_sessions:sessionClosed?[]:[session],
+      session_presence:{available:true,fresh:true,checked_at:now,fetched_at:Date.now()/1000}};
+    }
    }else throw Error('Unexpected API '+url.pathname);
    await route.fulfill({json:data});
   });
   await page.goto('http://127.0.0.1:'+server.address().port);
   await page.locator('[data-tab=logins]').click();await page.locator('.login-event').first().waitFor();
-  assert.equal(await page.locator('.login-event').count(),100);
+  await page.locator('[data-table-size]').selectOption('100');
+  await page.waitForFunction(()=>document.querySelectorAll('.login-event').length===100);
   assert.match(await page.locator('.login-event').first().textContent(),/<img src=x/);
   assert.equal(await page.locator('.login-event img,.login-event script').count(),0);
   await page.locator('.login-event summary').first().click();
@@ -46,14 +56,14 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.evaluate(()=>{window.eventNode=document.querySelector('.login-event');loginView('docker').loaded=0;return loadLogins(current(),true);});
   assert.equal(await page.evaluate(()=>eventNode===document.querySelector('.login-event')&&eventNode.open),true);
   assert.equal(await page.evaluate(()=>window.compromised),undefined);
-  await page.getByRole('button',{name:'Older',exact:true}).click();
+  await page.getByRole('button',{name:'Next',exact:true}).click();
   await page.waitForFunction(()=>document.querySelectorAll('.login-event').length===5);
-  await page.getByRole('button',{name:'Newer',exact:true}).click();
+  await page.getByRole('button',{name:'Previous',exact:true}).click();
   await page.waitForFunction(()=>document.querySelectorAll('.login-event').length===100);
-  await page.locator('#login-filter select').selectOption('failure');
+  await page.locator('#login-filter select[name=outcome]').selectOption('failure');
   await page.getByRole('button',{name:'Filter',exact:true}).click();
   await page.waitForFunction(()=>document.querySelectorAll('.login-event').length===52);
-  await page.locator('#login-filter select').selectOption('all');
+  await page.locator('#login-filter select[name=outcome]').selectOption('all');
   await page.locator('#login-filter input[name=search]').fill('192.0.2.1');
   await page.locator('#login-filter input[name=hide]').check();
   await page.getByRole('button',{name:'Filter',exact:true}).click();
@@ -89,8 +99,35 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.locator('[data-key="server:docker"]').click();
   fail=true;await page.getByRole('button',{name:'Refresh',exact:true}).click();
   await page.getByRole('alert').filter({hasText:'Temporary connection failure'}).waitFor();
+  fail=false;sessionMode=true;
+  await page.evaluate(()=>{const v=loginView('docker');v.search='';v.hide=false;v.outcome='all';v.loaded=0;return loadLogins(current(),true);});
+  await page.locator('.login-current').getByText('Connected',{exact:true}).waitFor();
+  const historyRow=page.locator('.login-events>[data-key="session:900"]');
+  await historyRow.locator('>summary').click();
+  assert.match(await historyRow.textContent(),/Session history/);
+  await page.evaluate(()=>window.sessionNode=document.querySelector('[data-key="session:900"]'));
+  sessionClosed=true;
+  await page.getByRole('button',{name:'Refresh',exact:true}).click();
+  await historyRow.locator('>summary').getByText('Closed',{exact:true}).waitFor();
+  assert.equal(await page.evaluate(()=>sessionNode===document.querySelector('[data-key="session:900"]')&&sessionNode.open),true);
+  assert.match(await historyRow.locator('>summary').textContent(),/192.0.2.1/);
+  assert.match(await historyRow.locator('>summary').textContent(),/29s/);
+  assert.match(await page.locator('.login-current').textContent(),/No active SSH sessions/);
+  sessionClosed=false;await page.getByRole('button',{name:'Refresh',exact:true}).click();
+  await page.locator('.login-current').getByText('Connected',{exact:true}).waitFor();
+  fail=true;await page.getByRole('button',{name:'Refresh',exact:true}).click();
+  await page.getByRole('alert').waitFor();
+  assert.match(await page.locator('.login-current').textContent(),/Not verified/);
+  assert.match(await historyRow.locator('>summary').textContent(),/Unconfirmed/);
+  fail=false;await page.getByRole('button',{name:'Refresh',exact:true}).click();
+  await page.locator('.login-current').getByText('Connected',{exact:true}).waitFor();
+  for(const width of [1500,900,390]){
+   await page.setViewportSize({width,height:1000});
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  }
+  await page.setViewportSize({width:1500,height:1000});
   assert.equal(errors.length,0,errors.join('\n'));
-  if(process.env.HARBOUR_TEST_CAPTURE){fail=false;status={state:'connected',fetched_at:now,sources:{journal:{state:'listening'}},pending:0,dropped:0,limitations:[]};await page.evaluate(()=>{const v=loginView('docker');v.search='';v.hide=false;v.outcome='all';resetLoginView(v);renderMain();});await page.locator('.login-event').first().waitFor();await page.locator('.login-event summary').first().click();fs.mkdirSync('test-results',{recursive:true});await page.screenshot({path:'test-results/logins-desktop.png'});await page.setViewportSize({width:390,height:844});await page.evaluate(()=>setMobilePanel(false));await page.screenshot({path:'test-results/logins-mobile.png'});}
+  if(process.env.HARBOUR_TEST_CAPTURE){fail=false;status={state:'connected',fetched_at:now,sources:{journal:{state:'listening'}},pending:0,dropped:0,limitations:[]};await page.evaluate(()=>{const v=loginView('docker');v.search='';v.hide=false;v.outcome='all';resetLoginView(v);renderMain();});await page.locator('.login-event').first().waitFor();await page.locator('.login-event summary').first().click();fs.mkdirSync('test-results',{recursive:true});await page.screenshot({path:'test-results/logins-desktop.png'});await page.setViewportSize({width:390,height:844});await page.evaluate(()=>setMobilePanel(false));await page.waitForFunction(()=>document.querySelector('#sidebar').getBoundingClientRect().right<=0);await page.screenshot({path:'test-results/logins-mobile.png'});}
   console.log('Logins browser checks passed: both host types, filters, pagination, safe evidence, live updates, stale responses, coverage, errors, desktop/mobile.');
  }finally{await browser.close();server.close();}
 })().catch(err=>{console.error(err);server.close();process.exit(1);});

@@ -381,6 +381,7 @@ function modal(title,content,wide=false){
   if(!state.modal)previousFocus=document.activeElement;
   state.modal=title;state.notices=null;
   $('#overlay').innerHTML=`<div class="modal-backdrop"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><header class="modal-header"><h2 id="modal-title">${title}</h2>${iconButton('close','Close dialog','close')}</header>${content}</section></div>`;
+  if(typeof prepareDataTables==='function')prepareDataTables($('#overlay'));
   $('input,button,select,textarea',$('.modal'))?.focus();
   queueMicrotask(()=>document.querySelectorAll('#overlay form').forEach(markFormSaved));
 }

@@ -40,6 +40,7 @@ const server=http.createServer(async(req,res)=>{
    return;
   }
   if(url.pathname.endsWith('/cancel')){if(active&&url.pathname.includes('/'+active.id+'/')){const saved=artifacts.get(active.id);saved.status='stopped';saved.output+='\nSetup stopped.\n';active.res.end();active=null;}return json({ok:true});}
+  if(url.pathname==='/api/install-artifacts/table')return json({artifacts:[...artifacts.values()].reverse(),pagination:{page:1,size:25,total:artifacts.size,pages:1}});
   if(url.pathname==='/api/install-artifacts')return json({artifacts:[...artifacts.values()].reverse(),next:null});
   if(url.pathname.startsWith('/api/install-artifacts/')){
    const saved=artifacts.get(url.pathname.split('/')[3]);assert(saved);

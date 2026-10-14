@@ -113,6 +113,21 @@ def listing(before: int | None = Query(None, ge=1), user=Depends(auth.admin)):
     return {'artifacts': rows[:50], 'next': rows[49]['sequence'] if len(rows) > 50 else None}
 
 
+@router.get('/api/install-artifacts/table')
+def table_listing(page: int = Query(1, ge=1, le=1000000), size: int = 25,
+                  sort: str = 'time', order: str = 'desc', filters: str = Query('{}', max_length=3000),
+                  user=Depends(auth.admin)):
+    from . import table_query
+    with store.db() as con:
+        con.execute('BEGIN')
+        rows, pagination = table_query.select(con, "SELECT "+METADATA+""",created AS time,
+            coalesce(target_name,'')||' '||coalesce(host,'')||' '||coalesce(actor,'') AS target,
+            kind||' '||action AS setup FROM install_artifacts""", (),
+            dict(time='date',target='text',setup='text',status='text'),
+            page=page,size=size,sort=sort,order=order,filters=filters)
+        return dict(artifacts=[dict(r) for r in rows],pagination=pagination)
+
+
 def read(id_):
     with store.db() as con:
         con.execute('BEGIN')

@@ -346,6 +346,7 @@ async def lifespan(app):
         demo.seed()
         demo.seed_history()
         logins.seed_demo()
+    logins.login_sessions.backfill()
     stop.clear()
     scheduler_wake.clear()
     with scheduler_guard:

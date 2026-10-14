@@ -81,14 +81,28 @@ material is read; evidence is the bounded authentication log message itself.
 | macOS unified log | OpenSSH records matching the same parser; recognizable authentication/session records when emitted | Partial coverage. Privacy redaction and OS retention can remove fields/events; GUI login and all failed attempts are not guaranteed. No logging profile is silently installed. |
 | Optional native macOS helper | OpenSSH connection login/logout, `/usr/bin/login`, LoginWindow sessions/lock/unlock, Open Directory/Touch ID/token/Auto Unlock, Screen Sharing | macOS 13+ and Endpoint Security permissions required. Native SSH events have no key fingerprint; separate SSH log records provide it. |
 
-The table displays **source events**, not a count of unique humans or connections.
-One login can generate authentication, PAM session and native event records.
-These remain separate, labelled evidence: we do not guess that similar timestamps
-belong to one session. SSH multiplexing can create several channels behind one
-authenticated connection. Source PID and graphical session IDs are retained.
-Duration is shown only for an unambiguous start/end pair with matching source,
-boot, service, user and graphical-session ID (or PAM process ID). Missing,
-overlapping or clock-reversed pairs remain unknown.
+The default **Sessions** view combines matching successful authentication,
+session-open and session-close records into one row. Its identity remains stable
+as it closes, and its IP address/key come from the matching authentication record.
+Matching requires the same collector, source, boot, service, user and process or
+native session ID. Similar timestamps alone never establish a match. Original
+records remain available under the row and in **Raw events**; failed attempts and
+unmatched records remain separate. Missing, overlapping or clock-reversed pairs
+remain unconfirmed. SSH multiplexing can create several channels behind one
+authenticated connection; sessions and credentials do not identify unique humans.
+
+**Currently connected** uses a read-only process snapshot sent through the normal
+monitoring connection on Linux/macOS. A connection requires an authenticated SSH
+child and its root-owned privileged parent; listener and pre-authentication
+processes are excluded. Boot identity and process start time prevent a reused PID
+from inheriting an earlier connection's address/key. This works with the existing
+collector version and also reports visible SSH connections when history is absent.
+Other login types remain in history but do not receive live SSH verification.
+Restricted process visibility, failed/stale checks and paused monitoring display
+an unavailable state, not zero connected users. Verification follows the server's
+poll interval; it is not a continuous presence guarantee. A missing close record
+does not keep a departed connection labelled connected, and an observed absence
+does not invent a logout timestamp or duration.
 
 An attempted username and an offered/rejected key are unverified claims.
 A successful key fingerprint identifies a credential, not a physical device.

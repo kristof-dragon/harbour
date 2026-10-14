@@ -684,8 +684,25 @@ body.mobile-panel-open{overflow:hidden}
 :root { --login-columns: minmax(130px,1.1fr) 100px minmax(90px,.8fr) minmax(100px,.8fr) minmax(100px,1fr) minmax(100px,1.3fr) 18px; }
 .logins-view { display:grid;gap:16px;min-width:0; }
 .logins-view h2 { margin:0; }
-.login-status { border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0; }
-.login-status b .icon { vertical-align:middle;margin-right:8px; }
+.login-header { position:relative;gap:12px;flex-wrap:wrap; }
+.login-title { display:flex;align-items:center;gap:12px;flex-wrap:wrap; }
+.login-status { min-width:0;max-width:100%; }
+.login-status>summary { display:inline-flex;align-items:center;gap:6px;padding:6px 8px;font-size:11px;max-width:100%; }
+.login-status>summary .icon { width:14px;height:14px;flex-shrink:0; }
+.login-status[open]>summary>.icon:last-child { transform:rotate(90deg); }
+.login-status>summary:focus-visible { outline:2px solid var(--accent);outline-offset:2px; }
+.login-status-detail { position:absolute;z-index:20;left:0;top:calc(100% + 8px);width:min(440px,100%);padding:14px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:var(--shadow);font-size:12px; }
+.login-status-detail p { margin:10px 0 0; }
+.login-current { border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0; }
+.login-current h3,.login-evidence h3 { margin:0;font-size:14px; }
+.login-current-heading { display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;margin-bottom:14px; }
+.login-current-heading>.tag { margin-left:auto; }
+.login-current-checked { font-size:11px;color:var(--muted); }
+.login-current>.hint { margin:10px 0 14px; }
+.login-current .login-event:last-child { margin-bottom:0; }
+.login-evidence { margin-top:18px; }
+.login-evidence h3 { margin-bottom:10px; }
+.login-evidence .login-event summary { grid-template-columns:1fr 85px 1fr 1fr 1fr 1fr 18px; }
 .login-sources { display:flex;flex-wrap:wrap;gap:12px;margin-top:12px; }
 .login-sources>span { flex:1;min-width:180px;font-size:12px; }
 .login-sources small,.login-event summary small { display:block;opacity:.7;font-size:11px;margin-top:4px; }
@@ -696,6 +713,7 @@ body.mobile-panel-open{overflow:hidden}
 .login-table-heading,.login-event summary { display:grid;grid-template-columns:var(--login-columns);align-items:center;gap:12px; }
 .login-table-heading { font-size:11px;opacity:.7;padding:0 12px; }
 .login-event { border:1px solid var(--line);border-radius:8px;margin-bottom:6px;min-width:0; }
+.login-session.is-connected { background:color-mix(in srgb,var(--accent) 6%,transparent);border-color:color-mix(in srgb,var(--accent) 22%,var(--line)); }
 .login-event summary { list-style:none;cursor:pointer;padding:12px;font-size:12px; }
 .login-event summary::-webkit-details-marker { display:none; }
 .login-event summary>span { min-width:0;overflow-wrap:anywhere; }
@@ -729,7 +747,7 @@ body.mobile-panel-open{overflow:hidden}
   .call-schedules td:nth-child(3)::before { content:'Last run · ';color:var(--muted); }
 }
 @media(max-width:1000px){.login-table-heading{display:none}.login-event summary{grid-template-columns:1fr 100px 1fr}.login-event summary>.icon{display:none}.login-fingerprint{white-space:normal}.login-status .between,.logins-view>.between{flex-wrap:wrap;gap:10px}}
-@media(max-width:500px){.login-event summary{grid-template-columns:1fr 1fr}.login-filters>*{max-width:100%}.login-status{padding:12px}.login-event-detail dl{grid-template-columns:1fr}.login-filters label:first-child{width:100%}}
+@media(max-width:500px){.login-event summary,.login-evidence .login-event summary{grid-template-columns:1fr 1fr}.login-filters>*{max-width:100%}.login-current{padding:12px}.login-event-detail dl{grid-template-columns:1fr}.login-filters label:first-child{width:100%}}
 /* OpenWRT diagnostics share a common time axis and preserve missing samples. */
 .network-view { padding: 22px 0; min-width:0; }
 .network-view > .between > .flex { flex-wrap:wrap; }
@@ -797,3 +815,38 @@ body.mobile-panel-open{overflow:hidden}
 
 /* Connection conclusions keep wide evidence tables inside their own scrollers. */
 .connection-analysis{min-width:0;scroll-margin-top:80px}.analysis-controls{display:flex;align-items:end;flex-wrap:wrap;gap:12px;margin:14px 0}.analysis-controls label{min-width:150px}.analysis-detail{border-top:1px solid var(--line);padding-top:20px;margin-top:24px;scroll-margin-top:80px}.analysis-detail .flex{flex-wrap:wrap}.analysis-detail .code-block{max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}.connection-analysis>details{margin:16px 0}.connection-analysis summary{cursor:pointer;font-weight:600;overflow-wrap:anywhere}.connection-analysis td{vertical-align:top;white-space:normal}.connection-analysis a{color:var(--accent)}.connection-analysis td .small{margin:2px}.connection-analysis p{overflow-wrap:anywhere}.analysis-detail .between{gap:12px;flex-wrap:wrap}@media(max-width:600px){.analysis-controls{align-items:stretch}.analysis-controls label{flex:1}.analysis-controls>a{width:100%}.analysis-detail .probe-cards{grid-template-columns:1fr}}
+/* Shared read-only data tables; configuration forms keep their existing controls. */
+.data-table-shell { min-width:0; }
+.data-table-scroll { overflow:auto; }
+.data-column { vertical-align:top;min-width:95px; }
+.data-column>button { border:0;background:none;padding:2px 0 6px;justify-content:space-between;width:100%;font:inherit;font-weight:600;text-align:left;gap:8px; }
+.data-column>input { display:block;width:100%;min-width:0;font-size:11px;padding:5px 6px;font-weight:400; }
+.data-column>button span { color:var(--muted); }
+.data-table-controls,.data-table-pages { display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px; }
+.data-table-controls { padding:12px 0;font-size:12px; }
+.data-table-controls label { display:flex;align-items:center;gap:6px;white-space:nowrap;margin:0;font-size:12px; }
+.data-table-controls select,.data-table-controls input { width:auto;padding:4px 6px;font-size:12px; }
+.data-table-controls input { width:65px; }
+.data-table-pages { margin-left:auto; }
+.login-table-heading.data-table-head { opacity:1;margin-bottom:10px;align-items:start; }
+.logins-view:has(.data-table-head) { --login-columns:minmax(135px,1.1fr) 85px 95px minmax(85px,.7fr) minmax(95px,.8fr) minmax(110px,1fr) minmax(120px,1.2fr) 18px; }
+.login-evidence .login-event summary { grid-template-columns:var(--login-columns); }
+@media(max-width:1100px){.login-table-heading.data-table-head{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}.login-table-heading.data-table-head>span:last-child{display:none}.login-event summary,.login-evidence .login-event summary{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:600px){.login-table-heading.data-table-head,.login-event summary,.login-evidence .login-event summary{grid-template-columns:repeat(2,minmax(0,1fr))}.data-table-pages{margin-left:0}.data-column{min-width:0}}
+.compact-heading { display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;min-width:0; }
+.compact-heading h3,.compact-heading h4,.compact-section-heading h3 { margin:0; }
+.compact-heading>.hint,.compact-heading>small { margin:0;color:var(--muted);font-size:11px; }
+.compact-section-heading { flex-wrap:wrap;gap:10px;margin:0 0 12px; }
+.info-menu { display:inline-flex;vertical-align:middle; }
+.info-menu>summary { display:flex;align-items:center;justify-content:center;width:24px;height:24px;color:var(--muted);border-radius:5px; }
+.info-menu>summary:hover { background:var(--hover);color:var(--text); }
+.info-menu>summary:focus-visible { outline:2px solid var(--accent); }
+.info-menu-content { position:fixed;z-index:130;width:min(440px,calc(100vw - 24px));max-height:calc(100dvh - 24px);overflow:auto;padding:14px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:var(--shadow);font-size:12px; }
+.info-menu-content p { margin:10px 0 0; }
+.call-tests .call-live { margin:12px 0; }
+.call-tests .probe-cards { gap:12px;margin:10px 0; }
+.call-tests .probe-card { padding:14px; }
+.call-tests .call-live-values { gap:10px 24px;margin:12px 0 0;font-size:12px; }
+.call-tests .endpoint-controls { margin:0; }
+.call-tests p.form-error:empty { display:none; }
+.network-view { padding:12px 0; }

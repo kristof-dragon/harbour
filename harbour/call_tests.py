@@ -132,7 +132,7 @@ TEST_COLUMNS = 'id,server_id,created,finished,status,phase,config,summary AS res
 def listing(id_, schedule_id=None):
     clause, args = (" AND json_extract(config,'$.schedule_id')=?", (id_, schedule_id)) if schedule_id else ('', (id_,))
     rows = store.rows('SELECT ' + TEST_COLUMNS + ' FROM network_call_tests WHERE server_id=?' + clause +
-                      ' ORDER BY created DESC,id DESC LIMIT 50', args)
+                      ' ORDER BY created DESC,id DESC', args)
     running = store.one("SELECT " + TEST_COLUMNS + " FROM network_call_tests WHERE server_id=? AND status='running'", (id_,))
     saved = schedules(id_)
     return {'profiles': [call_profiles.profile(p['id']) for p in call_profiles.PROFILES],

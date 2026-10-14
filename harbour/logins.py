@@ -7,7 +7,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from . import store
+from . import login_sessions, store
 from .auth import authenticated, admin
 
 router = APIRouter()
@@ -44,6 +44,7 @@ def initialize(con):
       CREATE INDEX IF NOT EXISTS host_login_page ON host_login_events(server_id,id DESC);
       CREATE INDEX IF NOT EXISTS host_login_retention ON host_login_events(collected_at);
     ''')
+    login_sessions.initialize(con)
 
 
 def payload(server_id, signature):
@@ -134,6 +135,32 @@ def key_fingerprint(server):
         return None
 
 
+def validate_presence(value):
+    if not isinstance(value, dict) or value.get('state') != 'ok':
+        return {'state': 'unavailable', 'detail': 'Current SSH sessions have not been verified by the host.'}
+    finite(value.get('checked_at'))
+    if not isinstance(value.get('boot_id'), str) or not 1 <= len(value['boot_id']) <= 128:
+        raise ValueError('Invalid session snapshot boot identity')
+    rows = value.get('sessions')
+    if not isinstance(rows, list) or len(rows) > 256:
+        raise ValueError('Invalid session snapshot')
+    result, seen = [], set()
+    for row in rows:
+        if not isinstance(row, dict) or not str(row.get('pid', '')).isdigit():
+            raise ValueError('Invalid session process')
+        if not isinstance(row.get('username'), str) or not 1 <= len(row['username']) <= 512:
+            raise ValueError('Invalid session user')
+        pid = str(row['pid'])
+        if len(pid) > 20 or int(pid) <= 0 or pid in seen:
+            raise ValueError('Invalid session process identity')
+        seen.add(pid)
+        finite(row.get('process_started_at'))
+        if row['process_started_at'] > value['checked_at']:
+            raise ValueError('Invalid session process time')
+        result.append(dict(pid=pid, username=row['username'], process_started_at=row['process_started_at']))
+    return dict(state='ok', checked_at=value['checked_at'], boot_id=value['boot_id'], sessions=result, scope='ssh')
+
+
 def collect(server, batch, signature, is_current):
     """Persist the entire batch and its next-probe acknowledgement atomically.
 
@@ -155,6 +182,10 @@ def collect(server, batch, signature, is_current):
         error = str(exc)
         status = dict(state='error', detail='Login batch rejected: ' + error)
     fingerprint = key_fingerprint(server)
+    try:
+        status['current_sessions'] = validate_presence(batch.get('current_sessions'))
+    except (ValueError, TypeError, AttributeError):
+        status['current_sessions'] = {'state': 'unavailable', 'detail': 'Host session information was invalid.'}
     with store.db() as con:
         con.execute('BEGIN IMMEDIATE')
         row = con.execute('SELECT * FROM servers WHERE id=?', (server['id'],)).fetchone()
@@ -179,6 +210,7 @@ def collect(server, batch, signature, is_current):
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (server['id'], batch['collector_id'], event['seq'], event['event_id'], event.get('occurred_at'),
                 event['captured_at'], now, event.get('username'), event['service'], event['result'], event.get('source_ip'),
                 event.get('key_fingerprint'), int(own), json.dumps(event)))
+        login_sessions.project(con, server['id'])
         if batch['acknowledged_at'] is not None:
             con.execute('''UPDATE host_login_events SET acknowledged_at=? WHERE server_id=? AND collector_id=?
                 AND seq<=? AND acknowledged_at IS NULL''', (batch['acknowledged_at'], server['id'], batch['collector_id'], batch['acked_through']))
@@ -198,6 +230,7 @@ def summary(server):
 
 def compact():
     store.execute('DELETE FROM host_login_events WHERE collected_at<?', (time.time() - 90*86400,))
+    store.execute('DELETE FROM host_login_sessions WHERE collected_at<?', (time.time() - 90*86400,))
 
 
 def seed_demo():
@@ -231,10 +264,18 @@ def seed_demo():
 def events(server_id: str, before: int = Query(default=0, ge=0),
            outcome: str = Query(default='all', pattern='^(all|success|failure|sessions|collector)$'),
            search: str = Query(default='', max_length=128), hide_harbour: bool = False,
-           user=Depends(authenticated)):
+           view: str = Query(default='events', pattern='^(events|sessions)$'), user=Depends(authenticated)):
     server = store.one('SELECT * FROM servers WHERE id=?', (server_id,))
     if not server:
         raise HTTPException(404, 'Server not found')
+    status = summary(server)
+    presence = login_sessions.presence(server, status)
+    current = login_sessions.current(server_id, presence)
+    if view == 'sessions':
+        result, next_before = login_sessions.listing(server_id, before, outcome, search, hide_harbour, presence)
+        return dict(events=result, next_before=next_before, status=status, paused=not server['monitoring_enabled'],
+                    host_checked_at=server['checked'], host_error=bool(server['error']), retention_days=90,
+                    current_sessions=current, session_presence={k:v for k,v in presence.items() if k != 'sessions'})
     where, args = ['server_id=?'], [server_id]
     if before:
         where.append('id<?'); args.append(before)
@@ -257,5 +298,25 @@ def events(server_id: str, before: int = Query(default=0, ge=0),
         event = json.loads(row.pop('payload'))
         result.append({**event, **row})
     return dict(events=result, next_before=result[-1]['id'] if len(rows)>100 else None,
-                status=summary(server), paused=not server['monitoring_enabled'],
-                host_checked_at=server['checked'], host_error=bool(server['error']), retention_days=90)
+                status=status, paused=not server['monitoring_enabled'],
+                host_checked_at=server['checked'], host_error=bool(server['error']), retention_days=90,
+                current_sessions=current, session_presence={k:v for k,v in presence.items() if k != 'sessions'})
+
+
+@router.get('/api/servers/{server_id}/logins/table')
+def event_table(server_id: str, page: int = Query(1, ge=1, le=1000000), size: int = Query(25),
+                sort: str = 'time', order: str = 'desc', filters: str = Query('{}', max_length=3000),
+                view: str = Query('sessions', pattern='^(events|sessions)$'),
+                outcome: str = Query('all', pattern='^(all|success|failure|sessions|collector)$'),
+                search: str = Query('', max_length=128), hide_harbour: bool = False, user=Depends(authenticated)):
+    server = store.one('SELECT * FROM servers WHERE id=?', (server_id,))
+    if not server:
+        raise HTTPException(404, 'Server not found')
+    status = summary(server)
+    presence = login_sessions.presence(server, status)
+    records, pagination = login_sessions.table_listing(server_id, presence, view=view, outcome=outcome,
+        search=search, hide_harbour=hide_harbour, page=page, size=size, sort=sort, order=order, filters=filters)
+    return dict(events=records, pagination=pagination, status=status, paused=not server['monitoring_enabled'],
+        host_checked_at=server['checked'], host_error=bool(server['error']), retention_days=90,
+        current_sessions=login_sessions.current(server_id,presence),
+        session_presence={k:v for k,v in presence.items() if k != 'sessions'})

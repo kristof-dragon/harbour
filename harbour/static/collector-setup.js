@@ -94,8 +94,13 @@ document.addEventListener('click',event=>{
 });
 
 async function showInstallArtifacts(before=''){
-  const data=await api('/install-artifacts'+(before?'?before='+encodeURIComponent(before):''));
-  modal('Saved installs',`<p class="hint">Install artifacts are kept on this Harbour server indefinitely, including failed and stopped attempts.</p><div class="network-table"><table><thead><tr><th>Started</th><th>Target</th><th>Setup</th><th>Outcome</th><th>Install artifact</th></tr></thead><tbody>${data.artifacts.map(item=>`<tr><td>${e(new Date(item.created*1000).toLocaleString())}</td><td>${e(item.target_name||item.host)}<br><small>${e(item.host)} · ${e(item.actor)}</small></td><td>${e(item.kind)} · ${e(item.action)}</td><td>${e(item.status)}</td><td>${button('install-artifact','View','','small',`data-id="${e(item.id)}"`)} <a href="/api/install-artifacts/${encodeURIComponent(item.id)}/download">Download</a></td></tr>`).join('')||'<tr><td colspan="5">No saved installs yet.</td></tr>'}</tbody></table></div><div class="collector-actions">${button('install-artifacts','Latest','','small')}${data.next?button('install-artifacts','Older','','small',`data-before="${data.next}"`):''}</div>`,true);
+  const tableId='saved-installs',t=tableState(tableId);if(!t.sort){t.sort='time';t.order='desc';}t.dates=['time'];
+  tableRefreshers.set(tableId,()=>showInstallArtifacts());
+  const query=new URLSearchParams(tableQuery(tableId)).toString(),data=await api('/install-artifacts/table?'+query);
+  if(query!==new URLSearchParams(tableQuery(tableId)).toString())return;
+  t.page=data.pagination.page;
+  const columns=[{key:'time',label:'Started',type:'date'},{key:'target',label:'Target'},{key:'setup',label:'Setup'},{key:'status',label:'Outcome'},{key:'actions',label:'Install artifact',action:true}];
+  modal('Saved installs',`<p class="hint">Install artifacts are kept on this Harbour server indefinitely, including failed and stopped attempts.</p><div data-table-key="saved-installs"><div class="network-table"><table><thead><tr>${columns.map(c=>tableColumn(tableId,c)).join('')}</tr></thead><tbody>${data.artifacts.map(item=>`<tr><td>${e(new Date(item.created*1000).toLocaleString())}</td><td>${e(item.target_name||item.host)}<br><small>${e(item.host)} · ${e(item.actor)}</small></td><td>${e(item.kind)} · ${e(item.action)}</td><td>${e(item.status)}</td><td>${button('install-artifact','View','','small',`data-id="${e(item.id)}"`)} <a href="/api/install-artifacts/${encodeURIComponent(item.id)}/download">Download</a></td></tr>`).join('')||'<tr><td colspan="5">No saved installs yet.</td></tr>'}</tbody></table></div>${tableControls(tableId,data.pagination.total)}</div>`,true);
 }
 async function showInstallArtifact(id){
   const item=await api('/install-artifacts/'+encodeURIComponent(id));

@@ -38,7 +38,7 @@ const diagnostic=JSON.parse(diagnosticGenerated.stdout);
 let diagnosticPrepared=false,delayDiagnostic=false,releaseDiagnostic;
 const diagnosticListing=()=>({reports:diagnosticPrepared?[diagnostic.summary]:[],sources:[],pending:diagnosticPrepared?0:1,errors:[],patterns:diagnosticPrepared?diagnostic.patterns:[],retention:'Up to 200 reports / 128 MiB.',exclusions:diagnostic.detail.exclusions,scope:'Retained tests only.'});
 let briefFailure=false,delayBrief=false,releaseBrief;
-const incidentReports=Array.from({length:23},(_,i)=>({...incidentReport,incident:{...incidentReport.incident,id:i?`event-${i}`:'event',measured:now-60-i*1000,automatic:i<21?1:0}}));
+const incidentReports=Array.from({length:28},(_,i)=>({...incidentReport,incident:{...incidentReport.incident,id:i?`event-${i}`:'event',measured:now-60-i*1000,automatic:i<26?1:0}}));
 let delayIncident=false,releaseIncident;
 const callProfiles=[{id:'facetime',name:'FaceTime · provisional video',upload_kbps:2000,download_kbps:2000,basis:'Harbour approximation',note:'Not an Apple specification.',source:'https://support.apple.com/guide/security/facetime-security-seca331c55cd/web'},{id:'teams-meeting',name:'Teams · video meeting',upload_kbps:2500,download_kbps:4000,basis:'Microsoft recommended video bandwidth',note:'Asymmetric meeting profile',source:'https://learn.microsoft.com/en-us/microsoftteams/prepare-network'},{id:'zoom-meeting',name:'Zoom · group 720p',upload_kbps:2600,download_kbps:1800,basis:'Zoom recommended 720p bandwidth',note:'Group video',source:'https://support.zoom.com/'}];
 let liveTick=1,liveRequests=0;
@@ -143,10 +143,10 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.locator('.analysis-detail').waitFor();
   assert.match(await page.locator('.analysis-detail').textContent(),/Call-flow impairment with normal endpoint ping/);
   assert.equal(await page.evaluate(()=>window.analysisInjection),undefined);
-  assert.equal(await page.locator('.analysis-detail .network-table').first().locator('tbody tr').count(),20);
-  await page.locator('[data-action=analysis-page][data-step="1"]').click();
-  assert.match(await page.locator('.analysis-detail').textContent(),/21–40 of 40/);
-  assert.equal(await page.locator('[data-action=analysis-page]').count(),2);
+  assert.equal(await page.locator('.analysis-detail .network-table').first().locator('tbody tr').count(),25);
+  await page.locator('.analysis-detail .network-table').first().getByRole('button',{name:'Next',exact:true}).click();
+  assert.match(await page.locator('.analysis-detail').textContent(),/26–40 of 40/);
+  assert.equal(await page.locator('.analysis-detail .network-table').first().locator('tbody tr').count(),15);
   assert.equal(await page.locator('.analysis-detail .probe-card').first().locator('[data-action=analysis-evidence]').count(),4);
   await page.locator('[data-action=analysis-evidence]').first().click();
   assert(await page.locator('.analysis-evidence[open]').count()>0);
@@ -174,7 +174,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.waitForFunction(()=>document.querySelector('.analysis-detail')===null);
   assert.equal(await page.locator('.analysis-detail').count(),0);
   await page.locator('[data-tab=calls]').click();
-  await page.getByRole('button',{name:'Remote call flow test',exact:true}).click();
+  await page.getByRole('button',{name:'Run test',exact:true}).click();
   // No saved Linux server: the test overlay itself starts one-shot deployment.
   await page.locator('#endpoint-form').waitFor();
   assert.equal(await page.locator('#endpoint-form [name=host]').count(),0);
@@ -221,7 +221,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.getByRole('button',{name:'Stop test',exact:true}).waitFor();
   assert.equal(callRequest.profile,'zoom-meeting');assert.equal(callRequest.download_kbps,1800);
   await page.getByRole('button',{name:'Stop test',exact:true}).click();
-  await page.getByRole('button',{name:'Remote call flow test',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Run test',exact:true}).waitFor();
   assert.equal(callStopped,true);
   await page.getByRole('button',{name:'Add recurring test',exact:true}).click();
   await page.locator('#call-test-form [name=duration]').fill('3600');
@@ -276,7 +276,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.locator('#call-test-form [name=schedule_name]').fill('Morning edited');
   await page.locator('#call-test-form [name=profile]').selectOption('facetime');
   const editRequests=liveRequests;
-  await page.waitForFunction(()=>document.querySelector('.call-live [data-key="live-phase"]')?.textContent.includes('seconds elapsed'));
+  await page.waitForFunction(()=>document.querySelector('.call-live [data-key="live-phase"]')?.textContent.includes('m elapsed'));
   await new Promise(resolve=>setTimeout(resolve,5500));
   assert(liveRequests>editRequests);
   assert.equal(await page.locator('#call-test-form [name=schedule_name]').inputValue(),'Morning edited');
@@ -391,10 +391,10 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.getByRole('button',{name:'Close dialog',exact:true}).click();
   await page.getByRole('button',{name:'Explore incident patterns',exact:true}).click();
   await page.locator('.incident-overviews').waitFor();
-  assert.equal(await page.locator('.incident-overviews tbody tr').count(),20);
-  await page.getByRole('button',{name:'Next',exact:true}).click();
+  assert.equal(await page.locator('.incident-overviews tbody tr').count(),25);
+  await page.locator('.incident-overviews').getByRole('button',{name:'Next',exact:true}).click();
   assert.equal(await page.locator('.incident-overviews tbody tr').count(),3);
-  await page.getByRole('button',{name:'Previous',exact:true}).click();
+  await page.locator('.incident-overviews').getByRole('button',{name:'Previous',exact:true}).click();
   await page.locator('.incident-overviews [data-action=incident-open]').first().click();
   await page.locator('.incident-report').waitFor();
   await page.getByRole('button',{name:'Back to patterns'}).click();
@@ -411,7 +411,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.equal(downloadedPatterns.reports.length,2);
   await page.locator('#incident-filters [name=kind]').selectOption('all');
   await page.getByRole('button',{name:'Refresh analysis',exact:true}).click();
-  await page.waitForFunction(()=>document.querySelectorAll('.incident-overviews tbody tr').length===20);
+  await page.waitForFunction(()=>document.querySelectorAll('.incident-overviews tbody tr').length===25);
   await page.screenshot({path:'test-results/incident-patterns-desktop.png'});
   await page.setViewportSize({width:390,height:844});
   await page.waitForTimeout(200);

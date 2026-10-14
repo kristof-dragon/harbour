@@ -122,11 +122,16 @@ See [resource recorder installation, retention and off-boarding](harbour/RESOURC
 
 ### Login and authentication history
 
-**Server → Logins** is available on both Docker and Plain server entries. It shows
-successful and failed authentication, usernames, methods, source IP/port, SSH key
-and certificate fingerprints when recorded, and session events. Expand a row for
-source evidence and event/capture/collection/acknowledgement timestamps. Filter by
-result, user, IP or key, and optionally hide records matching the Harbour key.
+**Server → Logins** is available on both Docker and Plain server entries. Related
+authentication, session-open and session-close events appear in one session row,
+with the source IP, SSH key and duration when the evidence supports a match.
+**Currently connected** lists SSH sessions verified by the host's latest fresh
+process snapshot; its checked time follows the monitoring interval. Stale or
+unavailable snapshots do not establish that someone is still connected.
+Use **Raw events** or expand a session to inspect the original evidence and its
+timestamps. The **Harbour key** label means that the verified credential and SSH
+account match Harbour's configured monitoring connection; it does not identify
+a separate person. Filter by result, user, IP or key, and optionally hide those records.
 
 Install the permanent host collector once using **Logins → Collector setup**.
 The downloadable bundle includes an installer for Linux systemd and macOS
@@ -140,6 +145,20 @@ limited; the optional native helper adds OS authentication and graphical-session
 events, and requires Apple-approved Endpoint Security signing and Full Disk
 Access. Source failures, partial coverage and local queue losses are visible in
 the tab. See [collector installation, coverage and lifecycle details](harbour/LOGIN_COLLECTOR.md).
+
+### Browsing data tables
+
+Click a column heading to switch between ascending and descending order, and
+use the field beneath it to filter that column. Date fields select a day;
+numeric comparisons such as `>=10` are supported. Choose 25, 50 or 100 rows per
+page, use Previous/Next, or enter a page number. Filters apply before pagination
+and remain in place during live updates. Login history, Harbour sign-ins and
+saved installs query their retained records; diagnostic tables use the displayed
+window or report, with existing coverage limits preserved. Containers, Storage
+and Activity keep their existing controls.
+
+OpenWrt headings keep short status notes inline. The adjacent information icons
+hold measurement and retention explanations; operational warnings stay visible.
 
 ### Monitoring macOS
 
