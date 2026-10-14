@@ -50,6 +50,7 @@ def initialize():
                 ('network_samples', 'payload_bytes', 'INTEGER NOT NULL DEFAULT 0'),
                 ('network_runs', 'written_through', 'INTEGER NOT NULL DEFAULT 0'),
                 ('network_events', 'archived_version', 'INTEGER NOT NULL DEFAULT -1'),
+                ('network_events', 'archive_bytes', 'INTEGER'),
                 ('network_events', 'trigger', 'TEXT')):
             if name not in {r['name'] for r in con.execute(f'PRAGMA table_info({table})')}:
                 con.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
@@ -57,6 +58,7 @@ def initialize():
                     con.execute('UPDATE network_samples SET payload_bytes=length(payload)')
         con.execute('CREATE INDEX IF NOT EXISTS network_pending ON network_samples(server_id,archived,id)')
         con.execute('CREATE INDEX IF NOT EXISTS network_sizes ON network_samples(server_id,measured,id,payload_bytes)')
+        con.execute('CREATE INDEX IF NOT EXISTS network_event_time ON network_events(server_id,measured,id)')
     from . import network_archives
     network_archives.initialize()
     from . import call_tests
@@ -274,6 +276,40 @@ def persist(id_, rows, status, signature, revision, run=None, through=0):
     return True
 
 
+def prune_incidents(id_, settings, stop=None):
+    """Rank small metadata outside write transactions; delete one window at a time."""
+    if not (settings['incident_max_count'] or settings['incident_max_mib']):
+        return
+    events = store.rows('''SELECT id,complete,archive_bytes FROM network_events
+        WHERE server_id=? ORDER BY measured DESC,id DESC''', (id_,))
+    total = 0
+    for position, event in enumerate(events, 1):
+        if stop and stop.is_set():
+            return
+        size = event['archive_bytes']
+        if size is None:
+            # Old installations have no cached size. Read one archive at a time
+            # without a writer lock, then checkpoint its size in a short write.
+            # Do not sort/window the archive column: SQLite may spool gigabytes.
+            row = store.one('''SELECT complete,coalesce(length(CAST(archive AS BLOB)),0) AS bytes
+                FROM network_events WHERE id=?''', (event['id'],))
+            if row is None:
+                continue
+            size, event['complete'] = row['bytes'], row['complete']
+            store.execute('''UPDATE network_events SET archive_bytes=?
+                WHERE id=? AND archive_bytes IS NULL AND complete=?''',
+                          (size, event['id'], event['complete']))
+        total += size
+        excess = (settings['incident_max_count'] and position > settings['incident_max_count']
+                  or settings['incident_max_mib'] and total > settings['incident_max_mib']*1024*1024)
+        if excess:
+            # Recheck archive protection and sealing state after the read. Each
+            # commit releases the writer for probes, call tests and web requests.
+            store.execute('''DELETE FROM network_events WHERE id=? AND complete=? AND archive_bytes=?
+                AND (?=0 OR archived_version=complete)''',
+                          (event['id'], event['complete'], size, int(settings['archive_enabled'])))
+
+
 def maintain(id_, stop=None):
     from . import call_tests, network_archives
     from .network_runtime import read_status
@@ -291,7 +327,8 @@ def maintain(id_, stop=None):
         archive = json.dumps({'samples': rows, 'truncated': truncated, 'runs': run_metadata(id_, rows),
                               'traffic_tests': call_tests.context(id_, event['measured']-120, event['measured']+300),
                               'settings': config(id_)[0], 'device': json.loads(server['snapshot']).get('metrics', {}).get('openwrt', {}).get('board')})
-        store.execute('UPDATE network_events SET archive=?,complete=1 WHERE id=?', (archive, event['id']))
+        store.execute('UPDATE network_events SET archive=?,archive_bytes=?,complete=1 WHERE id=?',
+                      (archive, len(archive.encode('utf-8')), event['id']))
     # Never prune an unarchived reading while daily archiving is enabled.
     # Archive failures are visible and retried; they must not erase evidence.
     network_archives.maintain(id_, settings, stop)
@@ -322,14 +359,8 @@ def maintain(id_, stop=None):
                     break
             with store.db() as con:
                 con.executemany('DELETE FROM network_samples WHERE id=?', delete)
+    prune_incidents(id_, settings, stop)
     with store.db() as con:
-        con.execute('''DELETE FROM network_events WHERE id IN (
-          SELECT id FROM (SELECT id,row_number() OVER (ORDER BY measured DESC) AS n,
-          sum(length(coalesce(archive,''))) OVER (ORDER BY measured DESC) AS bytes
-          FROM network_events WHERE server_id=?) WHERE (? > 0 AND n>?) OR (? > 0 AND bytes>?))
-          AND (?=0 OR archived_version=complete)''',
-                    (id_, settings['incident_max_count'], settings['incident_max_count'],
-                     settings['incident_max_mib'], settings['incident_max_mib']*1024*1024, int(settings['archive_enabled'])))
         # Keep run context for every raw reading awaiting archive or inspection.
         con.execute('''DELETE FROM network_runs WHERE server_id=? AND started<?
           AND id NOT IN (SELECT id FROM network_runs WHERE server_id=? ORDER BY started DESC LIMIT 256)

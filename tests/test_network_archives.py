@@ -3,6 +3,7 @@ import contextlib
 import gzip
 import json
 import os
+import sqlite3
 import threading
 import time
 from types import SimpleNamespace
@@ -267,3 +268,102 @@ def test_backlog_defers_incident_sealing(client, monkeypatch):
     network.maintain('atlas')
     assert store.one('SELECT complete FROM network_events WHERE id=?', (event,))['complete']
     assert len(client.get('/api/servers/atlas/network/export/'+event).json()['samples']) == 6
+
+
+def incident_fixture(id_, measured, size, *, cached=True, archived=True):
+    store.execute('''INSERT INTO network_events
+        (id,server_id,measured,label,automatic,archive,complete,archived_version,archive_bytes)
+        VALUES (?,'atlas',?,'Retention fixture',0,?,1,?,?)''',
+                  (id_, measured, 'x'*size, 1 if archived else -1, size if cached else None))
+
+
+def test_incident_retention_limits_and_archive_protection(client, monkeypatch):
+    enable(client, monkeypatch)
+    incident_fixture('newest', 5, 600000)
+    incident_fixture('protected', 4, 600000, archived=False)
+    incident_fixture('old', 3, 100)
+    cfg = {**network.DEFAULTS, 'incident_max_mib': 1, 'incident_max_count': 0}
+    network.prune_incidents('atlas', cfg)
+    assert {r['id'] for r in store.rows('SELECT id FROM network_events')} == {'newest', 'protected'}
+    cfg.update(incident_max_mib=0, incident_max_count=1, archive_enabled=False)
+    network.prune_incidents('atlas', cfg)
+    assert [r['id'] for r in store.rows('SELECT id FROM network_events')] == ['newest']
+
+
+def test_incident_retention_allows_writes_during_legacy_sizing_and_between_deletes(client, monkeypatch):
+    enable(client, monkeypatch)
+    for n in range(4):
+        incident_fixture(str(n), n, 100000, cached=False)
+    original_one, original_execute = store.one, store.execute
+    observed = []
+
+    def writer():
+        # A separate SQLite connection cannot write if maintenance owns a lock.
+        with sqlite3.connect(store.DATA/'harbour.db', timeout=.05) as con:
+            con.execute("INSERT OR REPLACE INTO settings VALUES ('retention-probe','ok')")
+
+    def one(sql, args=()):
+        if 'length(CAST(archive AS BLOB))' in sql:
+            writer()
+            observed.append('sizing')
+        return original_one(sql, args)
+
+    def execute(sql, args=()):
+        result = original_execute(sql, args)
+        if sql.startswith('DELETE FROM network_events'):
+            writer()
+            observed.append('delete')
+        return result
+
+    monkeypatch.setattr(store, 'one', one)
+    monkeypatch.setattr(store, 'execute', execute)
+    network.prune_incidents('atlas', {**network.DEFAULTS, 'incident_max_count': 1})
+    assert observed.count('sizing') == 4 and observed.count('delete') == 3
+    assert original_one("SELECT archive_bytes FROM network_events WHERE id='3'")['archive_bytes'] == 100000
+    observed.clear()
+    network.prune_incidents('atlas', network.DEFAULTS)
+    assert observed == []  # Subsequent passes use the cached byte count.
+
+
+def test_incident_retention_ties_unlimited_and_cancelled(client, monkeypatch):
+    enable(client, monkeypatch)
+    for id_ in ('a', 'b', 'c'):
+        incident_fixture(id_, 1, 100)
+    cfg = {**network.DEFAULTS, 'incident_max_count': 0, 'incident_max_mib': 0}
+    network.prune_incidents('atlas', cfg)
+    assert len(store.rows('SELECT id FROM network_events')) == 3
+    cfg['incident_max_count'] = 1
+    stop = threading.Event()
+    stop.set()
+    network.prune_incidents('atlas', cfg, stop)
+    assert len(store.rows('SELECT id FROM network_events')) == 3
+    network.prune_incidents('atlas', cfg)
+    assert [r['id'] for r in store.rows('SELECT id FROM network_events')] == ['c']
+
+
+def test_incident_retention_rechecks_new_archive_protection(client, monkeypatch):
+    enable(client, monkeypatch)
+    incident_fixture('keep', 2, 100)
+    incident_fixture('changed', 1, 100)
+    original = store.execute
+
+    def execute(sql, args=()):
+        if sql.startswith('DELETE FROM network_events'):
+            original("UPDATE network_events SET archived_version=-1 WHERE id='changed'")
+        return original(sql, args)
+
+    monkeypatch.setattr(store, 'execute', execute)
+    network.prune_incidents('atlas', {**network.DEFAULTS, 'incident_max_count': 1})
+    assert len(store.rows('SELECT id FROM network_events')) == 2
+
+
+def test_incident_schema_upgrade_defers_archive_scans(client, monkeypatch):
+    enable(client, monkeypatch)
+    incident_fixture('legacy', 1, 100000)
+    with store.db() as con:
+        con.execute('ALTER TABLE network_events DROP COLUMN archive_bytes')
+        con.execute('DROP INDEX network_event_time')
+    network.initialize()
+    assert store.one("SELECT archive_bytes FROM network_events WHERE id='legacy'")['archive_bytes'] is None
+    network.prune_incidents('atlas', network.DEFAULTS)
+    assert store.one("SELECT archive_bytes FROM network_events WHERE id='legacy'")['archive_bytes'] == 100000

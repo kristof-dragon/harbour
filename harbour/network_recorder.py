@@ -7,6 +7,7 @@ import fcntl
 import json
 import logging
 import multiprocessing
+import os
 import secrets
 import signal
 import socket
@@ -305,6 +306,11 @@ def run(stop):
 
 def main():
     store.DATA.mkdir(parents=True, exist_ok=True)
+    # SQLite external sorts need a writable disk directory in the read-only
+    # container. Keep temporary files off its small in-memory /tmp filesystem.
+    if temporary := os.environ.get('SQLITE_TMPDIR'):
+        from pathlib import Path
+        Path(temporary).mkdir(parents=True, exist_ok=True, mode=0o700)
     with (store.DATA / 'network-recorder.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         stop = threading.Event()

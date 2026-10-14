@@ -36,6 +36,7 @@ services:
     environment:
       HARBOUR_SECRET: ${HARBOUR_SECRET:?Set HARBOUR_SECRET in .env}
       HARBOUR_DATA: /data
+      SQLITE_TMPDIR: /data/sqlite-tmp
     volumes:
       - harbour-data:/data
     restart: unless-stopped
