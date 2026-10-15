@@ -29,7 +29,7 @@ def number(name, default, minimum=1, maximum=1024):
 
 
 def budget():
-    return number('PROCESSING_MIB', 8 if small() else 32, 2, 128)*MiB
+    return number('PROCESSING_MIB', 16 if small() else 64, 2, 128)*MiB
 
 
 def batch_bytes():
@@ -108,7 +108,7 @@ def telemetry(metrics):
     from .connection_analysis import pick
     value = pick(metrics, 'measured_at cpu boot_id memory')
     value['openwrt'] = pick(metrics.get('openwrt', {}),
-        'cpu_percent softirq_percent sample_seconds conntrack interfaces radio_stats queue_stats stations network board capabilities')
+        'cpu_percent softirq_percent sample_seconds conntrack interfaces radio_stats queue_stats stations network board capabilities routes rules software_offload hardware_offload')
     return value
 
 
@@ -176,3 +176,25 @@ def saved_incident_download(server_id, identity):
     except BaseException:
         file.close()
         raise
+
+
+def diagnostic_telemetry(metrics):
+    """Keep every analyzer input, including zeros and all observed entities.
+
+    Cumulative counters, routing inventories and UI-only traffic details remain
+    in the original recording. No time or entity sampling is performed here.
+    """
+    from .connection_analysis import pick
+    from .incidents import obj, items
+    value=pick(metrics,'measured_at cpu boot_id')
+    value['memory']=pick(obj(metrics.get('memory')),'percent')
+    ow=obj(metrics.get('openwrt'))
+    selected=pick(ow,'cpu_percent softirq_percent sample_seconds conntrack routes rules software_offload hardware_offload')
+    selected['interfaces']={name:pick(fields,'rx_errors_delta tx_errors_delta rx_dropped_delta tx_dropped_delta')
+                            for name,fields in obj(ow.get('interfaces')).items()}
+    selected['radio_stats']={name:pick(fields,'busy_percent') for name,fields in obj(ow.get('radio_stats')).items()}
+    selected['queue_stats']=[pick(fields,'device discipline backlog_bytes') for fields in items(ow.get('queue_stats'))]
+    selected['stations']=[pick(fields,'mac interface signal_dbm tx_retries_delta tx_failed_delta tx_packets_delta')
+                          for fields in items(ow.get('stations'))]
+    value['openwrt']=selected
+    return value

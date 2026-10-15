@@ -129,7 +129,7 @@ def test_failed_collection_keeps_the_previous_saved_recording(client,monkeypatch
     url='/api/servers/atlas/network/call-tests/'+identity+'/collect'
     assert client.post(url).status_code==200
     saved=store.one('SELECT payload FROM call_test_evidence')['payload']
-    monkeypatch.setattr(network,'samples',lambda *args: ([],True))
+    monkeypatch.setattr(network,'samples',lambda *args,**kwargs: ([],True))
     response=client.post(url)
     assert response.status_code==413 and 'retained' in response.text
     assert store.one('SELECT payload FROM call_test_evidence')['payload']==saved
@@ -161,3 +161,31 @@ def test_memory_categories_are_separate_and_missing_remains_unknown(tmp_path,mon
     write(root+'/memory.max','max');write(root+'/memory.stat','anon 4000\nfile 7000\n')
     value=remote_probe.harbour_cgroup_footprint(root)
     assert value['kernel_bytes'] is value['memory_limit_bytes'] is value['dirty_cache_bytes'] is None
+
+
+def test_diagnostic_projection_preserves_all_analyzer_inputs_and_zero_counters():
+    from harbour.connection_analysis import telemetry_signals
+    metrics={'cpu':95,'boot_id':'boot','memory':{'percent':91,'inventory':'unused'},'openwrt':{
+        'sample_seconds':1,'cpu_percent':{'cpu0':98},'softirq_percent':{'cpu0':55},'conntrack':'99 100',
+        'interfaces':{str(n):{'rx_errors_delta':n,'tx_errors_delta':0,'rx_dropped_delta':0,'tx_dropped_delta':0,'inventory':'x'*500} for n in range(19)},
+        'stations':[{'mac':str(n),'interface':'wifi','tx_packets_delta':20,'tx_retries_delta':10,'tx_failed_delta':0,'signal_dbm':-60,'inventory':'x'*500} for n in range(11)],
+        'queue_stats':[{'device':str(n),'discipline':'fq','backlog_bytes':70000 if n==50 else 0,'inventory':'x'*500} for n in range(51)],
+        'radio_stats':{'wifi':{'busy_percent':95,'inventory':'x'*500}},'network':['x'*5000]}}
+    selected=limits.diagnostic_telemetry(metrics)
+    assert telemetry_signals({'metrics':metrics},{'client_mac':'0'})==telemetry_signals({'metrics':selected},{'client_mac':'0'})
+    assert len(selected['openwrt']['interfaces'])==19 and len(selected['openwrt']['stations'])==11 and len(selected['openwrt']['queue_stats'])==51
+    assert selected['openwrt']['interfaces']['0']['rx_errors_delta']==0
+    assert selected['openwrt']['queue_stats'][0]['backlog_bytes']==0
+    assert len(json.dumps(selected))<len(json.dumps(metrics))/3
+
+
+def test_routing_context_is_retained_once_per_run_with_explicit_references(client):
+    metrics={'cpu':20,'openwrt':{'routes':'default dev wan','rules':'lookup main','software_offload':False}}
+    for n,run in enumerate(('a','a','b','b')):
+        store.execute('INSERT INTO network_samples(server_id,measured,kind,target,payload) VALUES (?,?,?,?,?)',
+                      ('atlas',100+n,'telemetry','',json.dumps({'run_id':run,'metrics':metrics})))
+    rows,partial=network.samples('atlas',0,200,diagnostic=True)
+    assert not partial
+    assert rows[0]['metrics']['openwrt']['routes']==rows[2]['metrics']['openwrt']['routes']=='default dev wan'
+    assert 'routes' not in rows[1]['metrics']['openwrt']
+    assert rows[1]['routing_context_sample_id']==rows[0]['id'] and rows[3]['routing_context_sample_id']==rows[2]['id']

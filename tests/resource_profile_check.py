@@ -43,7 +43,10 @@ def main():
         run={'id':'synthetic-run','started':base,'config':settings,'observer':'Isolated synthetic fixture'}
         metric={'cpu':95, 'boot_id':'fixture', 'memory':{'percent':50},
             'inventory':'x'*55000, 'openwrt':{'sample_seconds':settings['telemetry_seconds'], 'cpu_percent':{'cpu':95},
-            'interfaces':{'eth0':{'rx_mbps':10,'tx_mbps':5,'rx_errors_delta':0}},'stations':[], 'queue_stats':[],'radio_stats':{}}}
+            'interfaces':{str(n):{'rx_mbps':10,'tx_mbps':5,'rx_errors_delta':0,'tx_errors_delta':0,'rx_dropped_delta':0,'tx_dropped_delta':0} for n in range(19)},
+            'stations':[{'mac':str(n),'interface':'wifi','tx_packets_delta':20,'tx_retries_delta':1,'tx_failed_delta':0} for n in range(11)],
+            'queue_stats':[{'device':str(n),'discipline':'fq','backlog_bytes':0} for n in range(51)],
+            'radio_stats':{'wifi':{'busy_percent':20}}, 'routes':'default dev wan','rules':'lookup main'}}
         commits=logical=through=0
         before=io_bytes()
         # Ten minutes of continuous collection, accelerated; one DB commit per configured cadence.
@@ -81,17 +84,25 @@ def main():
                 network_reports.save_chunk(con,archive,'fixture:'+str(minute),compact)
         report=network_reports.compile_day('atlas',dt.date(2026,10,13),network_reports.policy('atlas'))
         assert report['minutes_with_recordings']==1440
-        # Ten minutes of call-window evidence must fit the profile's normal analysis workload.
-        rows,truncated=network.samples('atlas',base,base+600,300000)
+        # An hour of realistic multi-interface call-window evidence must fit the profile's normal analysis workload.
+        rows,truncated=network.samples('atlas',base,base+600,300000,diagnostic=True)
         assert not truncated
-        evidence={'remote':{'records':[]},'local':{'samples':rows,'truncated':False,'settings':settings,'runs':[{'id':run['id'],'config':settings}],'server_name':'Fixture'},'window':{'start':base,'end':base+600}}
-        test={'id':'test','server_id':'atlas','status':'complete','result':{'load_started':base+10,'load_finished':base+590}}
+        hour=[]
+        for part in range(6):
+            for row in rows:
+                sample=json.loads(json.dumps(row))
+                sample['at']+=part*600
+                sample['id']=len(hour)+1
+                hour.append(sample)
+        rows=hour
+        evidence={'remote':{'records':[]},'local':{'samples':rows,'truncated':False,'settings':settings,'runs':[{'id':run['id'],'config':settings}],'server_name':'Fixture'},'window':{'start':base,'end':base+3600}}
+        test={'id':'test','server_id':'atlas','status':'complete','result':{'load_started':base+10,'load_finished':base+3590}}
         evidence['analysis']=call_evidence.analyze(test,evidence)
         payload=limits.pack(evidence)
         assert limits.unpack(payload)['local']['truncated'] is False
         print(json.dumps({'profile':'sbc-1g' if limits.small() else 'standard','simulated_capture_seconds':600,'commits':commits,
             'logical_recording_bytes':logical,'recording_kernel_write_bytes':written,'report_minutes':report['minutes_with_recordings'],
-            'archive_bytes':archive['size'],'call_evidence_bytes':len(payload),'peak_rss_kib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+            'archive_bytes':archive['size'],'call_evidence_bytes':len(payload),'call_window_seconds':3600,'call_samples':len(rows),'peak_rss_kib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
             'memory':memory()},indent=2))
 
 

@@ -164,8 +164,9 @@ def save(id_: str, body: Settings, user=Depends(admin)):
     return {'ok': True}
 
 
-def samples(id_, start, end, limit=15000):
-    result, retained = [], 0
+def samples(id_, start, end, limit=15000, diagnostic=False):
+    import hashlib
+    result, retained, contexts = [], 0, {}
     # Fetch one capped payload at a time; never fetchall a whole call window.
     with store.db() as con:
         cursor = con.execute('''SELECT id,measured,kind,target,
@@ -177,10 +178,22 @@ def samples(id_, start, end, limit=15000):
                 return result, True
             row = {'id':r['id'], 'at':r['measured'], 'kind':r['kind'], 'target':r['target'], **json.loads(r['payload'])}
             if row['kind']=='telemetry':
-                row['metrics'] = resources.telemetry(row.get('metrics',{}))
+                row['metrics'] = (resources.diagnostic_telemetry if diagnostic else resources.telemetry)(row.get('metrics',{}))
+                if diagnostic:
+                    ow=row['metrics']['openwrt']
+                    context={k:ow[k] for k in ('routes','rules','software_offload','hardware_offload') if k in ow}
+                    if context:
+                        fingerprint=hashlib.sha256(json.dumps(context,sort_keys=True).encode()).hexdigest()
+                        key=(row.get('run_id'),fingerprint)
+                        if key in contexts:
+                            for field in context:
+                                ow.pop(field)
+                            row['routing_context_sample_id']=contexts[key]
+                        else:
+                            contexts[key]=row['id']
                 row['evidence_scope'] = 'Diagnostic counters; repeated inventory omitted. Raw recording retention is configured separately.'
             retained += resources.size(row)
-            if retained > resources.budget()*2:
+            if retained > resources.budget()*4:
                 return result, True
             result.append(row)
     return result, False
@@ -238,7 +251,7 @@ def incident_bundle(server, event):
     if event['archive']:
         bundle = json.loads(event['archive'])
     else:
-        rows, truncated = samples(id_, event['measured']-120, event['measured']+300, 60000)
+        rows, truncated = samples(id_, event['measured']-120, event['measured']+300, 60000, diagnostic=True)
         bundle = {'samples': rows, 'truncated': truncated, 'settings': settings,
                   'traffic_tests': call_tests.context(id_, event['measured']-120, event['measured']+300),
                   'device': json.loads(server['snapshot']).get('metrics', {}).get('openwrt', {}).get('board')}
@@ -346,7 +359,7 @@ def maintain(id_, stop=None):
     pending = runtime.get('writer_stalled') or runtime.get('oldest_unsaved_seconds', 0) > resources.flush_seconds()+2
     events = [] if pending else store.rows('SELECT * FROM network_events WHERE server_id=? AND complete=0 AND measured<?', (id_, now-300))
     for event in events:
-        rows, truncated = samples(id_, event['measured']-120, event['measured']+300, 60000)
+        rows, truncated = samples(id_, event['measured']-120, event['measured']+300, 60000, diagnostic=True)
         archive = json.dumps({'samples': rows, 'truncated': truncated, 'runs': run_metadata(id_, rows),
                               'traffic_tests': call_tests.context(id_, event['measured']-120, event['measured']+300),
                               'settings': config(id_)[0], 'device': json.loads(server['snapshot']).get('metrics', {}).get('openwrt', {}).get('board')})

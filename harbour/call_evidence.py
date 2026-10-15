@@ -231,7 +231,7 @@ def _collect(test):
         remote = {**remote, 'error': 'This test used an unmanaged endpoint; independent remote logs are unavailable.'}
     server = network.host(test['server_id'])
     start, end = test['created'], test['finished'] or time.time()
-    rows, truncated = network.samples(test['server_id'], start, end, MAX_SAMPLES)
+    rows, truncated = network.samples(test['server_id'], start, end, MAX_SAMPLES, diagnostic=True)
     if truncated:
         raise resources.BudgetExceeded()
     # Merge earlier snapshots so a retry after recorder retention never erases
@@ -241,7 +241,7 @@ def _collect(test):
     rows, used = [], 0
     for row in sorted(indexed.values(), key=lambda r: (r['at'], r['id'])):
         used += len(json.dumps(row).encode())
-        if len(rows) >= MAX_SAMPLES or used > min(MAX_BYTES, resources.budget()//2):
+        if len(rows) >= MAX_SAMPLES or used > min(MAX_BYTES, resources.budget()):
             raise resources.BudgetExceeded()
         rows.append(row)
     settings = previous['local']['settings'] if previous else network.config(test['server_id'])[0]

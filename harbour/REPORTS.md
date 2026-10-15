@@ -114,7 +114,7 @@ python3 scripts/start.py
 This preserves the existing secret, port and connection configuration. It sets
 320 MiB web + 384 MiB recorder limits (704 MiB combined), leaving 320 MiB of a
 1 GiB machine for the OS and other services; real usable RAM may be smaller.
-It uses an 8 MiB encoded processing allowance, a shared 16 MiB recorder payload
+It uses a 16 MiB encoded processing allowance, a shared 16 MiB recorder payload
 buffer, and ten-second database batches. Existing router settings are constrained
 at runtime to probes no faster than two seconds, telemetry no faster than ten
 seconds, and no extra router-origin probes. Diagnostic counters, all interfaces,
@@ -126,11 +126,11 @@ A sudden failure can lose the currently unsaved batch (normally up to ten second
 Return to full capture with `python3 scripts/resource_profile.py standard` and
 restart. The profile command accepts `--web-memory-mib`, `--recorder-memory-mib`,
 `--processing-mib`, `--buffer-total-mib` and `--write-interval-seconds` overrides.
-The equivalent `HARBOUR_*` keys are documented in `.env.example`. Startup validates
+Standard deployments use a 64 MiB encoded allowance; the small-board profile uses 16 MiB. The equivalent `HARBOUR_*` keys are documented in `.env.example`. Startup validates
 headroom and rejects an inconsistent small-board configuration. Limits are not
 automatically tuned to an arbitrary number of monitored hosts or concurrent tests.
 
-Evidence queries fetch one capped row at a time. Raw archive batches are bounded
+Evidence queries fetch one capped row at a time. Call and incident evidence retains every analyzer input and observed entity, including measured zeros. Repeated routing context is retained once per distinct context and run, with later samples referencing its source row. Raw archive batches are bounded
 by bytes, legacy JSONL imports have a one-MiB line limit, and compressed evidence
 has a bounded decompression allowance before JSON parsing. Processing checks
 retained object size during accumulation and encodes incrementally. Large web
