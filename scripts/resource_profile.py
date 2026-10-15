@@ -5,37 +5,27 @@ import fcntl
 import os
 from pathlib import Path
 import tempfile
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from harbour import resource_config
 
 if __package__:
     from . import start
 else:
     import start
 
-PROFILES = {
-    'standard': {'WEB_MEMORY_MIB':768, 'RECORDER_MEMORY_MIB':768, 'PROCESSING_MIB':64, 'BUFFER_TOTAL_MIB':128, 'WRITE_INTERVAL_SECONDS':1},
-    'sbc-1g': {'WEB_MEMORY_MIB':320, 'RECORDER_MEMORY_MIB':384, 'PROCESSING_MIB':16, 'BUFFER_TOTAL_MIB':16, 'WRITE_INTERVAL_SECONDS':10},
-}
+PROFILES = {name: {k.upper(): v for k, v in values.items()} for name, values in resource_config.PROFILES.items()}
 
 
 def validate(values):
-    profile=values.get('HARBOUR_RESOURCE_PROFILE','standard')
-    if profile not in PROFILES:
-        raise ValueError('Unknown Harbour resource profile')
-    limits={key:int(values.get('HARBOUR_'+key,default)) for key,default in PROFILES['standard'].items()}
-    if not 128<=limits['WEB_MEMORY_MIB']<=65536 or not 192<=limits['RECORDER_MEMORY_MIB']<=65536:
-        raise ValueError('Web memory must be at least 128 MiB; recorder memory at least 192 MiB')
-    if not 2<=limits['PROCESSING_MIB']<=128 or not 1<=limits['BUFFER_TOTAL_MIB']<=512 or not 1<=limits['WRITE_INTERVAL_SECONDS']<=60:
-        raise ValueError('Processing, buffer or write interval is outside its supported range')
-    if limits['PROCESSING_MIB']*8>min(limits['WEB_MEMORY_MIB'],limits['RECORDER_MEMORY_MIB']):
-        raise ValueError('Processing budget must leave at least eight times its allowance in each memory limit')
-    if limits['BUFFER_TOTAL_MIB']>limits['RECORDER_MEMORY_MIB']//4:
-        raise ValueError('Recorder payload buffers may use at most one quarter of the recorder memory limit')
-    if profile=='sbc-1g' and (limits['WEB_MEMORY_MIB']+limits['RECORDER_MEMORY_MIB']>704 or limits['WRITE_INTERVAL_SECONDS']<5):
-        raise ValueError('The sbc-1g profile reserves at least 320 MiB for the OS and batches writes for at least five seconds. Use resource_profile.py to select it.')
-    return limits
+    settings = resource_config.from_env(values)
+    return {key.upper(): settings[key] for key in resource_config.FIELDS}
 
 
 def apply(path, profile, overrides=None):
+    if profile not in PROFILES or set(overrides or {}) - set(PROFILES['standard']):
+        raise ValueError('Unknown resource setting')
     text, values=start.read_env(path)
     settings={'HARBOUR_RESOURCE_PROFILE':profile, **{'HARBOUR_'+k:str(v) for k,v in PROFILES[profile].items()}}
     settings.update({'HARBOUR_'+k:str(v) for k,v in (overrides or {}).items() if v is not None})

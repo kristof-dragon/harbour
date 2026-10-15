@@ -944,3 +944,7 @@ body.mobile-panel-open{overflow:hidden}
 .report-range { display:flex;align-items:end;gap:14px;flex-wrap:wrap;padding:18px 0; }
 .report-range label { flex:1;min-width:160px; }
 .report-view .between { gap:16px;flex-wrap:wrap; }
+/* Resource controls reuse the global settings grid and remain usable on phones. */
+#resource-settings-form fieldset{border:0;padding:0;margin:0;min-width:0}
+#resource-settings-form fieldset:disabled{opacity:.65}
+#resource-operation:empty{display:none}

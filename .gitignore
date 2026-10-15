@@ -3,6 +3,7 @@ node_modules/
 __pycache__/
 .pytest_cache/
 .env
+.harbour-control/
 .env.*
 !.env.example
 data/

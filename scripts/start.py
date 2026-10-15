@@ -111,6 +111,11 @@ def start():
 
 
 def main():
+    if __package__:
+        from . import resource_manager
+    else:
+        import resource_manager
+    resource_manager.prepare()
     # Coordinate setup runs without giving the web container access to host files.
     fd = os.open(ROOT / ".env.setup.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as lock:
@@ -119,6 +124,10 @@ def main():
         except BlockingIOError:
             raise RuntimeError("Another Harbour startup is in progress.") from None
         start()
+        try:
+            resource_manager.install()
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            print('Harbour started, but host resource controls could not be installed. Current resource limits remain active.', file=sys.stderr)
 
 
 if __name__ == "__main__":

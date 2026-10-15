@@ -104,12 +104,12 @@ per-router allowances share it, including retiring workers. Python objects,
 IPC, analysis, kernel memory and file cache are additional, within the container
 limit. Queued readings are still acknowledged only after commit.
 
-Select the small-board profile on the deployment host:
-
-```sh
-python3 scripts/resource_profile.py sbc-1g
-python3 scripts/start.py
-```
+Open **Menu → Global settings → Configure resources** (also available from
+**Harbour footprint → Resource settings**). Select **1 GB board · low write**,
+adjust the five values if needed, then choose **Apply & restart**. The panel
+shows the currently running limits separately from the saved settings. All values
+apply together after a graceful container replacement; the page reconnects and
+reports the verified result. Recording pauses and in-flight tests may be interrupted.
 
 This preserves the existing secret, port and connection configuration. It sets
 320 MiB web + 384 MiB recorder limits (704 MiB combined), leaving 320 MiB of a
@@ -123,12 +123,33 @@ The effective profile and cadence appear in the recorder status. Longer telemetr
 intervals cannot resolve short events; the analyzer retains its timing limits.
 A sudden failure can lose the currently unsaved batch (normally up to ten seconds).
 
-Return to full capture with `python3 scripts/resource_profile.py standard` and
-restart. The profile command accepts `--web-memory-mib`, `--recorder-memory-mib`,
+Return to full capture by choosing **Standard** in the same panel. Changing a
+profile loads its defaults; **Restore profile defaults** resets custom values.
+Settings survive restarts and upgrades. Administrators alone can read or change them.
+The optional host CLI, `python3 scripts/resource_profile.py standard` followed by
+`python3 scripts/start.py`, remains available and accepts `--web-memory-mib`, `--recorder-memory-mib`,
 `--processing-mib`, `--buffer-total-mib` and `--write-interval-seconds` overrides.
 Standard deployments use a 64 MiB encoded allowance; the small-board profile uses 16 MiB. The equivalent `HARBOUR_*` keys are documented in `.env.example`. Startup validates
 headroom and rejects an inconsistent small-board configuration. Limits are not
 automatically tuned to an arbitrary number of monitored hosts or concurrent tests.
+
+
+On Linux Docker hosts, `scripts/start.py` installs the small
+`harbour-resources.service` user service and enables user lingering so it survives
+logout/reboot. The deployment account needs Docker access and permission to enable
+its own lingering (or passwordless sudo for that specific loginctl operation).
+A read-only bind mount exposes only `.harbour-control/resources.sock` to web.
+The web container receives neither the Docker socket nor the host `.env` file.
+The helper accepts only status and validated resource changes from Linux socket
+peers with Harbour UID 10001, the deployment owner, or root. It shares the startup
+lock, rewrites only the six resource keys atomically, and replaces only Harbour's
+two services using existing images. It never accepts commands, paths or service
+names from the browser. Failed startup/readback triggers a verified rollback when
+possible; interrupted or failed rollback remains visibly unconfirmed. One durable
+operation receipt supports reconnects and duplicate request detection without a
+polling write log. The host helper's small process footprint is outside the two
+container totals. On unsupported hosts (including Docker Desktop) or when helper
+installation fails, the panel explicitly reports controls unavailable.
 
 Evidence queries fetch one capped row at a time. Call and incident evidence retains every analyzer input and observed entity, including measured zeros. Repeated routing context is retained once per distinct context and run, with later samples referencing its source row. Raw archive batches are bounded
 by bytes, legacy JSONL imports have a one-MiB line limit, and compressed evidence

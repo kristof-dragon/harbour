@@ -21,6 +21,7 @@ services:
       HARBOUR_WRITE_INTERVAL_SECONDS: ${HARBOUR_WRITE_INTERVAL_SECONDS:-1}
     volumes:
       - harbour-data:/data
+      - ./.harbour-control:/run/harbour-control:ro
     restart: unless-stopped
     read_only: true
     tmpfs:

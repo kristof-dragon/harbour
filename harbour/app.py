@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from . import __version__, auth, call_endpoint, call_tests, collector_setup, cpu, demo, history, install_artifacts, logins, network, network_incidents, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
-from . import network_diagnostics, network_reports, footprint, bridge, resource_limits
+from . import network_diagnostics, network_reports, footprint, bridge, resource_limits, resource_settings
 
 pool = ThreadPoolExecutor(max_workers=4)
 resource_workers = None
@@ -400,6 +400,7 @@ app.include_router(call_endpoint.router)
 app.include_router(network_diagnostics.router)
 app.include_router(network_reports.router)
 app.include_router(footprint.router)
+app.include_router(resource_settings.router)
 app.include_router(bridge.router)
 
 
