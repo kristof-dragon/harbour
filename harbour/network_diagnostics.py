@@ -4,17 +4,16 @@ import gzip
 import io
 import json
 import tempfile
-import threading
 import time
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from . import __version__, call_evidence, call_tests, connection_analysis as analysis, network, network_incidents, store
+from . import __version__, call_evidence, call_tests, connection_analysis as analysis, network, network_incidents, store, resource_limits as resources
 from .auth import authenticated
 
 router = APIRouter(prefix='/api/servers/{id_}/network/analysis')
-analysis_lock = threading.RLock()
+analysis_lock = resources.processing_lock
 MAX_REPORTS = 200
 MAX_CACHE_BYTES = 128 * 1024 * 1024
 GUIDE = (
@@ -44,7 +43,7 @@ def summarize(report):
 
 
 def persist(report, source_digest):
-    payload = gzip.compress(json.dumps(report, allow_nan=False, separators=(',', ':')).encode())
+    payload = resources.pack(report)
     if len(payload) > 8 * 1024 * 1024:
         raise ValueError('Derived report exceeded its 8 MiB compressed limit')
     with store.db() as con:
@@ -83,37 +82,45 @@ def report(server, source, identity):
         cached = store.one('SELECT * FROM network_diagnostics WHERE server_id=? AND source=? AND source_id=?', (server['id'], source, identity))
         if source == 'call':
             row = store.one('SELECT * FROM network_call_tests WHERE server_id=? AND id=?', (server['id'], identity))
-            evidence = call_evidence.read(identity) if row else None
+            try:
+                evidence = call_evidence.read(identity) if row else None
+            except resources.BudgetExceeded:
+                if cached and cached['version']==analysis.VERSION:
+                    return resources.unpack(cached['payload'])
+                raise
             if row and row['status'] == 'running':
                 raise HTTPException(409, 'This call test is still collecting; analysis is available after it finishes.')
             if row and evidence:
                 test = call_tests.public(row, True)
                 fingerprint = call_digest(test, evidence)
                 if cached and cached['version'] == analysis.VERSION and cached['digest'] == fingerprint:
-                    return json.loads(gzip.decompress(cached['payload']))
+                    return resources.unpack(cached['payload'])
                 # Rebuild only from saved evidence; never fetch a remote endpoint.
                 evidence['analysis'] = call_evidence.analyze(test, evidence)
                 result = analysis.analyze_call(test, evidence, server)
                 persist(result, fingerprint)
                 return result
         else:
-            row = store.one('SELECT * FROM network_events WHERE server_id=? AND id=?', (server['id'], identity))
+            row = store.evidence_row('network_events','archive', 'server_id=? AND id=?', (server['id'], identity))
             if row:
                 bundle = network.incident_bundle(server, row)
                 fingerprint = analysis.digest(bundle)
                 if cached and row['complete'] and cached['version'] == analysis.VERSION and cached['digest'] == fingerprint:
-                    return json.loads(gzip.decompress(cached['payload']))
+                    return resources.unpack(cached['payload'])
                 result = analysis.analyze_incident(bundle, server)
                 if row['complete']:
                     persist(result, fingerprint)
                 return result
         if cached:
-            return json.loads(gzip.decompress(cached['payload']))
+            return resources.unpack(cached['payload'])
         raise HTTPException(404, 'Saved evidence is unavailable. Complete a test or collect its evidence from Call tests.')
 
 
 def inventory(server, since, until):
     id_ = server['id']
+    total = store.one('SELECT coalesce(sum(n),0) AS bytes FROM (SELECT length(CAST(summary AS BLOB)) AS n FROM network_diagnostics WHERE server_id=? AND measured<=? AND measured>=? ORDER BY measured DESC LIMIT 200)',(id_,until,since))
+    if total['bytes']>resources.budget():
+        raise resources.BudgetExceeded()
     cached = store.rows('SELECT source,source_id,version,summary FROM network_diagnostics WHERE server_id=? AND measured<=? AND measured>=? ORDER BY measured DESC LIMIT 200', (id_, until, since))
     reports = {r['source']+':'+r['source_id']: json.loads(r['summary']) for r in cached}
     sources = []
@@ -135,6 +142,7 @@ def inventory(server, since, until):
 
 
 @router.get('')
+@resources.bounded
 def listing(id_: str, hours: int = Query(168, ge=1, le=8760), until: float | None = Query(None, ge=0, allow_inf_nan=False),
             prepare: bool = False, user=Depends(authenticated)):
     server = network.host(id_)
@@ -197,7 +205,7 @@ def handoff(server, reports, selection=None):
                                       (server['id'], summary['source'], summary['source_id']))
                     if saved is None:
                         raise HTTPException(409, 'A selected report expired during export; refresh analysis.')
-                    data = json.loads(gzip.decompress(saved['payload']))
+                    data = resources.unpack(saved['payload'])
                     if summarize(data) != summary:
                         raise HTTPException(409, 'A report changed during export; refresh analysis.')
                     if index:
@@ -215,6 +223,7 @@ def pick_server(server):
 
 
 @router.get('/download')
+@resources.bounded
 def download(id_: str, hours: int = Query(168, ge=1, le=8760), until: float | None = Query(None, ge=0, allow_inf_nan=False), user=Depends(authenticated)):
     server = network.host(id_)
     end = until if until is not None else time.time()
@@ -231,10 +240,13 @@ def download(id_: str, hours: int = Query(168, ge=1, le=8760), until: float | No
 
 
 @router.get('/{source}/{identity}')
+@resources.bounded
 def detail(id_: str, source: Literal['call', 'incident'], identity: str, download: bool = False, user=Depends(authenticated)):
     server = network.host(id_)
     try:
         data = report(server, source, identity)
+    except resources.BudgetExceeded:
+        raise
     except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         raise HTTPException(422, 'Stored evidence could not be analyzed; inspect its original export.')
     if download:

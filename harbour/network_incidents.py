@@ -11,7 +11,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 
-from . import incident_brief, incidents, network, store
+from . import incident_brief, incidents, network, store, resource_limits as resources
 from .auth import authenticated
 
 router = APIRouter(prefix='/api/servers/{id_}/network/incidents')
@@ -78,6 +78,7 @@ def compressed_attachment(data, filename):
 
 
 @router.get('')
+@resources.bounded
 def collection(id_: str, limit: int = Query(default=200, ge=1, le=200),
                offset: int = Query(default=0, ge=0, le=1000000),
                kind: Literal['all', 'automatic', 'manual'] = 'all',
@@ -102,15 +103,22 @@ def collection(id_: str, limit: int = Query(default=200, ge=1, le=200),
     # Load one archive at a time: 200 large windows must not all live in RAM.
     events = store.rows('SELECT id FROM network_events WHERE '+where+' ORDER BY measured DESC,id DESC LIMIT ? OFFSET ?',
                         (*values, limit, offset))
-    reports, errors = [], []
+    reports, errors, retained = [], [], 0
     for identity in events:
-        event = store.one('SELECT * FROM network_events WHERE id=? AND server_id=?', (identity['id'], id_))
-        if event is None:
-            continue
         try:
-            reports.append(report(server, event))
+            event = store.evidence_row('network_events','archive', 'id=? AND server_id=?', (identity['id'], id_))
+            if event is None:
+                continue
+            value=report(server,event)
+            size=resources.size(value)
+            if retained+size>resources.budget()*2:
+                raise resources.BudgetExceeded()
+            reports.append(value)
+            retained+=size
+        except resources.BudgetExceeded as exc:
+            errors.append({'id':identity['id'],'message':str(exc)})
         except (ValueError, TypeError, KeyError, RecursionError):
-            errors.append({'id': event['id'], 'message': 'Stored evidence could not be parsed. Download the original incident to inspect it.'})
+            errors.append({'id': identity['id'], 'message': 'Stored evidence could not be parsed. Download the original incident to inspect it.'})
     result = {'analysis_schema': 1, 'analyzer_version': incidents.VERSION, 'generated_at': time.time(),
               'reports': reports, 'patterns': incidents.patterns(reports), 'errors': errors,
               'total': total, 'offset': offset, 'limit': limit, 'has_more': offset+len(events) < total,
@@ -124,9 +132,10 @@ def collection(id_: str, limit: int = Query(default=200, ge=1, le=200),
 
 
 @router.get('/{event_id}')
+@resources.bounded
 def detail(id_: str, event_id: str, download: bool = False, user=Depends(authenticated)):
     server = network.host(id_)
-    event = store.one('SELECT * FROM network_events WHERE id=? AND server_id=?', (event_id, id_))
+    event = store.evidence_row('network_events','archive', 'id=? AND server_id=?', (event_id, id_))
     if not event:
         raise HTTPException(404, 'Incident not found')
     try:
@@ -137,11 +146,12 @@ def detail(id_: str, event_id: str, download: bool = False, user=Depends(authent
 
 
 @router.get('/{event_id}/brief')
+@resources.bounded
 def brief(id_: str, event_id: str, format: Literal['markdown', 'json'] = 'markdown',
           examples: int = Query(default=3, ge=1, le=6), include_review: bool = True,
           download: bool = False, user=Depends(authenticated)):
     server = network.host(id_)
-    event = store.one('SELECT * FROM network_events WHERE id=? AND server_id=?', (event_id, id_))
+    event = store.evidence_row('network_events','archive', 'id=? AND server_id=?', (event_id, id_))
     if not event:
         raise HTTPException(404, 'Incident not found')
     if examples not in (1, 3, 6):

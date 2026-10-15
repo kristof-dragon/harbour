@@ -1,6 +1,8 @@
 services:
   harbour:
     build: .
+    mem_limit: ${HARBOUR_WEB_MEMORY_MIB:-768}m
+    memswap_limit: ${HARBOUR_WEB_MEMORY_MIB:-768}m
     ports:
       - "${HARBOUR_PORT:-8080}:8080"
     environment:
@@ -13,6 +15,10 @@ services:
       HARBOUR_ORIGIN: ${HARBOUR_ORIGIN:-http://localhost:8080}
       HARBOUR_TRUSTED_PROXIES: ${HARBOUR_TRUSTED_PROXIES:-}
       HARBOUR_DATA: /data
+      HARBOUR_RESOURCE_PROFILE: ${HARBOUR_RESOURCE_PROFILE:-standard}
+      HARBOUR_PROCESSING_MIB: ${HARBOUR_PROCESSING_MIB:-32}
+      HARBOUR_BUFFER_TOTAL_MIB: ${HARBOUR_BUFFER_TOTAL_MIB:-128}
+      HARBOUR_WRITE_INTERVAL_SECONDS: ${HARBOUR_WRITE_INTERVAL_SECONDS:-1}
     volumes:
       - harbour-data:/data
     restart: unless-stopped
@@ -30,12 +36,18 @@ services:
       retries: 3
   network-recorder:
     build: .
+    mem_limit: ${HARBOUR_RECORDER_MEMORY_MIB:-768}m
+    memswap_limit: ${HARBOUR_RECORDER_MEMORY_MIB:-768}m
     init: true
     stop_grace_period: 45s
     command: ["python", "-m", "harbour.network_recorder"]
     environment:
       HARBOUR_SECRET: ${HARBOUR_SECRET:?Set HARBOUR_SECRET in .env}
       HARBOUR_DATA: /data
+      HARBOUR_RESOURCE_PROFILE: ${HARBOUR_RESOURCE_PROFILE:-standard}
+      HARBOUR_PROCESSING_MIB: ${HARBOUR_PROCESSING_MIB:-32}
+      HARBOUR_BUFFER_TOTAL_MIB: ${HARBOUR_BUFFER_TOTAL_MIB:-128}
+      HARBOUR_WRITE_INTERVAL_SECONDS: ${HARBOUR_WRITE_INTERVAL_SECONDS:-1}
       SQLITE_TMPDIR: /data/sqlite-tmp
     volumes:
       - harbour-data:/data

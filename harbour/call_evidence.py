@@ -1,18 +1,16 @@
 """Local, bounded correlation of call-test evidence. No external analysis service."""
-import gzip
 import bisect
 import json
 import time
-import threading
 from collections import defaultdict
 
 from fastapi import HTTPException
 
-from . import call_endpoint, incidents, network, store
+from . import call_endpoint, incidents, network, store, resource_limits as resources
 
 MAX_BYTES = 128 * 1024 * 1024
 MAX_SAMPLES = 300000
-collection_lock = threading.Lock()
+collection_lock = resources.processing_lock
 
 
 def initialize():
@@ -39,8 +37,10 @@ def synchronize(endpoint_id):
 
 
 def read(test_id):
-    row = store.one('SELECT payload FROM call_test_evidence WHERE test_id=?', (test_id,))
-    return json.loads(gzip.decompress(row['payload'])) if row else None
+    row = store.one('SELECT CASE WHEN length(payload)<=? THEN payload END AS payload FROM call_test_evidence WHERE test_id=?', (resources.budget(),test_id))
+    if row and row['payload'] is None:
+        raise resources.BudgetExceeded()
+    return resources.unpack(row['payload']) if row else None
 
 
 def compact(result):
@@ -210,7 +210,7 @@ def _collect(test):
     endpoint_id = test['config'].get('endpoint_id')
     if endpoint_id:
         try:
-            data = json.loads(call_endpoint.fetch(endpoint_id, '/runs/' + test['id']))
+            data = json.loads(call_endpoint.fetch(endpoint_id, '/runs/' + test['id'], min(call_endpoint.LIMIT, resources.budget()//2)))
             if not isinstance(data, dict) or data.get('test_id') != test['id'] or not isinstance(data.get('records'), list) or len(data['records']) > 2:
                 raise ValueError()
             for record in data['records']:
@@ -232,6 +232,8 @@ def _collect(test):
     server = network.host(test['server_id'])
     start, end = test['created'], test['finished'] or time.time()
     rows, truncated = network.samples(test['server_id'], start, end, MAX_SAMPLES)
+    if truncated:
+        raise resources.BudgetExceeded()
     # Merge earlier snapshots so a retry after recorder retention never erases
     # already collected local evidence. Stable DB row IDs identify snapshots.
     indexed = {r['id']: r for r in (previous['local']['samples'] if previous else [])}
@@ -239,8 +241,8 @@ def _collect(test):
     rows, used = [], 0
     for row in sorted(indexed.values(), key=lambda r: (r['at'], r['id'])):
         used += len(json.dumps(row).encode())
-        if len(rows) >= MAX_SAMPLES or used > MAX_BYTES:
-            truncated = True; break
+        if len(rows) >= MAX_SAMPLES or used > min(MAX_BYTES, resources.budget()//2):
+            raise resources.BudgetExceeded()
         rows.append(row)
     settings = previous['local']['settings'] if previous else network.config(test['server_id'])[0]
     status = store.one('SELECT updated,payload FROM network_status WHERE server_id=?', (test['server_id'],))
@@ -252,7 +254,7 @@ def _collect(test):
     if previous:
         evidence['local']['runs'] = list({r['id']: r for r in [*previous['local']['runs'], *evidence['local']['runs']]}.values())
     evidence['analysis'] = analyze(test, evidence)
-    payload = gzip.compress(json.dumps(evidence, allow_nan=False).encode())
+    payload = resources.pack(evidence)
     store.execute('INSERT INTO call_test_evidence(test_id,payload) SELECT id,? FROM network_call_tests WHERE id=? '
                   'ON CONFLICT(test_id) DO UPDATE SET payload=excluded.payload', (payload, test['id']))
     if test.get('status') != 'running':

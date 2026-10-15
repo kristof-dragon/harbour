@@ -41,6 +41,18 @@ def rows(sql, args=()):
         return [dict(r) for r in con.execute(sql, args).fetchall()]
 
 
+def evidence_row(table, column, where, args):
+    from . import resource_limits as resources
+    with db() as con:
+        con.execute('BEGIN')
+        size = con.execute(f'SELECT length(CAST({column} AS BLOB)) FROM {table} WHERE {where}', args).fetchone()
+        if size is None:
+            return None
+        if (size[0] or 0)>resources.budget():
+            raise resources.BudgetExceeded()
+        return dict(con.execute(f'SELECT * FROM {table} WHERE {where}', args).fetchone())
+
+
 def one(sql, args=()):
     results = rows(sql, args)
     return results[0] if results else None

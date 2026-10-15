@@ -16,7 +16,7 @@ os.environ['HARBOUR_PASSWORD'] = 'synthetic-process-test-password'
 os.environ['FIRST_RUN'] = 'true'
 os.environ['HARBOUR_DEMO'] = 'false'
 
-from harbour import network, network_probe, network_recorder, network_runtime, store
+from harbour import network, network_probe, network_recorder, network_runtime, store, resource_limits
 
 
 def pump(pipeline, duration, status=None):
@@ -54,6 +54,8 @@ def check():
     with tempfile.TemporaryDirectory(prefix='harbour-process-') as directory:
         store.DATA, store.DEMO = Path(directory), False
         store.initialize(); network.initialize()
+        from harbour import network_diagnostics
+        network_diagnostics.initialize()
         store.execute('''INSERT INTO servers(id,name,host,port,username,fingerprint,server_type)
                          VALUES ('example','Example router','127.0.0.1',9,'example','EXAMPLE','openwrt')''')
         config = {**network.DEFAULTS, 'enabled':True, 'interval':.25,
@@ -94,7 +96,7 @@ def check():
             pid = worker.producers['probe'].process.pid
             config['buffer_mib'] = 256
             store.execute('UPDATE network_settings SET config=? WHERE server_id=?', (json.dumps(config),'example'))
-            until(pipeline, lambda:worker.buffer.limit == 256*1024*1024, status=status)
+            until(pipeline, lambda:worker.buffer.limit == min(256*1024*1024,resource_limits.buffer_bytes()), status=status)
             assert worker.producers['probe'].process.pid == pid
             os.kill(pid, signal.SIGSTOP); stopped.append(pid)
             pump(pipeline, 1, status)

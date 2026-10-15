@@ -1257,6 +1257,11 @@ def harbour_cgroup_footprint(directory):
         boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
         memory = int((root / 'memory.current').read_text())
         memory_stat = dict(line.split() for line in (root / 'memory.stat').read_text().splitlines())
+        def optional_counter(name):
+            try:
+                return int((root/name).read_text())
+            except (OSError, ValueError):
+                return None
         devices = []
         try:
             lines = (root / 'io.stat').read_text().splitlines()
@@ -1277,7 +1282,12 @@ def harbour_cgroup_footprint(directory):
         certain = lines is not None and all(d['leaves'] is not None and set(d['leaves']) <= known for d in devices)
         return {'scope': 'cgroup', 'identity': boot+':'+str(root.stat().st_ino),
                 'sampled_at': time.time(), 'clock': time.monotonic(),
-                'memory_bytes': memory, 'cache_bytes': int(memory_stat.get('file', 0)),
+                'memory_bytes': memory, 'cache_bytes': int(memory_stat['file']) if 'file' in memory_stat else None,
+                'app_bytes': int(memory_stat['anon']) if 'anon' in memory_stat else None,
+                'kernel_bytes': int(memory_stat['kernel']) if 'kernel' in memory_stat else None,
+                'dirty_cache_bytes': int(memory_stat['file_dirty']) if 'file_dirty' in memory_stat else None,
+                'writeback_bytes': int(memory_stat['file_writeback']) if 'file_writeback' in memory_stat else None,
+                'memory_limit_bytes': optional_counter('memory.max'), 'memory_peak_bytes': optional_counter('memory.peak'),
                 'read_bytes': sum(d['read_bytes'] for d in selected) if certain else None,
                 'write_bytes': sum(d['write_bytes'] for d in selected) if certain else None,
                 'devices': devices, 'io_available': certain,

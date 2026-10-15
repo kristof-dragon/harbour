@@ -211,10 +211,14 @@ class Pipeline:
                 self.active[id_] = worker
 
     def tick(self):
+        from . import resource_limits as resources
         pending, self.config_pending = self.config_pending, None
         if pending is not None:
             self.configure(pending)
+        share = resources.buffer_bytes()//max(1,len(self.workers))
+        excess = sum(max(0,w.buffer.size-share) for w in self.workers.values())
         for worker in list(self.workers.values()):
+            worker.buffer.limit = min(worker.settings['buffer_mib']*1024*1024, max(0,share-excess))
             worker.poll()
         if not self.writer.is_alive():
             self.writer.join()
@@ -236,9 +240,9 @@ class Pipeline:
                 if run_id in self.workers:
                     self.workers[run_id].writer_error = True
             self.inflight = None
-            # Drain a backlog promptly, but keep normal flushes to one per second.
+            # Drain a backlog promptly, but use the configured interval for normal commits.
             backlog = any(len(w.buffer.rows) > 256 or w.buffer.size > 1024*1024 for w in self.workers.values())
-            cadence = max(.05, 1/max(1, (len(self.workers)+3)//4))
+            cadence = max(.05, resources.flush_seconds()/max(1, (len(self.workers)+3)//4))
             self.next_write = time.monotonic()+(.05 if backlog or self.shutting_down else cadence)
         for run_id, worker in list(self.workers.items()):
             if worker.retiring and not worker.producers and not worker.buffer.rows:

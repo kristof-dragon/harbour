@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from . import __version__, auth, call_endpoint, call_tests, collector_setup, cpu, demo, history, install_artifacts, logins, network, network_incidents, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
-from . import network_diagnostics, network_reports, footprint, bridge
+from . import network_diagnostics, network_reports, footprint, bridge, resource_limits
 
 pool = ThreadPoolExecutor(max_workers=4)
 resource_workers = None
@@ -401,6 +401,11 @@ app.include_router(network_diagnostics.router)
 app.include_router(network_reports.router)
 app.include_router(footprint.router)
 app.include_router(bridge.router)
+
+
+@app.exception_handler(resource_limits.BudgetExceeded)
+async def processing_budget_error(request, exc):
+    return JSONResponse(status_code=413, content={'detail':str(exc)})
 
 
 @app.exception_handler(RequestValidationError)

@@ -81,7 +81,7 @@ never establishes root cause or actual FaceTime/Teams/Zoom call quality.
 HTML is escaped, authenticated, private and printable using browser Print / Save
 as PDF. It uses embedded CSS and no server-side PDF software. Readers can view
 reports; administrators configure processing or queue runs. Custom ranges are
-limited to 366 dates and 128 MiB of decoded report content; individual days have
+limited to 366 dates and the configured processing allowance of decoded report content; individual days have
 bounded storage/processing allowances, with a visible error and protected raw
 sources if those are exceeded. Detailed year-long exports may require smaller
 ranges.
@@ -93,3 +93,76 @@ archive checkpoint failures/CRC errors, publication failure, cleanup protection,
 weighted totals, authorization and escaping. Browser tests exercise date selection,
 refresh preservation, processing settings, mobile layout and print styles.
 Live-host processing throughput is separate from these local checks.
+
+## Memory limits and small boards
+
+Containers now have finite memory limits, including their child processes and
+file cache. Defaults are 768 MiB each for web and recorder. Container swap is
+disabled by setting Docker's combined memory-and-swap limit equal to memory.
+The 128 MiB recorder setting is a **total encoded payload buffer budget**;
+per-router allowances share it, including retiring workers. Python objects,
+IPC, analysis, kernel memory and file cache are additional, within the container
+limit. Queued readings are still acknowledged only after commit.
+
+Select the small-board profile on the deployment host:
+
+```sh
+python3 scripts/resource_profile.py sbc-1g
+python3 scripts/start.py
+```
+
+This preserves the existing secret, port and connection configuration. It sets
+320 MiB web + 384 MiB recorder limits (704 MiB combined), leaving 320 MiB of a
+1 GiB machine for the OS and other services; real usable RAM may be smaller.
+It uses an 8 MiB encoded processing allowance, a shared 16 MiB recorder payload
+buffer, and ten-second database batches. Existing router settings are constrained
+at runtime to probes no faster than two seconds, telemetry no faster than ten
+seconds, and no extra router-origin probes. Diagnostic counters, all interfaces,
+all clients, queues and timestamps are kept; repeated inventory is omitted.
+The effective profile and cadence appear in the recorder status. Longer telemetry
+intervals cannot resolve short events; the analyzer retains its timing limits.
+A sudden failure can lose the currently unsaved batch (normally up to ten seconds).
+
+Return to full capture with `python3 scripts/resource_profile.py standard` and
+restart. The profile command accepts `--web-memory-mib`, `--recorder-memory-mib`,
+`--processing-mib`, `--buffer-total-mib` and `--write-interval-seconds` overrides.
+The equivalent `HARBOUR_*` keys are documented in `.env.example`. Startup validates
+headroom and rejects an inconsistent small-board configuration. Limits are not
+automatically tuned to an arbitrary number of monitored hosts or concurrent tests.
+
+Evidence queries fetch one capped row at a time. Raw archive batches are bounded
+by bytes, legacy JSONL imports have a one-MiB line limit, and compressed evidence
+has a bounded decompression allowance before JSON parsing. Processing checks
+retained object size during accumulation and encodes incrementally. Large web
+requests share a processing lock. These input allowances are distinct from heap
+usage; Docker enforces the independent total memory ceiling. Oversized requests
+return a clear error instead of loading an entire dataset. Failed report jobs
+withhold raw cleanup. Existing oversized call recordings can still be downloaded
+as their original compressed evidence, without inflating it on the server.
+
+## Meaning of the footprint meter
+
+Memory is an instantaneous measurement. Application (anonymous) memory, file
+cache and kernel memory are separated. Recorder payload buffers are **included**
+in application memory and must not be added again. Dirty cache and writeback are
+shown separately; both are subsets of cache. Component limits and peaks since
+container creation are shown where the kernel exposes them. Missing counters
+remain unavailable.
+
+Disk rates describe the latest compatible interval, normally 30 seconds. There
+is no extrapolated “writes per day” figure. A separate ledger stores measured UTC
+daily read/write totals with observed coverage for 90 days. Deployment coverage
+requires both components in the same interval, so disjoint observations are not
+presented as continuous coverage. Imports, tests and maintenance are included.
+Midnight-crossing intervals are apportioned by elapsed time, not attributed to an
+invented exact write time. Counter replacement, long gaps and clock steps do not
+create traffic or erase previously recorded days.
+
+The ledger is `footprint.sqlite3` on the persistent data volume, checkpointed once
+every five minutes and at clean shutdown. A crash can lose up to five minutes of
+unsaved observations. The database-size baseline also survives restarts. The
+meter reports checkpoint failures. Historical observations from versions which
+kept counters only in RAM cannot be reconstructed after their counters reset.
+Disk counters measure kernel-charged block writes, excluding other host services,
+external Docker logs and device-internal flash write amplification. They are not
+a claim about an SD card's lifetime.

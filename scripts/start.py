@@ -80,6 +80,11 @@ def compose(*args, capture=False):
 def start():
     path = ROOT / ".env"
     original, values = read_env(path)
+    if __package__:
+        from .resource_profile import validate
+    else:
+        from resource_profile import validate
+    validate(values)
     first_run = values["FIRST_RUN"].lower() == "true"
     if first_run and not all(values.get(k) for k in BOOTSTRAP_KEYS - {"HARBOUR_PASSWORD"}):
         raise RuntimeError("First-run fields are incomplete. Use scripts/setup_env.py for a new installation.")

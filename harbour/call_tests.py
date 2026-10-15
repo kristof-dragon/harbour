@@ -18,6 +18,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from . import call_profiles, logins, network, store
+from . import resource_limits as resources
 from .auth import admin, authenticated
 
 router = APIRouter(prefix='/api/servers/{id_}/network/call-tests')
@@ -377,6 +378,7 @@ def test_row(id_, test_id, full=True):
 
 
 @router.get('/{test_id}/analysis')
+@resources.bounded
 def analysis(id_: str, test_id: str, user=Depends(authenticated)):
     from . import call_evidence
     test = test_row(id_, test_id, full=False)
@@ -387,6 +389,7 @@ def analysis(id_: str, test_id: str, user=Depends(authenticated)):
 
 
 @router.post('/{test_id}/collect')
+@resources.bounded
 def collect(id_: str, test_id: str, user=Depends(admin)):
     from . import call_evidence
     test = test_row(id_, test_id)
@@ -397,12 +400,16 @@ def collect(id_: str, test_id: str, user=Depends(admin)):
 
 
 @router.get('/{test_id}/export')
+@resources.bounded
 def aggregate_export(id_: str, test_id: str, user=Depends(authenticated)):
     from . import call_evidence, network_incidents
     test = test_row(id_, test_id)
     if test['status'] == 'running':
         raise HTTPException(409, 'Wait for the test to finish before exporting')
-    evidence = call_evidence.read(test_id)
+    try:
+        evidence = call_evidence.read(test_id)
+    except call_evidence.resources.BudgetExceeded:
+        return call_evidence.resources.saved_download('call_test_evidence','test_id',test_id,'harbour-saved-evidence-'+test_id+'.json.gz')
     return network_incidents.compressed_attachment(
         {'schema': 1, 'kind': 'harbour-call-flow-evidence', 'exported_at': time.time(),
          'test': test, 'evidence': evidence,

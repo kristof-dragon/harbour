@@ -86,8 +86,8 @@ collected by The Bridge yet.
 Open **Menu → Harbour footprint** as an administrator to inspect the current
 deployment. The view separates:
 
-- **Deployment components:** memory (including file cache), disk read/write rates,
-  observed windows and projected daily writes for Harbour web/workers and the
+- **Deployment components:** separate application memory, file cache and recorder buffers,
+  recent disk rates and saved daily measured totals with coverage for Harbour web/workers and the
   network recorder. Dedicated Linux cgroup v2 counters include child processes.
   A process-only fallback is labelled partial; missing counters stay unavailable.
 - **Load added by each server:** serialized incoming resource/login data and
@@ -104,18 +104,14 @@ deployment. The view separates:
 The sampler runs every 30 seconds; the open view refreshes every 15 seconds.
 Remote measurements follow the host's monitoring interval and become unavailable
 when stale, paused or reconfigured. Rates need two samples and reset after counter
-resets, process/service replacement or a long gap. Baselines are held in RAM for
-up to 24 hours and restart with Harbour; no footprint history is written to SQLite.
+resets, process/service replacement or a long gap. Daily counter deltas and the file-size baseline are checkpointed every five minutes
+and at clean shutdown, surviving restarts. History covers 90 days; gaps stay explicit.
 Measurements do not scan retained history. The database file-size change is
 shown separately because growth is not the same as bytes written.
 
-Daily figures extrapolate the observed average, **not** a measured full day or an
-SD-card lifetime prediction. Observe representative tests, retention and archive
-activity. Device-internal write amplification, unrelated host services and
-external Docker/system logging are outside these counters. Backing device
-counters are used to avoid double-counting stacked storage; ambiguous device
-coverage remains unavailable. Update both Compose services to obtain complete
-deployment coverage.
+Daily totals are measured during the shown coverage, never extrapolated from a
+startup burst. Memory limits and a low-write `sbc-1g` profile are configurable;
+see [resource profiles and meter definitions](harbour/REPORTS.md#memory-limits-and-small-boards).
 
 SQLite remains the default database. More reads/writes alone do not establish a
 need for another engine: measure sustained writer contention and reduce needless

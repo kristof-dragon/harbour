@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import store
+from . import store, resource_limits as resources
 from .auth import admin, authenticated
 
 router = APIRouter(prefix='/api/servers/{id_}/network')
@@ -16,7 +16,7 @@ DEFAULTS = {'enabled': False, 'interval': 1.0, 'targets': ['1.1.1.1', '8.8.8.8']
             'router_probes': True, 'wan_device': '', 'client_mac': '', 'latency_limit_ms': 150.0,
             'retention_hours': 168, 'max_rows': 0, 'max_payload_mib': 1024,
             'archive_enabled': True, 'archive_retention_days': 90, 'archive_max_mib': 4096,
-            'incident_max_count': 200, 'incident_max_mib': 128, 'buffer_mib': 128}
+            'incident_max_count': 200, 'incident_max_mib': 128, 'buffer_mib': 128, 'telemetry_seconds': 1}
 
 
 def initialize():
@@ -88,6 +88,7 @@ class Settings(BaseModel):
     wan_device: str = Field(default='', max_length=32, pattern=r'^[A-Za-z0-9_.:@-]*$')
     client_mac: str = Field(default='', pattern=r'^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$|^$')
     latency_limit_ms: float = Field(default=150, ge=10, le=10000, allow_inf_nan=False)
+    telemetry_seconds: int = Field(default=1, ge=1, le=60, strict=True)
     buffer_mib: int = Field(default=128, ge=8, le=4096, strict=True)
     retention_hours: int = Field(default=168, ge=1, le=8760, strict=True)
     max_rows: int = Field(default=0, ge=0, le=100000000, strict=True)
@@ -130,7 +131,7 @@ def get(id_: str, user=Depends(authenticated)):
                   recorder_online=bool(row and time.time()-row['updated'] < 10))
     from .network_runtime import read_status
     status.update(read_status(id_))
-    return {'settings': settings, 'revision': revision, 'status': status,
+    return {'settings': settings, 'effective_settings':resources.settings(settings), 'resource_profile':'sbc-1g' if resources.small() else 'standard', 'write_interval_seconds':resources.flush_seconds(), 'total_buffer_bytes':resources.buffer_bytes(), 'revision': revision, 'status': status,
             'device': json.loads(server['snapshot']).get('metrics', {}).get('openwrt'),
             'events': store.rows('SELECT id,measured,label,automatic,complete FROM network_events WHERE server_id=? ORDER BY measured DESC LIMIT 50', (id_,)),
             'retention': {'seconds': settings['retention_hours']*3600, 'max_rows': settings['max_rows'],
@@ -155,7 +156,7 @@ def save(id_: str, body: Settings, user=Depends(admin)):
     if store.DEMO:
         raise HTTPException(400, 'Live network recording is disabled in demo mode')
     previous, revision = config(id_)
-    probe_fields = ('enabled', 'interval', 'targets', 'router_probes', 'wan_device', 'client_mac', 'latency_limit_ms')
+    probe_fields = ('enabled', 'interval', 'targets', 'router_probes', 'wan_device', 'client_mac', 'latency_limit_ms', 'telemetry_seconds')
     if not revision or any(previous[key] != getattr(body, key) for key in probe_fields):
         revision = uuid.uuid4().hex
     store.execute('INSERT OR REPLACE INTO network_settings VALUES (?,?,?)',
@@ -164,13 +165,29 @@ def save(id_: str, body: Settings, user=Depends(admin)):
 
 
 def samples(id_, start, end, limit=15000):
-    rows = store.rows('SELECT id,measured,kind,target,payload FROM network_samples WHERE server_id=? AND measured>=? AND measured<=? ORDER BY measured,id LIMIT ?',
-                      (id_, start, end, limit+1))
-    return [{'id': r['id'], 'at': r['measured'], 'kind': r['kind'], 'target': r['target'],
-             **json.loads(r['payload'])} for r in rows[:limit]], len(rows) > limit
+    result, retained = [], 0
+    # Fetch one capped payload at a time; never fetchall a whole call window.
+    with store.db() as con:
+        cursor = con.execute('''SELECT id,measured,kind,target,
+            CASE WHEN length(CAST(payload AS BLOB))<=1048576 THEN payload END AS payload
+            FROM network_samples WHERE server_id=? AND measured>=? AND measured<=?
+            ORDER BY measured,id LIMIT ?''', (id_,start,end,limit+1))
+        for r in cursor:
+            if len(result)>=limit or r['payload'] is None:
+                return result, True
+            row = {'id':r['id'], 'at':r['measured'], 'kind':r['kind'], 'target':r['target'], **json.loads(r['payload'])}
+            if row['kind']=='telemetry':
+                row['metrics'] = resources.telemetry(row.get('metrics',{}))
+                row['evidence_scope'] = 'Diagnostic counters; repeated inventory omitted. Raw recording retention is configured separately.'
+            retained += resources.size(row)
+            if retained > resources.budget()*2:
+                return result, True
+            result.append(row)
+    return result, False
 
 
 @router.get('/samples')
+@resources.bounded
 def readings(id_: str, seconds: int = Query(default=120, ge=10, le=900), user=Depends(authenticated)):
     host(id_)
     end = time.time()
@@ -197,9 +214,13 @@ def marker(id_: str, body: Marker, user=Depends(admin)):
 
 
 @router.get('/export/{event_id}')
+@resources.bounded
 def export(id_: str, event_id: str, user=Depends(authenticated)):
     server = host(id_)
-    event = store.one('SELECT * FROM network_events WHERE id=? AND server_id=?', (event_id, id_))
+    try:
+        event = store.evidence_row('network_events','archive', 'id=? AND server_id=?', (event_id, id_))
+    except resources.BudgetExceeded:
+        return resources.saved_incident_download(id_,event_id)
     if not event:
         raise HTTPException(404, 'Incident not found')
     bundle = incident_bundle(server, event)
@@ -212,6 +233,8 @@ def incident_bundle(server, event):
     from . import call_tests
     id_ = server['id']
     settings, _ = config(id_)
+    if event['archive'] and len(event['archive'].encode())>resources.budget():
+        raise resources.BudgetExceeded()
     if event['archive']:
         bundle = json.loads(event['archive'])
     else:
@@ -320,7 +343,7 @@ def maintain(id_, stop=None):
     settings, _ = config(id_)
     runtime = read_status(id_)
     # A queued reading can still belong to an otherwise finished incident.
-    pending = runtime.get('writer_stalled') or runtime.get('oldest_unsaved_seconds', 0) > 2
+    pending = runtime.get('writer_stalled') or runtime.get('oldest_unsaved_seconds', 0) > resources.flush_seconds()+2
     events = [] if pending else store.rows('SELECT * FROM network_events WHERE server_id=? AND complete=0 AND measured<?', (id_, now-300))
     for event in events:
         rows, truncated = samples(id_, event['measured']-120, event['measured']+300, 60000)

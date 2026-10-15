@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from . import network, report_facts as facts, store
+from . import network, report_facts as facts, store, resource_limits as resources
 from .auth import admin, authenticated
 
 router = APIRouter(prefix='/api/servers/{id_}/network/reports')
@@ -82,11 +82,11 @@ def policy(id_):
 
 
 def pack(value):
-    return gzip.compress(json.dumps(value, allow_nan=False, separators=(',', ':')).encode(), compresslevel=6, mtime=0)
+    return resources.pack(value)
 
 
 def unpack(value):
-    return json.loads(gzip.decompress(value))
+    return resources.unpack(value)
 
 
 def bounds(day, timezone):
@@ -157,13 +157,13 @@ def import_archive(archive, stop=None):
         con.execute('INSERT OR REPLACE INTO report_archives VALUES (?,?,?,?,0)',
                     (archive['id'], archive['server_id'], 0, 0))
         con.execute('DELETE FROM report_chunks WHERE archive_id=?', (archive['id'],))
-    samples, events, runs, settings, ordinal, part = [], [], {}, {}, 0, 0
+    samples, events, runs, settings, ordinal, part, batch_size = [], [], {}, {}, 0, 0, 0
     def flush():
-        nonlocal samples, events, part
+        nonlocal samples, events, part, batch_size
         compact = facts.compact(samples, events, settings, list(runs.values()), archive['id'], ordinal-len(samples)+1)
         with store.db() as con:
             save_chunk(con, archive, 'import:'+str(part), compact)
-        samples, events, part = [], [], part+1
+        samples, events, part, batch_size = [], [], part+1, 0
     if network_archives.path(archive, not archive['complete']).stat().st_size < archive['size']:
         raise ValueError('Archive is shorter than its durable checkpoint; raw evidence retained')
     import io
@@ -180,9 +180,17 @@ def import_archive(archive, stop=None):
     with network_archives.path(archive, not archive['complete']).open('rb') as raw, \
             gzip.GzipFile(fileobj=CheckpointReader(raw, archive['size'])) as compressed, \
             io.TextIOWrapper(compressed, encoding='utf-8') as stream:
-        for line in stream:
+        while True:
+            line = stream.readline(1048577)
+            if not line:
+                break
+            if len(line.encode())>1048576:
+                raise resources.BudgetExceeded()
             if stop and stop.is_set():
                 raise InterruptedError('Processing stopped; raw archive retained')
+            if batch_size+len(line.encode())>resources.batch_bytes():
+                flush()
+            batch_size += len(line.encode())
             row = json.loads(line)
             if row.get('type') == 'context':
                 flush()
@@ -220,13 +228,14 @@ def capture_call(report, con=None):
 
 def capture_missing_calls(id_):
     # Upgrade cached conclusions before their 200-result cache is trimmed.
-    for row in store.rows("SELECT source_id,payload FROM network_diagnostics WHERE server_id=? AND source='call'", (id_,)):
+    for row in store.rows("SELECT source_id FROM network_diagnostics WHERE server_id=? AND source='call'", (id_,)):
         if not store.one('SELECT 1 FROM report_sources WHERE server_id=? AND source_id=?', (id_, row['source_id'])):
-            capture_call(unpack(row['payload']))
+            saved = store.evidence_row('network_diagnostics','payload', "server_id=? AND source='call' AND source_id=?", (id_,row['source_id']))
+            capture_call(unpack(saved['payload']))
     for row in store.rows("SELECT id,created,finished,status,config,summary FROM network_call_tests WHERE server_id=? AND status!='running'", (id_,)):
         if store.one('SELECT 1 FROM report_sources WHERE server_id=? AND source_id=? AND verified=1', (id_, row['id'])):
             continue
-        failed = False
+        failed = bool(json.loads(store.one('SELECT result FROM network_call_tests WHERE id=?',(row['id'],))['result']).get('evidence_error'))
         if store.one('SELECT 1 FROM call_test_evidence WHERE test_id=?', (row['id'],)):
             try:
                 from . import network_diagnostics
@@ -250,13 +259,19 @@ def capture_missing_calls(id_):
 def compile_day(id_, day, cfg):
     start, end = bounds(day, cfg['timezone'])
     minutes, markers, manifests = {}, {}, {}
-    invalid = 0
+    invalid, retained = 0, 0
     with store.db() as con:
         cursor = con.execute('''SELECT c.*,a.id,a.size,a.through FROM report_chunks c
           JOIN report_archives a ON a.id=c.archive_id WHERE a.server_id=? AND a.valid=1
           AND c.start<? AND c.end>? ORDER BY c.start,c.archive_id,c.part''', (id_, end, start))
         for row in cursor:
             data = unpack(row['payload'])
+            # Conservative additive allowance includes merged-away duplicate facts.
+            retained += resources.size(data)
+            if retained>resources.budget()*4:
+                retained = resources.size(minutes)+resources.size(markers)+resources.size(data)
+                if retained>resources.budget()*2:
+                    raise resources.BudgetExceeded()
             manifests[row['archive_id']] = {'archive_id': row['archive_id'], 'bytes': row['size'], 'sample_count': row['through']}
             invalid += data['invalid_samples']
             for minute in data['minutes']:
@@ -269,7 +284,15 @@ def compile_day(id_, day, cfg):
             for marker in data['markers']:
                 if start <= marker['measured'] < end and marker.get('complete', 0) >= markers.get(marker['id'], {}).get('complete', -1):
                     markers[marker['id']] = marker
-    calls = [unpack(r['payload']) for r in store.rows('SELECT payload FROM report_sources WHERE server_id=? AND start<? AND (end>? OR start>=?) ORDER BY start,source_id', (id_, end, start, start))]
+    calls = []
+    retained = resources.size(minutes)+resources.size(markers)
+    with store.db() as con:
+        for r in con.execute('SELECT payload FROM report_sources WHERE server_id=? AND start<? AND (end>? OR start>=?) ORDER BY start,source_id', (id_,end,start,start)):
+            call = unpack(r['payload'])
+            retained += resources.size(call)
+            if retained>resources.budget()*2:
+                raise resources.BudgetExceeded()
+            calls.append(call)
     minute_rows = sorted(minutes.values(), key=lambda m: m['at'])
     kinds = dict(sum((Counter(m['kinds']) for m in minute_rows), Counter()))
     telemetry = {}
@@ -295,11 +318,6 @@ def compile_day(id_, day, cfg):
     if state and state['retired_before'] and start < state['retired_before']:
         report['quality'].insert(0, 'Earlier evidence in this day was retired under the previous retention/timezone policy; this day is partial.')
     payload = pack(report)
-    if len(payload) > 16*1024*1024 or len(gzip.decompress(payload)) > 64*1024*1024:
-        raise ValueError('Daily report exceeds its bounded processing allowance; raw data remains protected')
-    # Verify serialization before committing the durable replacement.
-    if unpack(payload) != report:
-        raise ValueError('Report verification failed')
     store.execute('INSERT OR REPLACE INTO report_days VALUES (?,?,?,?,?,?,?)',
                   (id_, str(day), cfg['timezone'], start, end, report['generated'], payload))
     return report
@@ -370,7 +388,7 @@ def run_due(id_, stop=None, now=None):
     try:
         from .network_runtime import read_status
         runtime = read_status(id_)
-        if runtime.get('writer_stalled') or runtime.get('oldest_unsaved_seconds', 0) > 2:
+        if runtime.get('writer_stalled') or runtime.get('oldest_unsaved_seconds', 0) > resources.flush_seconds()+2:
             raise ValueError('Waiting for buffered recordings before publishing the daily report')
         # This worker is the sole archive writer. Active legacy files can be
         # imported through their committed byte checkpoint without rotating.
@@ -459,8 +477,8 @@ def period(id_, start, end):
         raise HTTPException(422, 'Choose an inclusive date range of at most 366 days')
     sizes = store.rows('SELECT substr(payload,-4) AS trailer FROM report_days WHERE server_id=? AND timezone=? AND day>=? AND day<=?',
                       (id_, cfg['timezone'], str(start), str(end)))
-    if sum(int.from_bytes(r['trailer'], 'little') for r in sizes) > 128*1024*1024:
-        raise HTTPException(413, 'The detailed evidence for this range exceeds 128 MiB. Choose a shorter range.')
+    if sum(int.from_bytes(r['trailer'], 'little') for r in sizes) > resources.budget():
+        raise HTTPException(413, 'The detailed evidence for this range exceeds the configured processing budget. Choose a shorter range.')
     rows = store.rows('SELECT payload FROM report_days WHERE server_id=? AND timezone=? AND day>=? AND day<=? ORDER BY day',
                       (id_, cfg['timezone'], str(start), str(end)))
     reports = [unpack(row['payload']) for row in rows]
@@ -473,8 +491,13 @@ def period(id_, start, end):
 @router.get('/period')
 def get_period(id_: str, start: dt.date, end: dt.date, format: str = Query(default='html', pattern='^(html|json)$'), user=Depends(authenticated)):
     server = network.host(id_)
-    report = period(id_, start, end)
-    if format == 'json':
-        return report
-    from .report_html import render
-    return HTMLResponse(render(server['name'], report))
+    with resources.processing():
+        try:
+            report = period(id_, start, end)
+            if format == 'json':
+                from fastapi.responses import JSONResponse
+                return JSONResponse(report)
+            from .report_html import render
+            return HTMLResponse(render(server['name'], report))
+        except resources.BudgetExceeded as exc:
+            raise HTTPException(413, str(exc)) from None

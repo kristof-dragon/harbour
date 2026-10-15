@@ -1,11 +1,11 @@
-"""Bounded in-memory footprint measurements; no telemetry writes or DB scans."""
+"""Scoped current measurements and a checkpointed daily counter ledger."""
 import json
 import math
 import threading
 import time
 
 from fastapi import APIRouter, Depends
-from . import store
+from . import store, footprint_history as history, resource_limits as resources
 from .auth import admin
 from .remote_probe import harbour_self_footprint
 
@@ -16,6 +16,23 @@ latest = None
 storage_baseline = None
 
 
+def restore():
+    global storage_baseline
+    try:
+        state = history.load()
+    except (OSError,ValueError,history.sqlite3.Error):
+        history.error = 'Footprint history could not be loaded. Current measurements remain available.'
+        state = None
+    if state:
+        tracks.update(state.get('tracks', {}))
+        inputs.update(state.get('inputs', {}))
+        storage_baseline = state.get('storage_baseline')
+
+
+def checkpoint(force=False):
+    history.save({'tracks':tracks,'inputs':inputs,'storage_baseline':storage_baseline}, force)
+
+
 def finite(value):
     return type(value) in (float, int) and math.isfinite(value) and value >= 0
 
@@ -23,8 +40,8 @@ def finite(value):
 def sanitize(sample):
     sample = sample if isinstance(sample, dict) else {}
     clean = {k: sample.get(k) for k in ('scope', 'identity', 'sampled_at', 'clock', 'memory_bytes', 'cache_bytes',
-                                       'read_bytes', 'write_bytes', 'detail', 'io_available')}
-    for k in ('memory_bytes', 'cache_bytes', 'read_bytes', 'write_bytes', 'clock', 'sampled_at'):
+                                       'read_bytes', 'write_bytes', 'detail', 'io_available', 'app_bytes', 'kernel_bytes', 'dirty_cache_bytes', 'writeback_bytes', 'memory_limit_bytes', 'memory_peak_bytes')}
+    for k in ('memory_bytes', 'cache_bytes', 'read_bytes', 'write_bytes', 'clock', 'sampled_at', 'app_bytes', 'kernel_bytes', 'dirty_cache_bytes', 'writeback_bytes', 'memory_limit_bytes', 'memory_peak_bytes'):
         if not finite(clean[k]):
             clean[k] = None
     for k in ('scope', 'identity', 'detail'):
@@ -43,7 +60,7 @@ def observe(key, sample):
         return clean
     previous = tracks.get(key)
     changed = (not previous or previous['last']['identity'] != clean['identity'] or
-               not 0 <= clean['clock']-previous['last']['clock'] <= 86400)
+               not 0 <= clean['clock']-previous['last']['clock'] <= 600)
     if previous and not changed:
         changed = any((clean[k] is None) != (previous['last'][k] is None) or
                       (clean[k] is not None and clean[k] < previous['last'][k])
@@ -57,6 +74,8 @@ def observe(key, sample):
     if clean['clock']-first['clock'] > 86400:
         first = previous['first'] = dict(last)
     elapsed, recent = clean['clock']-first['clock'], clean['clock']-last['clock']
+    history.add(key, last, clean)
+    clean['recent_window_seconds'] = recent
     clean['window_seconds'] = elapsed
     for name in ('read', 'write'):
         key_bytes = name+'_bytes'
@@ -74,8 +93,9 @@ def ingest(server_id, result, signature, login_only=False):
     # Serialized received data is a useful attribution signal, not disk writes.
     size = len(json.dumps(result, ensure_ascii=True, separators=(',', ':')).encode())
     with lock:
+        restore()
         if (inputs.get(server_id, {}).get('signature') != signature or
-                time.monotonic()-inputs[server_id]['started'] > 86400):
+                time.monotonic()<inputs[server_id]['started']):
             inputs[server_id] = {'bytes': 0, 'samples': 0, 'started': time.monotonic(), 'signature': signature}
         entry = inputs[server_id]
         entry['bytes'] += size
@@ -117,7 +137,8 @@ def collect():
     recorder = read_status('__footprint__')
     now, clock = time.time(), time.monotonic()
     with lock:
-        active_keys = {'web', 'recorder'}
+        restore()
+        active_keys = {'web', 'recorder', 'deployment'}
         components = [{'name': 'Harbour web and workers', **observe('web', harbour_self_footprint())}]
         components.append({'name': 'Network recorder', **observe('recorder', recorder.get('process', {}))})
         seen = set()
@@ -131,10 +152,13 @@ def collect():
             sid = server['id']
             entry = inputs.get(sid)
             ingress = None
-            if entry and server['monitoring_enabled'] and entry['signature'] == connection_signature(server):
+            if entry and clock>=entry['started'] and server['monitoring_enabled'] and entry['signature'] == connection_signature(server):
                 elapsed = clock-entry['started']
                 ingress = {'bytes': entry['bytes'], 'batches': entry['samples'], 'window_seconds': elapsed,
                            'per_second': entry['bytes']/elapsed if elapsed >= 30 else None}
+                key = 'incoming:'+sid; active_keys.add(key)
+                observed = observe(key, {'identity':entry['signature'], 'clock':clock, 'sampled_at':now, 'write_bytes':entry['bytes'], 'scope':'logical'})
+                ingress['per_second'] = observed.get('recent_write_per_second')
             n = recorder.get('servers', {}).get(sid, {})
             if now-(n.get('runtime_updated') or 0) > 5 or n.get('signature') != connection_signature(server) or not server['monitoring_enabled']:
                 n = {}
@@ -149,7 +173,8 @@ def collect():
                 key = sid+':'+name; active_keys.add(key)
                 sample = observe(key, source.get('samples', {}).get(name, {}) if fresh else {})
                 collectors.append({'name': label, 'fresh': fresh, **sample})
-            rows.append({'id': sid, 'name': server['name'], 'server_type': server['server_type'],
+            buffers = {k:n.get(k) for k in ('buffer_bytes','buffer_limit_bytes','buffer_dropped','oldest_unsaved_seconds')}
+            rows.append({'id': sid, 'buffer':buffers, 'name': server['name'], 'server_type': server['server_type'],
                          'incoming': ingress, 'network': network, 'collectors': collectors})
         for mapping in (inputs, remote):
             for key in set(mapping)-{s['id'] for s in servers}:
@@ -161,11 +186,31 @@ def collect():
         total = {field: sum(c[field] for c in usable) if all(c[field] is not None for c in usable) else None
                  for field in ('memory_bytes', 'cache_bytes', 'read_per_second', 'write_per_second')}
         total['complete'] = complete
-        return {'measured_at': now, 'components': components, 'total': total, 'servers': rows, 'storage': storage(),
-                'method': 'OS counters for Harbour web/workers and the network recorder. Cgroup memory includes file cache; process fallback reports RSS only. Rates use the observed window, at most 24 hours, and reset after process/counter changes. Measurements stay in RAM.',
+        for field in ('app_bytes','kernel_bytes','dirty_cache_bytes','writeback_bytes','memory_limit_bytes'):
+            total[field] = sum(c[field] for c in usable) if all(c[field] is not None for c in usable) else None
+        for name in ('read','write'):
+            total['recent_'+name+'_per_second'] = sum(c['recent_'+name+'_per_second'] for c in usable) if all(c['recent_'+name+'_per_second'] is not None for c in usable) else None
+        if all(c['identity'] and c['scope']=='cgroup' and c['read_bytes'] is not None and c['write_bytes'] is not None for c in usable):
+            observe('deployment', {'identity':'|'.join(c['identity'] for c in usable), 'clock':clock, 'sampled_at':now,
+                'read_bytes':sum(c['read_bytes'] for c in usable),'write_bytes':sum(c['write_bytes'] for c in usable),'scope':'cgroup'})
+        else:
+            tracks.pop('deployment',None)
+        total['buffer_bytes'] = sum(s['buffer']['buffer_bytes'] or 0 for s in rows) if recorder.get('process') else None
+        total['buffer_limit_bytes'] = resources.buffer_bytes()
+        for component,key in zip(components, ('web','recorder')):
+            component['history'] = history.summary((key,))
+        for server in rows:
+            server['network_history'] = history.summary(('network:'+server['id'],))
+            server['incoming_history'] = history.summary(('incoming:'+server['id'],))
+        checkpoint()
+        processing = store.one('SELECT count(*) AS n FROM report_state WHERE progress IS NOT NULL')
+        return {'measured_at': now, 'history':history.summary(('deployment',)),
+                'resource_profile':'sbc-1g' if resources.small() else 'standard',
+                'processing_active':bool(processing and processing['n']), 'processing_budget_bytes':resources.budget(), 'components': components, 'total': total, 'servers': rows, 'storage': storage(),
+                'method': 'OS counters for Harbour web/workers and the network recorder. Cgroup memory includes file cache; process fallback reports RSS only. Recent rates use the latest compatible sample interval. UTC daily counter deltas and their observed coverage are saved every five minutes and survive restarts. Counter resets and missing intervals are excluded.',
                 'limits': ['Disk counters exclude unrelated host services, external Docker logging and device-internal flash write amplification.',
                            'Per-server incoming/committed data is logical volume. Shared database reads, indexes, WAL, checkpoints, compaction and archives cannot be assigned as physical I/O to one server.',
-                           'Day projections extrapolate the measured average; they are not a full-day measurement or an SD-card lifetime estimate.',
+                           'Daily totals are measured during the displayed coverage, not extrapolated. Maintenance and imports are included; short recent rates do not predict a typical day or SD-card lifetime.',
                            'Collector counters require readable Linux cgroup v2 service counters. Missing or stale counters are unavailable, not zero. OpenWrt SSH-only router process I/O is unavailable.']}
 
 
@@ -173,6 +218,7 @@ def reset():
     global latest, storage_baseline
     with lock:
         inputs.clear(); remote.clear(); tracks.clear()
+        history.reset()
         latest = storage_baseline = None
 
 
@@ -187,6 +233,8 @@ def run(stop):
             # Diagnostics must never stop monitoring or create a noisy error loop.
             pass
         stop.wait(30)
+    with lock:
+        checkpoint(force=True)
 
 
 @router.get('')

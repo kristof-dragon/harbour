@@ -166,8 +166,16 @@ def maintain(id_, settings, stop=None):
             for _ in range(MAX_BATCHES):
                 if stop and stop.is_set():
                     break
-                readings = store.rows('''SELECT id,measured,kind,target,payload FROM network_samples
-                  WHERE server_id=? AND archived=0 ORDER BY id LIMIT ?''', (id_, BATCH_SIZE))
+                from . import resource_limits as resources
+                readings, used = [], 0
+                with store.db() as con:
+                    for meta in con.execute('SELECT id,length(CAST(payload AS BLOB)) AS n FROM network_samples WHERE server_id=? AND archived=0 ORDER BY id LIMIT ?', (id_,BATCH_SIZE)):
+                        if meta['n']>resources.batch_bytes():
+                            raise resources.BudgetExceeded()
+                        if readings and used+meta['n']>resources.batch_bytes():
+                            break
+                        readings.append(dict(con.execute('SELECT id,measured,kind,target,payload FROM network_samples WHERE id=?',(meta['id'],)).fetchone()))
+                        used += meta['n']
                 events = store.rows('''SELECT id,measured,label,automatic,complete,trigger FROM network_events
                   WHERE server_id=? AND archived_version!=complete ORDER BY measured,id LIMIT ?''', (id_, BATCH_SIZE))
                 if not readings and not events:

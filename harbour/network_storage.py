@@ -3,7 +3,7 @@ import json
 import logging
 import time
 
-from . import network, store
+from . import network, store, resource_limits as resources
 from .network_buffer import Channel
 
 
@@ -13,7 +13,7 @@ def configuration():
         for server in store.rows("SELECT * FROM servers WHERE server_type='openwrt' AND monitoring_enabled=1"):
             settings, revision = network.config(server['id'])
             if settings['enabled']:
-                active[server['id']] = (server, network.Settings(**settings).model_dump(), revision)
+                active[server['id']] = (server, resources.settings(network.Settings(**settings).model_dump()), revision)
     return active
 
 

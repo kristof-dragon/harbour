@@ -5,7 +5,7 @@ import shlex
 import threading
 import time
 
-from . import openwrt, ssh
+from . import openwrt, ssh, resource_limits as resources
 from .network_buffer import Sender
 
 
@@ -37,6 +37,7 @@ class Collector:
         session, cancel = openwrt.Session(), ssh.Cancellation()
         self.cancellations.append(cancel)
         previous = None
+        cadence = self.settings.get('telemetry_seconds', 1)
         try:
             while not self.stop.is_set():
                 started = time.monotonic()
@@ -44,7 +45,8 @@ class Collector:
                     result = session.exchange(self.server, cancel=cancel)
                     metrics = result['metrics']
                     openwrt.interval(previous, metrics)
-                    self.emit({'at': metrics['measured_at'], 'kind': 'telemetry', 'metrics': metrics,
+                    self.emit({'at': metrics['measured_at'], 'kind': 'telemetry', 'metrics': resources.telemetry(metrics) if resources.small() else metrics,
+                               'capture_profile': 'sbc-1g' if resources.small() else 'standard', 'telemetry_seconds': cadence,
                                'collection_ms': result['collection_ms']})
                     with self.lock:
                         self.status.update(state='recording', telemetry_error=None, device=metrics['openwrt']['board'],
@@ -60,9 +62,9 @@ class Collector:
                     if self.stop.wait(5):
                         break
                 elapsed = time.monotonic()-started
-                if elapsed > 1:
-                    self.emit({'at': time.time(), 'kind': 'gap', 'detail': 'Router sampling exceeded one second', 'collection_seconds': elapsed})
-                self.stop.wait(max(.05, 1-elapsed))
+                if elapsed > cadence:
+                    self.emit({'at': time.time(), 'kind': 'gap', 'detail': 'Router sampling exceeded its configured cadence', 'collection_seconds': elapsed})
+                self.stop.wait(max(.05, cadence-elapsed))
         finally:
             session.close()
 
