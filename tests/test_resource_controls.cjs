@@ -27,7 +27,7 @@ await page.route('**/api/**',async route=>{const url=new URL(route.request().url
 });
 await page.goto('http://127.0.0.1:'+server.address().port);
 await page.locator('#sidebar-menu>summary').click();await page.getByRole('button',{name:'Global settings',exact:true}).click();
-await page.getByRole('button',{name:'Configure resources',exact:true}).click();
+await page.getByRole('tab',{name:'Resources',exact:true}).click();
 const form=page.locator('#resource-settings-form');await form.waitFor();
 assert.equal(await form.locator('[name=web_memory_mib]').inputValue(),'768');
 await form.locator('[name=profile]').selectOption('sbc-1g');

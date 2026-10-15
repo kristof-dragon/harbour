@@ -9,7 +9,7 @@ const resourceFields=[
 let resourcePoll=null;
 const resourceProfileName=value=>value==='sbc-1g'?'1 GB board · low write':'Standard';
 function resourceSettingsContent(data){
- if(!data.available)return `<p class="form-error" role="alert">${e(data.reason)}</p>${button('resource-settings','Try again','refresh','small')}`;
+ if(!data.available)return `<p class="form-error" role="alert">${e(data.reason)}</p>${button('resource-settings-retry','Try again','refresh','small')}`;
  const cfg=data.saved,busy=data.operation?.status==='applying';
  return `<div class="info-box"><b>Currently running</b><p id="resource-active">${data.active?`${e(resourceProfileName(data.active.profile))} · Harbour ${data.active.web_memory_mib} MiB · recorder ${data.active.recorder_memory_mib} MiB · write batches ${data.active.write_interval_seconds} s<br>Evidence allowance ${data.active.processing_mib} MiB · shared buffer ${data.active.buffer_total_mib} MiB`:'Running values could not be confirmed.'}</p>${data.applied?'':'<p class="form-error">Saved and running settings have not been confirmed to match.</p>'}<small>Host memory: ${e(data.host_memory_mib??'Unavailable')} MiB</small></div>
  <form id="resource-settings-form"><fieldset ${busy?'disabled':''}><label>Resource profile<select name="profile"><option value="standard" ${cfg.profile==='standard'?'selected':''}>Standard</option><option value="sbc-1g" ${cfg.profile==='sbc-1g'?'selected':''}>1 GB board · low write</option></select></label><p id="resource-profile-note" class="hint"></p>
@@ -35,13 +35,12 @@ function renderResourceSettings(root,data){
  root.resourceData=data;root.innerHTML=resourceSettingsContent(data);resourceHints(root);
  const form=$('form',root);if(form)markFormSaved(form);
 }
-async function showResourceSettings(){
- modal('Resource settings','<div id="resource-settings"><p>Loading current limits…</p></div>',true);
- const root=$('#resource-settings');
+function showResourceSettings(){return showGlobalSettings('resources');}
+async function loadResourceSettings(root){
  try{
   const data=await api('/resource-settings');renderResourceSettings(root,data);
   if(root.isConnected&&data.operation?.status==='applying')watchResourceChange(root,data.operation.request_id);
- }catch(error){if(root.isConnected)root.innerHTML=`<p class="form-error">${e(error.message)}</p>${button('resource-settings','Retry','refresh','small')}`;}
+ }catch(error){if(root.isConnected)root.innerHTML=`<p class="form-error">${e(error.message)}</p>${button('resource-settings-retry','Retry','refresh','small')}`;}
 }
 function watchResourceChange(root,identity){
  clearTimeout(resourcePoll);const started=Date.now();
@@ -65,6 +64,7 @@ document.addEventListener('harbour:overlay-close',()=>{clearTimeout(resourcePoll
 document.addEventListener('click',event=>{
  const action=event.target.closest('[data-action]')?.dataset.action;
  if(action==='resource-settings')showResourceSettings();
+ if(action==='resource-settings-retry')loadResourceSettings($('#resource-settings'));
  if(action==='resource-defaults')resourceDefaults($('#resource-settings'));
 });
 document.addEventListener('change',event=>{const root=event.target.closest('#resource-settings');if(root&&event.target.name==='profile')resourceDefaults(root);});

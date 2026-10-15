@@ -104,7 +104,7 @@ per-router allowances share it, including retiring workers. Python objects,
 IPC, analysis, kernel memory and file cache are additional, within the container
 limit. Queued readings are still acknowledged only after commit.
 
-Open **Menu → Global settings → Configure resources** (also available from
+Open **Menu → Global settings → Resources** (also available from
 **Harbour footprint → Resource settings**). Select **1 GB board · low write**,
 adjust the five values if needed, then choose **Apply & restart**. The panel
 shows the currently running limits separately from the saved settings. All values

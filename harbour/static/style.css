@@ -948,3 +948,21 @@ body.mobile-panel-open{overflow:hidden}
 #resource-settings-form fieldset{border:0;padding:0;margin:0;min-width:0}
 #resource-settings-form fieldset:disabled{opacity:.65}
 #resource-operation:empty{display:none}
+
+/* One envelope for the widest settings matrix and the tall resource form.
+   Each retained panel scrolls independently; the dialog never resizes on tabs. */
+.modal.global-settings-modal{width:min(1000px,100%);height:min(900px,calc(100dvh - 48px));max-height:calc(100dvh - 48px);display:flex;flex-direction:column;overflow:hidden}
+.global-settings-modal>.modal-header{flex:none;margin-bottom:14px}
+#global-settings{flex:1;min-height:0;display:flex;flex-direction:column}
+.global-settings-tabs{display:flex;flex:none;gap:4px;overflow-x:auto;border-bottom:1px solid var(--line);margin-bottom:18px;padding:0 0 4px}
+.global-settings-tabs [role=tab]{flex-shrink:0;border:0;border-bottom:2px solid transparent;border-radius:6px 6px 0 0;background:transparent;padding:10px 14px;color:var(--muted);transition:none}
+.global-settings-tabs [aria-selected=true]{color:var(--accent);border-bottom-color:var(--accent);background:var(--accent-bg)}
+.global-settings-body{flex:1;min-height:0;overflow:hidden}
+.global-settings-panel{height:100%;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:0 8px 8px 2px}
+.global-settings-panel[hidden]{display:none}
+.global-settings-panel>form>h3:first-child{margin-top:0}
+.global-settings-panel .form-actions{position:sticky;bottom:-8px;background:var(--panel);z-index:3;padding-block:14px}
+.global-settings-panel #bridge-settings-section>.between{align-items:flex-start;flex-direction:column;gap:12px}
+.global-settings-panel #bridge-settings{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.global-settings-panel #bridge-settings label{flex-direction:row;align-items:center}
+@media(max-width:650px){.modal.global-settings-modal{height:calc(100dvh - 20px);max-height:calc(100dvh - 20px);padding:16px}.global-settings-tabs{margin-bottom:14px}.global-settings-tabs [role=tab]{padding:9px 11px;font-size:12px}.global-settings-panel{padding-right:4px}}

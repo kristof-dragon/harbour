@@ -13,7 +13,9 @@ python3 scripts/setup_env.py
 python3 scripts/start.py
 ```
 
-On Linux, the launcher also installs a user service for **Global settings → Configure resources**. Administrators can select a resource profile, change memory and buffer limits, and choose the recording write interval from the UI. **Apply & restart** verifies both services and rolls back failed changes. See [resource controls](harbour/REPORTS.md#memory-limits-and-small-boards) for host requirements.
+On Linux, the launcher also installs a user service for **Global settings → Resources**. Administrators can select a resource profile, change memory and buffer limits, and choose the recording write interval from the UI. **Apply & restart** verifies both services and rolls back failed changes. See [resource controls](harbour/REPORTS.md#memory-limits-and-small-boards) for host requirements.
+
+Global settings groups warnings, monitoring and history, resources, notifications, and The Bridge into tabs. The overlay keeps the same size when switching tabs, adapts to smaller screens, and retains unsaved edits until you save or discard them.
 
 The interactive setup creates `.env`, generates the application secret, and stores a salted hash of your chosen administrator password. The start script builds and starts Docker, then removes the first-admin credentials from `.env` and sets `FIRST_RUN=False` after successful setup.
 
@@ -23,7 +25,7 @@ Open your configured URL and sign in. Use **Menu → Add server** to connect a L
 
 ### The Bridge
 
-Enable **The Bridge** in **Menu → Global settings**. Its menu is hidden while off.
+Enable **The Bridge** in **Menu → Global settings → The Bridge**. Its menu is hidden while off.
 The Bridge brings connected sessions, searchable/sortable/paginated login history,
 identity labels and collector coverage into one settings overlay. Administrators
 can edit labels, tags and notes; other signed-in users can inspect observations.

@@ -257,11 +257,11 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  await page.getByRole('button',{name:'Simulate test message',exact:true}).click();
  await page.getByText('Test simulated. No message was sent.',{exact:true}).waitFor();assert.equal(telegramTests,1);
  await page.evaluate(()=>load());assert.equal(await repeat.inputValue(),'0');
- if(process.env.HARBOUR_TEST_CAPTURE){for(const theme of ['dark','light']){await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await page.locator('.telegram-modal').screenshot({path:`test-results/telegram-${theme}-v0113.png`});}}
+ if(process.env.HARBOUR_TEST_CAPTURE){for(const theme of ['dark','light']){await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);await page.locator('.global-settings-modal').screenshot({path:`test-results/telegram-${theme}-v0113.png`});}}
  await page.setViewportSize({width:390,height:844});await page.waitForTimeout(300);
- assert.equal(await page.locator('.telegram-modal').evaluate(el=>el.getBoundingClientRect().right<=innerWidth),true);
+ assert.equal(await page.locator('.global-settings-modal').evaluate(el=>el.getBoundingClientRect().right<=innerWidth),true);
  assert.equal(await page.locator('.telegram-table-wrap').evaluate(el=>el.scrollWidth>el.clientWidth),true);
- if(process.env.HARBOUR_TEST_CAPTURE)await page.locator('.telegram-modal').screenshot({path:'test-results/telegram-mobile-v0113.png'});
+ if(process.env.HARBOUR_TEST_CAPTURE)await page.locator('.global-settings-modal').screenshot({path:'test-results/telegram-mobile-v0113.png'});
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();assert.equal(await page.locator('#discard-guard').count(),0);
  // Load: current values, three-line overview, all explorer layouts and mobile inspection.
  Object.assign(dashboard.servers[0].metrics,{load1:1.75,load5:1.25,load15:.46});

@@ -42,6 +42,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.equal(await page.locator('[data-action=bridge]').count(),0);
   await page.locator('#sidebar-menu summary').click();
   await page.getByRole('button',{name:'Global settings',exact:true}).click();
+  await page.getByRole('tab',{name:'The Bridge',exact:true}).click();
   await page.locator('#bridge-settings [name=enabled]').check();
   await page.locator('#bridge-settings button[type=submit]').click();
   await page.waitForFunction(()=>state.data.bridge_enabled);
@@ -115,6 +116,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.getByRole('button',{name:'Close dialog',exact:true}).click();
   await page.locator('#sidebar-menu').evaluate(el=>el.open=true);
   await page.getByRole('button',{name:'Global settings',exact:true}).click();
+  await page.getByRole('tab',{name:'The Bridge',exact:true}).click();
   await page.locator('#bridge-settings [name=enabled]').uncheck();
   await page.locator('#bridge-settings button[type=submit]').click();
   await page.waitForFunction(()=>!state.data.bridge_enabled);

@@ -355,7 +355,8 @@ async function refreshJob(id){
 const formBaselines=new WeakMap();
 function formValues(form){return JSON.stringify([...form.querySelectorAll('input,select,textarea')].map(el=>[el.name||el.id,el.type==='checkbox'||el.type==='radio'?el.checked:el.value]).concat([['credential',form.dataset.credential||'']]));}
 function markFormSaved(form){if(form)formBaselines.set(form,formValues(form));}
-function overlayDirty(){return [...document.querySelectorAll('#overlay form')].some(form=>formBaselines.has(form)&&formValues(form)!==formBaselines.get(form));}
+function formDirty(form){return !!form&&formBaselines.has(form)&&formValues(form)!==formBaselines.get(form);}
+function overlayDirty(){return [...document.querySelectorAll('#overlay form')].some(formDirty);}
 let discardAction=null,discardFocus=null;
 function requestDiscard(action){
   if(!overlayDirty()){action();return;}
@@ -388,11 +389,11 @@ function modal(title,content,wide=false){
   queueMicrotask(()=>document.querySelectorAll('#overlay form').forEach(markFormSaved));
 }
 function closeOverlay(force=false){if(!force&&overlayDirty()){requestDiscard(()=>closeOverlay(true));return false;}document.dispatchEvent(new Event('harbour:overlay-close'));hideHelpTooltip();state.modal=null;state.notices=null;$('#overlay').innerHTML='';previousFocus?.focus();return true;}
-const formError = message => {const el=$('.form-error',$('#overlay'))||$('.form-error');if(el)el.textContent=message;else toast(message,true);};
+const formError = (message,root) => {const el=$('.form-error',root||$('.global-settings-panel:not([hidden])')||$('#overlay')||document);if(el)el.textContent=message;else toast(message,true);};
 function thresholdFields(t){return `<div class="form-grid"><label>CPU warning (%)<input name="cpu" type="number" min="1" max="100" step="0.1" value="${t.cpu}" required></label><label>Memory warning (%)<input name="memory" type="number" min="1" max="100" step="0.1" value="${t.memory}" required></label><label>Disk warning (%)<input name="disk" type="number" min="1" max="100" step="0.1" value="${t.disk}" required></label><label>Disk free-space warning (GB)<input name="disk_free_gb" type="number" min="0" max="1000000" step="0.1" value="${t.disk_free_gb}" required></label><label>Temperature warning (°C)<input name="temperature" type="number" min="1" max="180" step="0.1" value="${t.temperature??80}" required></label></div>`;}
 function settings(server=false){
   if(server)return serverSettings(current());
-  modal('Global settings',`<form id="threshold-form" data-server=""><h3>${fieldCaption('Warning thresholds','Default warning thresholds for every server without an override. Disk warnings trigger on either usage or free space. CPU temperature uses package / SoC sensors; other device sensors warn separately.')}</h3>${thresholdFields(state.data.thresholds)}<div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">Save thresholds</button></div></form><hr class="section-rule"><h3>${fieldCaption('Monitoring & history','Polling intervals, staged resolution and data retention.')}</h3>${button('monitoring','Configure monitoring','activity','small')}<hr class="section-rule"><h3>Harbour resources</h3>${button('resource-settings','Configure resources','memory','small')}<hr class="section-rule"><h3>${fieldCaption('Notifications','Dismissals are personal. Updates return for a different image; warnings return after the issue clears and happens again. Server warning indicators stay visible.')}</h3>${button('restore-dismissals','Restore my dismissed notifications','bell','small')}${bridgeSettings()}`);
+  return showGlobalSettings();
 }
 function onboard(){
   state.connection=null;state.key=null;state.keyMode='generate';state.authMethod='key';state.hostProbe=null;state.acceptedHost=null;
@@ -508,7 +509,7 @@ document.addEventListener('click',async event=>{
     else if(a==='remove-server'){modal('Remove server',`<p>Remove <b>${e(current().name)}</b> from Harbour? This removes its monitoring and stored credential when unused. It does not stop containers, uninstall collectors or revoke the public key on the host.</p>${current().server_type==='openwrt'?'<p>The local diagnostics recorder will stop probing this router.</p>':`<p>If a resource recorder is installed, remove it on the host before off-boarding. Its local queue is retained unless you explicitly purge it.</p>${button('recorder-remove','Recorder removal instructions','trash','small')}`}<div class="form-error" role="alert"></div><div class="form-actions">${button('close','Cancel','','ghost')}${button('confirm-remove-server','Remove server','trash','danger',`data-id="${e(current().id)}"`)}</div>`);}
     else if(a==='confirm-remove-server'){await api('/servers/'+el.dataset.id,'DELETE');closeOverlay();await load();toast('Server removed from Harbour');}
     else if(a==='job')await openJob(el.dataset.id);
-  } catch(err){if(state.modal)formError(err.message);else toast(err.message,true);}
+  } catch(err){if(state.modal)formError(err.message,el.closest('[role=tabpanel]'));else toast(err.message,true);}
   finally{busyViewNodes.delete(el);if(el.isConnected)el.disabled=false;if(a==='dismiss-all'&&state.notices)renderNotices();}
 });
 document.addEventListener('submit',async event=>{
