@@ -20,9 +20,11 @@ BOOTSTRAP_KEYS = {"HARBOUR_ADMIN", "HARBOUR_ADMIN_PASSWORD_HASH", "HARBOUR_BOOTS
 
 
 def read_env(path):
-    if not stat.S_ISREG(path.lstat().st_mode):
+    mode = path.lstat().st_mode
+    if not stat.S_ISREG(mode):
         raise RuntimeError(".env must be a regular file, not a symlink.")
-    os.chmod(path, 0o600)
+    if stat.S_IMODE(mode) != 0o600:
+        os.chmod(path, 0o600)
     text = path.read_text()
     values = {}
     for line in text.splitlines():

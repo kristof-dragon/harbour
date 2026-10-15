@@ -119,6 +119,13 @@ def test_host_memory_and_unknown_actions_are_rejected(controller,monkeypatch):
         with pytest.raises(ValueError): control.handle(body)
 
 
+def test_reading_status_does_not_rewrite_file_metadata(controller,monkeypatch):
+    control,_=controller
+    control.status()  # First read hardens a legacy file's permissions if needed.
+    monkeypatch.setattr(manager.start.os,'chmod',lambda *args:pytest.fail('Status must not create metadata writes'))
+    assert control.status()['applied']
+
+
 def test_both_caps_and_no_swap_must_be_verified():
     cfg=settings(); observed=parts(cfg)
     assert manager.verified(observed,cfg,cfg)
