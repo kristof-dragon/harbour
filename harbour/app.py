@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from . import __version__, auth, call_endpoint, call_tests, collector_setup, cpu, demo, history, install_artifacts, logins, network, network_incidents, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
-from . import network_diagnostics, network_reports, footprint, bridge, resource_limits, resource_settings
+from . import network_diagnostics, network_reports, footprint, bridge, resource_limits, resource_settings, warning_events
 
 pool = ThreadPoolExecutor(max_workers=4)
 resource_workers = None
@@ -120,6 +120,7 @@ def refresh_inventory(id_, updates=False):
             snapshot.pop('docker_error', None)
             con.execute('UPDATE servers SET snapshot=?,update_checked=? WHERE id=?',
                         (json.dumps(snapshot), time.time() if updates else row['update_checked'], id_))
+            warning_events.observe_inventory(con, dict(row), snapshot, time.time())
     except Exception as exc:
         # A Docker/registry failure must not mark a responding host down or insert
         # a missing resource sample while its dedicated worker is healthy.
@@ -130,6 +131,7 @@ def refresh_inventory(id_, updates=False):
                 snapshot = json.loads(row['snapshot'])
                 snapshot['docker_error'] = str(exc)[:1000]
                 con.execute('UPDATE servers SET snapshot=? WHERE id=?', (json.dumps(snapshot), id_))
+                warning_events.observe_inventory(con, dict(row), snapshot, time.time(), snapshot['docker_error'])
         raise
     clear_resolved_warning_dismissals(id_)
 
@@ -175,10 +177,12 @@ def poll_resources(server, lock, cancel=None, background=False, raise_errors=Fal
             now = time.time()
             delivery = result.get('recording', {})
             local = delivery.get('mode') == 'local'
+            warning_thresholds = thresholds_for(dict(row))
             for sample in recording.accept(con, dict(row), result):
                 recording.observe_boot(con, dict(row), sample, now)
                 sample.pop('cpu_counters', None)
                 history.record(id_, sample, now=sample['measured_at'], connection=con, attempt=False)
+                warning_events.observe_resources(con, dict(row), sample, warning_thresholds, now)
             recording.observe_boot(con, dict(row), metrics, now)
             if local:
                 metrics.pop('cpu_counters', None)
@@ -212,6 +216,12 @@ def poll_resources(server, lock, cancel=None, background=False, raise_errors=Fal
                 # A recovered local sample is not evidence that SSH was reachable
                 # at its capture time. Record this transport check separately.
                 history.record(id_, latency_ms=result.get('latency_ms'), up=True, now=now, connection=con)
+            # Do not let the live preview jump ahead of a multi-batch recorder
+            # backlog: every queued sample must reach the episode state machine.
+            if not local or not delivery.get('pending'):
+                warning_events.observe_resources(con, dict(row), metrics, warning_thresholds, now)
+            warning_events.observe_connection(con, dict(row), now)
+            warning_events.observe_recorder(con, dict(row), delivery, now)
         try:
             footprint.ingest(id_, result, connection_signature(server))
         except Exception:
@@ -236,6 +246,7 @@ def poll_resources(server, lock, cancel=None, background=False, raise_errors=Fal
                 return
             con.execute('UPDATE servers SET error=?,connection_status=?,latency_ms=? WHERE id=?', (str(exc)[:1000], status, latency, id_))
             history.record(id_, latency_ms=latency, up=status == 'up', connection=con)
+            warning_events.observe_connection(con, dict(row), time.time(), str(exc)[:1000])
         observe_notifications(id_, successful=False)
         if raise_errors:
             raise
@@ -323,6 +334,7 @@ def retention_loop():
             history.compact()
             logins.compact()
             recording.prune()
+            warning_events.prune()
             store.execute("DELETE FROM auth_log WHERE created<?", (time.time()-90*86400,))
             store.execute("DELETE FROM mfa_pending WHERE expires<?", (time.time(),))
             store.execute("DELETE FROM ip_bans WHERE until<?", (time.time(),))
@@ -393,6 +405,7 @@ app.include_router(recording.router)
 app.include_router(collector_setup.router)
 app.include_router(install_artifacts.router)
 app.include_router(notifications.router)
+app.include_router(warning_events.router)
 app.include_router(network.router)
 app.include_router(network_incidents.router)
 app.include_router(call_tests.router)
@@ -552,13 +565,17 @@ def public_server(server, user):
     snapshot.pop('_cpu_baseline', None)
     threshold = thresholds_for(server)
     dismissed = {(d["service_id"], d["digest"]) for d in store.rows("SELECT service_id,digest FROM dismissals WHERE user_id=? AND server_id=?", (user["id"], server["id"]))}
+    events = warning_events.live_for_user(server['id'], user['id'])
     services = snapshot.get("services", []) if server["server_type"] == "docker" else []
     snapshot["services"] = services
     warnings, stale = server_warnings(server, snapshot, threshold)
     interval = server["poll_seconds"] or history.policy()["poll_seconds"]
     clear_resolved_warning_dismissals(server['id'], warnings)
     for warning in warnings:
-        warning['dismissed'] = warning_notification(warning) in dismissed
+        event = events.get(warning['id'])
+        if event:
+            warning['event_id'] = event['id']
+        warning['dismissed'] = event['acknowledged_at'] is not None if event else warning_notification(warning) in dismissed
     for s in services:
         # Reclassify cached checks too, so an upgrade immediately clears old
         # same-version badges without waiting for the next registry interval.
@@ -589,7 +606,7 @@ def dashboard(user=Depends(authenticated)):
         job['progress'] = json.loads(job['progress'])
         job['target_names'] = stored_target_names(job)
         queue_details(job, pending.get(job['server_id'], []))
-    return {"servers": [public_server(s, user) for s in store.rows("SELECT * FROM servers ORDER BY sort_order,rowid")],
+    return {"servers": [public_server(s, user) for s in store.rows("SELECT * FROM servers ORDER BY sort_order,rowid")], 'warning_events': warning_events.summary(user['id']),
             "thresholds": {**store.DEFAULTS, **json.loads(store.one("SELECT value FROM settings WHERE key='thresholds'")["value"])}, "jobs": jobs, "bridge_enabled": bridge.enabled()}
 
 
@@ -603,14 +620,35 @@ class Thresholds(Input):
 
 @app.put("/api/thresholds")
 def global_thresholds(body: Thresholds, user=Depends(admin)):
-    store.execute("UPDATE settings SET value=? WHERE key='thresholds'", (body.model_dump_json(),))
+    with store.db() as con:
+        con.execute('BEGIN IMMEDIATE')
+        for row in con.execute('SELECT * FROM servers WHERE thresholds IS NULL').fetchall():
+            server = dict(row)
+            changed = changed_resource_warnings(server, resources.preferences(server), body.model_dump())
+            changed |= changed_volume_warnings(server, volumes.preferences(server), body.model_dump())
+            warning_events.invalidate(con, server['id'], changed)
+            if thresholds_for(server) != body.model_dump():
+                warning_events.configuration_changed(con, server['id'])
+        con.execute("UPDATE settings SET value=? WHERE key='thresholds'", (body.model_dump_json(),))
     return {"ok": True}
 
 
 @app.put("/api/servers/{id_}/thresholds")
 def server_thresholds(id_: str, body: Thresholds | None = None, user=Depends(admin)):
-    get_server(id_)
-    store.execute("UPDATE servers SET thresholds=? WHERE id=?", (body.model_dump_json() if body else None, id_))
+    with store.db() as con:
+        con.execute('BEGIN IMMEDIATE')
+        row = con.execute('SELECT * FROM servers WHERE id=?', (id_,)).fetchone()
+        if not row:
+            raise HTTPException(404, 'Server not found')
+        server = dict(row)
+        threshold = body.model_dump_json() if body else None
+        limits = thresholds_for({**server, 'thresholds': threshold})
+        changed = changed_resource_warnings(server, resources.preferences(server), limits)
+        changed |= changed_volume_warnings(server, volumes.preferences(server), limits)
+        warning_events.invalidate(con, id_, changed)
+        if thresholds_for(server) != limits:
+            warning_events.configuration_changed(con, id_)
+        con.execute("UPDATE servers SET thresholds=? WHERE id=?", (threshold, id_))
     return {"ok": True}
 
 
@@ -641,8 +679,12 @@ def volume_config(server, values):
 
 @app.put('/api/servers/{id_}/volumes')
 def save_volumes(id_: str, body: VolumeInput, user=Depends(admin)):
-    config = volume_config(get_server(id_), body.volumes)
-    store.execute('UPDATE servers SET volume_settings=? WHERE id=?', (json.dumps(config), id_))
+    with store.db() as con:
+        con.execute('BEGIN IMMEDIATE')
+        server = get_server(id_)
+        config = volume_config(server, body.volumes)
+        warning_events.invalidate(con, id_, changed_volume_warnings(server, config, thresholds_for(server)))
+        con.execute('UPDATE servers SET volume_settings=? WHERE id=?', (json.dumps(config), id_))
     return {'ok': True}
 
 
@@ -770,6 +812,7 @@ def save_card_preferences(id_: str, body: CardPreferencesInput, user=Depends(aut
             con.execute('UPDATE servers SET resource_settings=?,volume_settings=? WHERE id=?',
                         (json.dumps(choices), json.dumps(disks), id_))
             notifications.invalidate(con, id_, changed)
+            warning_events.invalidate(con, id_, changed)
     finally:
         lock.release()
     return {'ok': True, 'card_layout': layout}
@@ -813,6 +856,11 @@ def save_server_settings(id_: str, body: ServerSettingsInput, user=Depends(admin
                         (body.name, body.thresholds.model_dump_json() if body.thresholds else None,
                          json.dumps(config), json.dumps(resource_settings), json.dumps(known), int(body.enabled), body.poll_seconds, body.server_type, id_))
             notifications.invalidate(con, id_, changed)
+            warning_events.invalidate(con, id_, changed)
+            if bool(server['monitoring_enabled']) != body.enabled or server['server_type'] != body.server_type:
+                warning_events.invalidate(con, id_, reason='monitoring_paused' if not body.enabled else 'settings_changed')
+            elif thresholds_for(server) != next_thresholds:
+                warning_events.configuration_changed(con, id_)
             if body.enabled and not server['monitoring_enabled']:
                 con.execute('UPDATE servers SET last_attempt=NULL WHERE id=?', (id_,))
             if server['server_type'] != body.server_type:
@@ -840,10 +888,12 @@ def save_server_type(id_: str, body: ServerTypeInput, user=Depends(admin)):
             snapshot = {} if 'openwrt' in (server['server_type'], body.server_type) else json.loads(server['snapshot'])
             snapshot['services'] = []
             snapshot.get('metrics', {})['docker'] = None
-            if 'openwrt' in (server['server_type'], body.server_type):
-                store.execute("UPDATE servers SET resource_catalog='{}' WHERE id=?", (id_,))
-            store.execute("UPDATE servers SET server_type=?,snapshot=?,error=NULL,checked=NULL,last_attempt=NULL,update_checked=0,connection_status='pending' WHERE id=?",
-                          (body.server_type, json.dumps(snapshot), id_))
+            with store.db() as con:
+                if 'openwrt' in (server['server_type'], body.server_type):
+                    con.execute("UPDATE servers SET resource_catalog='{}' WHERE id=?", (id_,))
+                con.execute("UPDATE servers SET server_type=?,snapshot=?,error=NULL,checked=NULL,last_attempt=NULL,update_checked=0,connection_status='pending' WHERE id=?",
+                            (body.server_type, json.dumps(snapshot), id_))
+                warning_events.invalidate(con, id_)
     finally:
         lock.release()
     scheduler_wake.set()
@@ -1050,6 +1100,7 @@ def update_connection(id_: str, body: ServerInput, request: Request, user=Depend
         with store.db() as con:
             con.execute("UPDATE servers SET name=?,host=?,port=?,username=?,fingerprint=?,key_id=?,auth_method=?,password_encrypted=?,error=NULL,checked=NULL,connection_status='pending',last_attempt=NULL,latency_ms=NULL,update_checked=0 WHERE id=?",
                         (body.name, body.host, body.port, body.username, body.fingerprint, key_id, body.auth_method, encrypted_password, id_))
+            warning_events.invalidate(con, id_, reason='settings_changed')
             if server['key_id'] and server['key_id'] != key_id:
                 con.execute('DELETE FROM ssh_keys WHERE id=? AND NOT EXISTS (SELECT 1 FROM servers WHERE key_id=?)', (server['key_id'], server['key_id']))
         auth.log(user['name'], auth.client_ip(request), 'ssh_connection_changed', f'{body.username}@{body.host}:{body.port} · {body.auth_method}')
@@ -1344,7 +1395,9 @@ def dismiss(body: DismissInput, user=Depends(authenticated)):
 
 @app.delete("/api/dismissals")
 def restore_dismissals(user=Depends(authenticated)):
-    store.execute("DELETE FROM dismissals WHERE user_id=?", (user["id"],))
+    with store.db() as con:
+        con.execute("DELETE FROM dismissals WHERE user_id=?", (user["id"],))
+        con.execute('DELETE FROM warning_acknowledgements WHERE user_id=?', (user['id'],))
     return {"ok": True}
 
 
@@ -1354,7 +1407,7 @@ def dismiss_all(user=Depends(authenticated)):
     for row in store.rows('SELECT * FROM servers'):
         server = public_server(row, user)
         for warning in server['warnings']:
-            if not warning['dismissed']:
+            if not warning['dismissed'] and not warning.get('event_id'):
                 key, digest = warning_notification(warning)
                 records.append((user['id'], server['id'], key, digest))
         for service in server.get('services', []):
@@ -1363,7 +1416,8 @@ def dismiss_all(user=Depends(authenticated)):
                 records.append((user['id'], server['id'], service['notification_key'], update['digest']))
     with store.db() as con:
         con.executemany('INSERT OR IGNORE INTO dismissals VALUES (?,?,?,?)', records)
-    return {"ok": True, "dismissed": len(records)}
+        acknowledged = warning_events.acknowledge_all(con, user['id'])
+    return {"ok": True, "dismissed": len(records) + acknowledged}
 
 
 @app.get("/api/users")

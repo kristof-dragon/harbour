@@ -164,7 +164,7 @@ function visuals(){
   modal('Visuals',`<div class="stack visuals-settings"><div class="visual-choice"><h3>${fieldCaption('Colour theme','System follows your device’s light / dark setting. The toolbar theme button selects a manual theme.')}</h3>${slidingControl('visual-theme','Colour theme',[['system','System'],['light','Light'],['dark','Dark']],followSystem?'system':document.documentElement.dataset.theme,'visual-choice','data-visual="theme"')}</div><div class="visual-choice"><h3>${fieldCaption('Server card density','Adjust spacing in the server list.')}</h3>${slidingControl('card-density','Server card density',densities,document.documentElement.dataset.density,'visual-choice','data-visual="density"')}</div><p class="hint">Appearance preferences are saved in this browser.</p></div>`);
 }
 function renderTop(){
-  const warns=state.data.servers.reduce((a,s)=>a+s.warnings.filter(w=>!w.dismissed).length,0), updates=state.data.servers.reduce((a,s)=>a+s.updates,0);
+  const warns=(state.data.warning_events?.unacknowledged||0)+state.data.servers.reduce((a,s)=>a+s.warnings.filter(w=>!w.dismissed&&(!state.data.warning_events||!w.event_id)).length,0), updates=state.data.servers.reduce((a,s)=>a+s.updates,0);
   updateHTML($('#topbar'),`<div class="breadcrumbs">${button('mobile','','menu','ghost icon-button mobile-menu',`aria-label="Toggle server list" aria-controls="sidebar" aria-expanded="${state.mobile}"`)}<span>Workspace</span><span class="subtle-divider">/</span><span class="current">${e(current()?.name||'Servers')}</span></div><div class="top-actions">${admin()?iconButton('refresh-all','Refresh all servers','refresh'):''}${button('warnings',`<span class="chip-label">Warnings</span><b>${warns}</b>`,'warning','notification-chip warn')}${button('updates',`<span class="chip-label">Updates</span><b>${updates}</b>`,'download','notification-chip update')}<span class="divider"></span>${iconButton('theme','Switch colour theme',document.documentElement.dataset.theme==='dark'?'sun':'moon')}${iconButton('notifications','Open notifications','bell')}</div>`);
 }
 function metricCard(label,ico,value,unit,detail,aside,pct,warning=false,extra=''){
@@ -441,6 +441,7 @@ async function preview(action,targets){
 }
 async function userManagement(){const users=await api('/users');modal('Manage users',`<p>Administrators manage hosts and Docker. Users can view every server and dismiss their own notifications.</p><div>${users.map(u=>`<div class="user-row"><div class="avatar">${e(u.name.slice(0,2).toUpperCase())}</div><b>${e(u.name)}</b><span class="tag ${u.mfa_enabled?'green':''}">2FA ${u.mfa_enabled?'on':'off'}</span><span class="tag ${u.role==='admin'?'green':''}">${e(u.role)}</span>${u.id!==state.user.id?iconButton('remove-user','Remove '+u.name,'trash',`data-id="${e(u.id)}" data-name="${e(u.name)}"`):'<span class="tag">You</span>'}</div>`).join('')}</div><hr class="section-rule"><h3>Add a user</h3><form id="user-form"><div class="form-grid"><label>Username<input name="name" required maxlength="80" autocomplete="off"></label><label>Access level<select name="role"><option value="user">User · read only</option><option value="admin">Administrator</option></select></label><label class="full">Password<input name="password" type="password" minlength="12" required autocomplete="new-password" placeholder="At least 12 characters"></label></div><div class="form-error" role="alert"></div><div class="form-actions"><button class="primary" type="submit">Add user</button></div></form>`);}
 function renderNotices(){
+  if(state.data.warning_events)return renderWarningNotices();
   const kind=state.notices;const notices=[];
   const hasNotices=state.data.servers.some(s=>s.warnings.some(w=>!w.dismissed)||(s.services||[]).some(c=>c.update?.status==='available'&&!c.dismissed));
   for(const s of state.data.servers){if(kind==='warnings'||kind==='all')for(const w of s.warnings)if(!w.dismissed)notices.push({id:w.id,kind:'warn',server:s,title:w.title,detail:w.detail});if(kind==='updates'||kind==='all')for(const c of s.services||[])if(c.update?.status==='available'&&!c.dismissed)notices.push({kind:'update',server:s,service:c,title:c.name+' · image update',detail:c.image});}
@@ -453,6 +454,7 @@ document.addEventListener('click',async event=>{
   const el=event.target.closest('[data-action]');if(!el)return;
   const a=el.dataset.action;if(el.disabled||a.startsWith('login-'))return;
   try {
+    if(typeof warningActions!=='undefined'&&warningActions.has(a)){await handleWarningAction(a,el);return;}
     if(a==='keep-editing'){finishDiscard(false);return;}
     if(a==='discard-changes'){finishDiscard(true);return;}
     if(a==='help')return showHelpTooltip(el);
@@ -493,8 +495,8 @@ document.addEventListener('click',async event=>{
     else if(a==='refresh-all'){const result=await api('/servers/refresh-all','POST');for(const job of result.jobs)state.lastJobs.set(job.id,'queued');await load();toast(count(result.jobs.length,'server')+' queued for refresh'+(result.errors.length?' · '+result.errors.map(err=>err.name+': '+err.detail).join('; '):''),Boolean(result.errors.length));}
     else if(a==='refresh'||a==='check-updates'){const r=await api(`/servers/${current().id}/${a==='refresh'?'refresh':'check-updates'}`,'POST');state.lastJobs.set(r.id,'queued');toast(a==='refresh'?'Refreshing server readings…':'Checking configured image tags…');await load();}
     else if(a==='dismiss'){await api('/dismiss','POST',{server_id:el.dataset.server,service_id:el.dataset.service});await load();toast('Update dismissed for your account');}
-    else if(a==='dismiss-all'){const r=await api('/dismiss-all','POST');await load();toast(r.dismissed?`${count(r.dismissed,'notification')} dismissed`:'No new notifications to dismiss');}
-    else if(a==='restore-dismissals'){await api('/dismissals','DELETE');await load();toast('Dismissed notifications restored');}
+    else if(a==='dismiss-all'){const r=await api('/dismiss-all','POST');if(typeof invalidateWarningHistory==='function')invalidateWarningHistory();await load();toast(r.dismissed?`${count(r.dismissed,'notification')} acknowledged or dismissed`:'No new notifications');}
+    else if(a==='restore-dismissals'){await api('/dismissals','DELETE');if(typeof invalidateWarningHistory==='function')invalidateWarningHistory();await load();toast('Acknowledgements and dismissed notifications restored');}
     else if(a==='inherit'){await api(`/servers/${current().id}/thresholds`,'PUT',null);await load();const form=$('#threshold-form');for(const [key,value] of Object.entries(current().thresholds)){if(form.elements[key])form.elements[key].value=value;}markFormSaved(form);toast('Global thresholds restored');}
     else if(a==='probe-fingerprint')await probeFingerprint();
     else if(a==='create-key')await createKey();
@@ -513,6 +515,7 @@ document.addEventListener('click',async event=>{
   finally{busyViewNodes.delete(el);if(el.isConnected)el.disabled=false;if(a==='dismiss-all'&&state.notices)renderNotices();}
 });
 document.addEventListener('submit',async event=>{
+  if(event.target.id==='warning-history-filter')return;
   if(['resource-settings-form','report-policy','report-range','bridge-settings','bridge-annotation','bridge-identity','bridge-profile-form','login-filter','incident-filters','incident-brief-form','endpoint-form','call-test-form'].includes(event.target.id)||event.target.matches('.collector-sudo-form'))return;
   event.preventDefault();const form=event.target;if(form.dataset.busy)return;const data=Object.fromEntries(new FormData(form));const submit=$('[type=submit]',form);const restoreForm=busyOnboarding(form);$('.form-error',form).textContent='';
   try{

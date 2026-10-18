@@ -134,7 +134,8 @@ def initialize():
           PRIMARY KEY(server_id,kind),
           FOREIGN KEY(server_id,kind) REFERENCES notification_rules(server_id,kind) ON DELETE CASCADE);
         """)
-        from . import bridge, install_artifacts, logins, recording
+        from . import bridge, install_artifacts, logins, recording, warning_events
+        warning_events.initialize(con)
         install_artifacts.initialize(con)
         logins.initialize(con)
         bridge.initialize(con)
