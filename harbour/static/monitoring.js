@@ -293,7 +293,7 @@ async function handleMonitorAction(action,el){
   if(action==='resource-card-settings')return resourceCardSettings(el);
   if(action==='card-settings-size')return setCardSizeChoice(el);
   if(action==='overlay-card-size')return setOverlayCardSize(el);
-  if(action==='card-size-all')return saveCardPreferences(current().id,{layout:{default_size:el.dataset.value,reset_sizes:true}});
+  if(action==='card-size-all')return setAllCardSizes(el);
   if(action==='history')openHistory(el.dataset.resource);
   if(action==='sensor-history')openHistory(null,el.dataset.sensor||'');
   if(action==='history-mode'){historyState.mode=el.dataset.mode;renderHistory();}

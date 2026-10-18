@@ -274,7 +274,7 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  assert.deepEqual(await loadCard.locator('.load-values b').allTextContents(),['1.75','1.25','0.46']);
  assert.equal(await loadCard.locator('polyline').count(),6,'Three lines each side of the long gap');
  if(process.env.HARBOUR_TEST_CAPTURE){await loadCard.scrollIntoViewIfNeeded();await page.screenshot({path:'test-results/load-overview.png'});}
- await page.getByRole('button',{name:'Explore Load average history',exact:true}).click();
+ await page.locator('.card-chart[aria-label="Explore Load average history"]').click();
  const loadPlot=page.locator('[data-chart-keys="load1,load5,load15"]');
  await loadPlot.waitFor();
  assert.equal(await loadPlot.locator('polyline').count(),6);
@@ -443,6 +443,18 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  const rowGap=await grid.evaluate(el=>parseFloat(getComputedStyle(el).rowGap)),smallHeight=(medium.height-rowGap)/2;
  assert.equal((await loadCard.boundingBox()).height,smallHeight);
  assert.equal((await grid.locator('[data-resource-card="memory"]').boundingBox()).height,medium.height);
+ // Compact names and values open history, including keyboard activation.
+ await loadCard.locator('.resource-card-title').click();await page.locator('.history-modal').waitFor();
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ await loadCard.locator('.resource-card-reading').focus();await page.keyboard.press('Enter');await page.locator('.history-modal').waitFor();
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ // The overlay bulk picker also protects unsaved mixed sizes on cancellation.
+ await page.getByRole('button',{name:'Server settings',exact:true}).click();
+ const sizesBefore=await page.locator('[data-card-size-value]').evaluateAll(els=>els.map(el=>el.value));
+ page.once('dialog',dialog=>dialog.dismiss());
+ await page.locator('[data-action=overlay-card-size][data-value=small]').click();
+ assert.deepEqual(await page.locator('[data-card-size-value]').evaluateAll(els=>els.map(el=>el.value)),sizesBefore);
+ await page.getByRole('button',{name:'Close dialog',exact:true}).click();
  // Invalid warning limits keep the popover open; hiding a card can be reversed in the overlay.
  const fanCard=grid.locator('[data-resource-card="resource:fan"]');await fanCard.locator('[data-action=resource-card-settings]').click();
  await page.locator('#resource-card-form [data-resource-option=warn]').check();await page.locator('#resource-card-form button[type=submit]').click();
@@ -457,6 +469,13 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  await page.locator('#server-settings-form button[type=submit]').click();await page.waitForFunction(()=>!document.querySelector('#server-settings-form').dataset.busy);
  if(process.env.HARBOUR_TEST_CAPTURE){await page.locator('.server-settings-modal').evaluate(el=>el.scrollTop=0);await page.screenshot({path:'test-results/card-layout-overlay.png'});}
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();assert.equal(await fanCard.count(),1);
+ // Sensor titles/readings route to their own history even without a graph.
+ for(const selector of ['.resource-card-title','.resource-card-reading']){
+  const target=fanCard.locator(selector),sensor=await target.getAttribute('data-sensor');
+  await target.click();await page.locator('.history-modal').waitFor();
+  assert.equal(await page.evaluate(()=>historyState.sensor),sensor);
+  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ }
  // Small cards are independent by default; stacking happens only after an explicit drop.
  const firstSmall=await loadCard.boundingBox(),secondSmall=await fanCard.boundingBox();
  assert.equal(secondSmall.y,firstSmall.y);assert.ok(secondSmall.x>firstSmall.x);
@@ -506,6 +525,11 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  await page.setViewportSize({width:1440,height:1100});await page.waitForTimeout(150);
  assert.deepEqual(await fanCard.boundingBox(),separated);
  // Density changes keep order; mobile controls fit and whole-overlay scrolling is preserved.
+ const beforeReset=structuredClone(dashboard.servers[0].card_layout),writesBeforeReset=cardWrites.length;
+ page.once('dialog',dialog=>{assert.match(dialog.message(),/mixed sizes/);dialog.dismiss();});
+ await page.locator('[data-action=card-size-all][data-value=large]').click();await waitCards();
+ assert.deepEqual(dashboard.servers[0].card_layout,beforeReset);assert.equal(cardWrites.length,writesBeforeReset);
+ page.once('dialog',dialog=>dialog.accept());
  await page.locator('[data-action=card-size-all][data-value=large]').click();await waitCards();assert.deepEqual(await grid.locator(':scope>article').evaluateAll(els=>els.map(el=>el.dataset.resourceCard)),savedOrder);
  assert.equal(await loadCard.evaluate(el=>[...el.querySelectorAll('.metric-label,.resource-card-body,.resource-card-details')].every(n=>n.getBoundingClientRect().bottom<=el.getBoundingClientRect().bottom)),true);
  await page.waitForTimeout(250);
@@ -527,6 +551,15 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  await page.getByRole('button',{name:'Server settings',exact:true}).click();
  assert.equal(await page.locator('.resource-settings-wrap').evaluate(el=>el.scrollHeight===el.clientHeight),true);
  await page.getByRole('button',{name:'Close dialog',exact:true}).click();
+ // A regular user's card settings only submit their personal layout.
+ await page.evaluate(()=>{state.user.role='user';renderMain();});
+ assert.ok(await grid.locator('.resource-card-handle').count()>0);
+ await fanCard.locator('[data-action=resource-card-settings]').click();
+ assert.match(await page.locator('#modal-title').textContent(),/Case fan/);
+ assert.equal(await page.locator('#resource-card-form [data-resource-setting],[data-volume]').count(),0);
+ await page.locator('#resource-card-form [data-action=card-settings-size][data-value=small]').click();
+ await page.locator('#resource-card-form button[type=submit]').click();await page.locator('#resource-card-form').waitFor({state:'detached'});
+ assert.deepEqual(Object.keys(cardWrites.at(-1)),['layout']);
  assert.ok(cardWrites.length>=8);
  console.log('PASS: independent Small slots, optional stacking, empty-slot drop preview, saved positions, occupied-slot protection, cancellation, equal-height 1.5x Large cards, individual and shared sizes, popover warning limits, overlay sync, hide/restore, shadow dragging, polling guard, keyboard ordering, reload persistence, save rollback, mobile fit');
  }

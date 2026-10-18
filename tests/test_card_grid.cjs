@@ -32,3 +32,31 @@ assert.deepEqual(context.planResourceCards(items,1060,saved),independent);
 // Colliding saved positions at the last allowed row must never overlap.
 check(context.planResourceCards(items,390,Object.fromEntries(items.map(item=>[item.id,{x:0,row:4096}]))));
 console.log('PASS: independent slots, optional stacking, intentional gaps, hide/discover stability, resize/size collision handling, bounded saved positions');
+
+// Adjacency follows card edges, including stacked columns and mixed widths.
+const mixed=[{id:'cpu',size:'small'},{id:'memory',size:'small'},{id:'load',size:'large'},{id:'sensor',size:'small'}];
+const start=context.planResourceCards(mixed,1060);
+const relative=context.relativeResourcePositions([...start.slots.values()],start.geometry);
+relative.memory={...relative.memory,anchor:'cpu',edge:'left',offset:0,row:1};
+relative.load={...relative.load,anchor:'cpu',edge:'right',offset:10,row:0};
+relative.sensor={...relative.sensor,anchor:'load',edge:'right',offset:10,row:0};
+for(const width of [1060,1500,1900,3000]){
+ const plan=context.planResourceCards(mixed,width,relative);check(plan);
+ const {cpu,memory,load,sensor}=Object.fromEntries(plan.slots);
+ assert.equal(memory.x,cpu.x);assert.equal(memory.row,cpu.row+1);
+ assert.equal(load.x-cpu.x-cpu.width,10);
+ assert.equal(sensor.x-load.x-load.width,10);
+}
+check(context.planResourceCards(mixed,340,relative));
+const restored=context.planResourceCards(mixed,1060,relative);
+assert.equal(restored.slots.get('sensor').x-restored.slots.get('load').x-restored.slots.get('load').width,10);
+const hiddenAnchor=context.planResourceCards(mixed.filter(item=>item.id!=='load'),1900,relative,{sizes:{load:'large'}});
+assert.equal(hiddenAnchor.slots.get('sensor').x,context.planResourceCards(mixed,1900,relative).slots.get('sensor').x);
+// Recover the original legacy grid from exact pixel fractions and tight edges.
+const old=context.planResourceCards(mixed,1060),oldPositions=positions(old);
+const migrated=context.planResourceCards(mixed,1900,oldPositions);check(migrated);
+for(let i=1;i<mixed.length;i++){
+ const a=migrated.slots.get(mixed[i-1].id),b=migrated.slots.get(mixed[i].id);
+ if(a.row===b.row)assert.equal(b.x-a.x-a.width,10);
+}
+console.log('PASS: relative neighbours across growing viewports, stacked alignment, mixed widths, hidden anchors, narrow reflow and legacy spacing recovery');

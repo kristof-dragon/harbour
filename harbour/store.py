@@ -91,6 +91,11 @@ def initialize():
           thresholds TEXT, snapshot TEXT NOT NULL DEFAULT '{}', error TEXT,
           checked REAL, update_checked REAL NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS user_card_layouts (
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+          layout TEXT NOT NULL,
+          PRIMARY KEY (user_id, server_id));
         CREATE TABLE IF NOT EXISTS dismissals (
           user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
           server_id TEXT REFERENCES servers(id) ON DELETE CASCADE,

@@ -575,7 +575,7 @@ def public_server(server, user):
             "monitoring_enabled": bool(server["monitoring_enabled"]), "poll_seconds": interval,
             "poll_override": server["poll_seconds"], "last_attempt": server["last_attempt"], "server_type": server["server_type"],
             "record_seconds": server['record_seconds'], "disk_seconds": server['disk_seconds'], "inventory_seconds": server['inventory_seconds'],
-            "card_layout": resources.card_layout(server)}
+            "card_layout": resources.card_layout(server, user['id'])}
 
 
 @app.get("/api/dashboard")
@@ -686,6 +686,9 @@ def resource_config(server, values, thresholds):
 class CardPositionInput(Input):
     x: float = Field(ge=0, le=1)
     row: int = Field(ge=0, le=4096, strict=True)
+    anchor: str | None = Field(default=None, max_length=200)
+    edge: Literal['left', 'right'] = 'left'
+    offset: float | None = Field(default=None, ge=0, le=65536, allow_inf_nan=False)
 
 
 class CardLayoutInput(Input):
@@ -696,8 +699,8 @@ class CardLayoutInput(Input):
     reset_sizes: bool = False
 
 
-def card_layout_config(server, value):
-    layout = resources.card_layout(server)
+def card_layout_config(server, value, user_id):
+    layout = resources.card_layout(server, user_id)
     if value is None:
         return layout
     known = resources.card_ids(server)
@@ -707,7 +710,17 @@ def card_layout_config(server, value):
     if value.default_size is not None:
         layout['default_size'] = value.default_size
     layout['sizes'] = {**({} if value.reset_sizes else layout['sizes']), **value.sizes}
-    layout['positions'] = {**layout['positions'], **{key: pos.model_dump() for key, pos in value.positions.items()}}
+    layout['positions'] = {**layout['positions'], **{key: pos.model_dump(exclude_unset=True) for key, pos in value.positions.items()}}
+    for identity, position in layout['positions'].items():
+        seen = {identity}
+        anchor = position.get('anchor')
+        while anchor is not None:
+            if anchor not in known or anchor in seen or anchor not in layout['positions']:
+                raise HTTPException(400, 'Card anchors must reference saved cards without cycles')
+            seen.add(anchor)
+            anchor = layout['positions'][anchor].get('anchor')
+        if position.get('anchor') is not None and position.get('offset') is None:
+            raise HTTPException(400, 'A card anchor needs a spacing offset')
     if value.order is not None:
         # Retain hidden/missing identities when only visible cards are reordered.
         layout['order'] = value.order + [key for key in layout['order'] if key not in value.order]
@@ -738,20 +751,24 @@ class CardPreferencesInput(Input):
 
 
 @app.patch('/api/servers/{id_}/cards')
-def save_card_preferences(id_: str, body: CardPreferencesInput, user=Depends(admin)):
+def save_card_preferences(id_: str, body: CardPreferencesInput, user=Depends(authenticated)):
+    if (body.resources is not None or body.volumes) and user['role'] != 'admin':
+        raise HTTPException(403, 'Administrator access required for monitoring settings')
     lock = server_lock(id_)
     if not lock.acquire(blocking=False):
         raise HTTPException(409, 'Wait for the current server operation to finish, then save again')
     try:
         server = get_server(id_)
-        layout = card_layout_config(server, body.layout)
+        layout = card_layout_config(server, body.layout, user['id'])
         choices = resource_config(server, body.resources, thresholds_for(server))
         disks = volume_config(server, body.volumes)
         changed = changed_resource_warnings(server, choices, thresholds_for(server))
         changed |= changed_volume_warnings(server, disks, thresholds_for(server))
         with notifications.guard, store.db() as con:
-            con.execute('UPDATE servers SET card_layout=?,resource_settings=?,volume_settings=? WHERE id=?',
-                        (json.dumps(layout), json.dumps(choices), json.dumps(disks), id_))
+            if body.layout is not None:
+                resources.save_card_layout(con, id_, user['id'], layout)
+            con.execute('UPDATE servers SET resource_settings=?,volume_settings=? WHERE id=?',
+                        (json.dumps(choices), json.dumps(disks), id_))
             notifications.invalidate(con, id_, changed)
     finally:
         lock.release()
@@ -781,7 +798,7 @@ def save_server_settings(id_: str, body: ServerSettingsInput, user=Depends(admin
         config = volume_config(server, body.volumes)
         next_thresholds = thresholds_for({**server, 'thresholds': body.thresholds.model_dump_json() if body.thresholds else None})
         resource_settings = resource_config(server, body.resources, next_thresholds)
-        layout = card_layout_config(server, body.card_layout)
+        layout = card_layout_config(server, body.card_layout, user['id'])
         known = resources.catalog(server)
         changed = changed_resource_warnings(server, resource_settings, next_thresholds)
         changed |= changed_volume_warnings(server, config, next_thresholds)
@@ -790,9 +807,11 @@ def save_server_settings(id_: str, body: ServerSettingsInput, user=Depends(admin
             con.execute('UPDATE servers SET record_seconds=?,disk_seconds=?,inventory_seconds=? WHERE id=?',
                         (body.record_seconds or server['record_seconds'], body.disk_seconds or server['disk_seconds'],
                          body.inventory_seconds or server['inventory_seconds'], id_))
-            con.execute('UPDATE servers SET name=?,thresholds=?,volume_settings=?,resource_settings=?,resource_catalog=?,monitoring_enabled=?,poll_seconds=?,server_type=?,card_layout=? WHERE id=?',
+            if body.card_layout is not None:
+                resources.save_card_layout(con, id_, user['id'], layout)
+            con.execute('UPDATE servers SET name=?,thresholds=?,volume_settings=?,resource_settings=?,resource_catalog=?,monitoring_enabled=?,poll_seconds=?,server_type=? WHERE id=?',
                         (body.name, body.thresholds.model_dump_json() if body.thresholds else None,
-                         json.dumps(config), json.dumps(resource_settings), json.dumps(known), int(body.enabled), body.poll_seconds, body.server_type, json.dumps(layout), id_))
+                         json.dumps(config), json.dumps(resource_settings), json.dumps(known), int(body.enabled), body.poll_seconds, body.server_type, id_))
             notifications.invalidate(con, id_, changed)
             if body.enabled and not server['monitoring_enabled']:
                 con.execute('UPDATE servers SET last_attempt=NULL WHERE id=?', (id_,))

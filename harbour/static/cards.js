@@ -9,7 +9,7 @@ const resourceCardSize=(s,id)=>cardLayout(s).sizes?.[id]||cardLayout(s).default_
 function cardSizeField(s,id,instance=id){return `<div class="card-size-field" data-card-size-field="${e(id)}"><input type="hidden" value="${resourceCardSize(s,id)}" data-card-size-value="${e(id)}">${slidingControl('resource-size-'+encodeURIComponent(instance),'Card size',cardSizes,resourceCardSize(s,id),'card-settings-size',`data-card="${e(id)}"`)}</div>`;}
 function cardLayoutCommonSize(s){const sizes=new Set(resourceCardIds(s).map(id=>resourceCardSize(s,id)));return sizes.size===1?[...sizes][0]:'mixed';}
 function cardLayoutControls(s){return `<div class="card-layout-controls"><span>Set all cards</span>${slidingControl('all-resource-sizes','Set all resource card sizes',[['small','Small'],['medium','Medium'],['large','Large']],cardLayoutCommonSize(s),'card-size-all')}</div>`;}
-function resourceCardIds(s){return [...new Set(['cpu','memory','disk','load',...(s.metrics?.resources||[]).map(resourceCardId)])];}
+function resourceCardIds(s){return [...new Set(['cpu','memory','disk','load',...(s.metrics?.resources||[]).map(resourceCardId),...Object.keys(cardLayout(s).sizes||{})])];}
 function arrangeResourceMarkup(s,markup){
   const template=document.createElement('template');template.innerHTML=markup;
   const articles=[...template.content.children].filter(a=>s.server_type!=='openwrt'||!['metric:disk','metric:temperature'].includes(a.dataset.key)),layout=cardLayout(s),primary=primaryResource(s);
@@ -20,9 +20,10 @@ function arrangeResourceMarkup(s,markup){
     const header=article.querySelector('.metric-label'),chart=article.querySelector('.card-chart'),value=article.querySelector('.metric-value,.load-values'),bottom=article.querySelector('.metric-bottom'),sensors=article.querySelector('.sensor-details');
     const tag=header.querySelector('.tag'),symbol=header.querySelector('.icon');
     header.replaceChildren();if(symbol)header.append(symbol);
-    const title=document.createElement('span');title.className='resource-card-title';title.textContent=id===primary?.id?'CPU / SoC':label;title.title=label;header.append(title);if(tag)header.append(tag);
-    if(admin())header.insertAdjacentHTML('beforeend',`${iconButton('resource-card-settings',label+' card settings','info',`data-card="${e(id)}"`)}<button class="resource-card-handle" type="button" aria-label="Move ${e(label)} card" title="Drag to arrange; arrow keys also move this card" draggable="false">⠿</button>`);
-    const body=document.createElement('div');body.className='resource-card-body';const reading=document.createElement('div');reading.className='resource-card-reading';if(value)reading.append(value);if(bottom)reading.append(bottom);body.append(reading);if(chart)body.append(chart);
+    const historyButton=className=>{const button=document.createElement('button');button.type='button';button.className=className;button.dataset.key=className;for(const attr of ['data-action','data-resource','data-sensor','aria-label'])if(chart?.hasAttribute(attr))button.setAttribute(attr,chart.getAttribute(attr));return button;};
+    const title=historyButton('resource-card-title');title.textContent=id===primary?.id?'CPU / SoC':label;title.title=label;header.append(title);if(tag)header.append(tag);
+    header.insertAdjacentHTML('beforeend',`${iconButton('resource-card-settings',label+' card settings','info',`data-card="${e(id)}"`)}<button class="resource-card-handle" type="button" aria-label="Move ${e(label)} card" title="Drag to arrange; arrow keys also move this card" draggable="false">⠿</button>`);
+    const body=document.createElement('div');body.className='resource-card-body';const reading=historyButton('resource-card-reading');if(value)reading.append(value);if(bottom)reading.append(bottom);body.append(reading);if(chart)body.append(chart);
     article.replaceChildren(header,body);
     const details=document.createElement('div');details.className='resource-card-details';
     const source=row?.source||({cpu:'Host CPU',memory:'Host memory',disk:cardDisk(s)?.mount||'Volume',load:'System load'}[id])||'Temperature sensor';
@@ -53,25 +54,68 @@ function resourceFreeSlot(card,desired,placed,geometry){
   if(desired.row>0||desired.x>0)return resourceFreeSlot(card,{x:0,row:0},placed,geometry);
   throw new Error('The resource card grid is full.');
 }
-function planResourceCards(items,width,positions={}){
+function relativeResourcePositions(slots,geometry){
+  const ordered=[...slots].sort((a,b)=>a.x-b.x||a.row-b.row),positions={};
+  for(const [index,slot] of ordered.entries()){
+    const previous=ordered.slice(0,index),aligned=previous.find(other=>Math.abs(other.x-slot.x)<.5);
+    const before=previous.filter(other=>other.x+other.width<=slot.x).sort((a,b)=>b.x+b.width-a.x-a.width)[0];
+    const anchor=aligned||before,edge=aligned?'left':'right';
+    positions[slot.id]={x:slot.x/geometry.width,row:slot.row,anchor:anchor?.id||null,edge:anchor?edge:'left',offset:anchor?slot.x-anchor.x-(edge==='right'?anchor.width:0):slot.x};
+  }
+  return positions;
+}
+function legacyResourcePositions(items,width,positions){
+  const legacy=items.filter(item=>positions[item.id]&&positions[item.id].offset==null);
+  if(!legacy.length)return positions;
+  // Older saves contained fractions but no viewport width. Recover the original
+  // pixel grid only when integer coordinates and a tight neighbour corroborate it.
+  const ordered=legacy.map(item=>({...item,...positions[item.id]})).sort((a,b)=>a.x-b.x),xs=[...new Set(ordered.map(item=>item.x).filter(x=>x>0))];
+  let basis=width,best=0;
+  if(xs.length>=2){
+    for(let candidate=240;candidate<=8192;candidate++){
+      if(!xs.every(x=>Math.abs(x*candidate-Math.round(x*candidate))<.00001))continue;
+      const g=resourceGridGeometry(candidate);let tight=0;
+      for(let i=1;i<ordered.length;i++){
+        const a=ordered[i-1],b=ordered[i],gap=(b.x-a.x)*candidate-g.widths[a.size];
+        if(Math.abs(gap-g.gap)<.01)tight++;
+      }
+      if(tight>best||tight&&tight===best&&Math.abs(candidate-width)<Math.abs(basis-width)){best=tight;basis=candidate;}
+    }
+  }
+  const g=resourceGridGeometry(basis),slots=ordered.map(item=>({...item,x:Math.round(item.x*basis),width:Math.min(basis,g.widths[item.size])}));
+  return {...positions,...relativeResourcePositions(slots,g)};
+}
+function planResourceCards(items,width,positions={},layout={}){
   const geometry=resourceGridGeometry(width),placed=[],slots=new Map();
+  positions=legacyResourcePositions(items,width,positions);
   const cards=items.map(item=>({...item,width:Math.min(width,geometry.widths[item.size]||geometry.widths.medium),span:item.size==='small'?1:2}));
+  const lefts=new Map(),cardWidths=new Map(cards.map(card=>[card.id,card.width]));
+  function left(id,seen=new Set()){
+    if(lefts.has(id))return lefts.get(id);
+    const saved=positions[id];if(!saved||seen.has(id))return 0;
+    seen.add(id);let x=saved.offset??Math.round(saved.x*width);
+    if(saved.anchor&&positions[saved.anchor])x+=left(saved.anchor,seen)+(saved.edge==='right'?(cardWidths.get(saved.anchor)??Math.min(width,geometry.widths[layout.sizes?.[saved.anchor]||layout.default_size||'medium'])):0);
+    lefts.set(id,Math.round(x));return Math.round(x);
+  }
   // Reserve saved slots first, including intentional gaps, before adding discoveries.
-  for(const card of cards.filter(card=>positions[card.id])){
-    const saved=positions[card.id],desired={x:Math.min(width-card.width,Math.round(saved.x*width)),row:saved.row};
+  const savedCards=cards.filter(card=>positions[card.id]);
+  // Responsive overflow must not displace a neighbour whose saved slot still fits.
+  savedCards.sort((a,b)=>Number(left(a.id)+a.width>width)-Number(left(b.id)+b.width>width));
+  for(const card of savedCards){
+    const saved=positions[card.id],desired={x:Math.min(width-card.width,left(card.id)),row:saved.row};
     const slot=resourceFreeSlot(card,desired,placed,geometry);placed.push(slot);slots.set(card.id,slot);
   }
   let cursor={x:0,row:0};
   for(const card of cards.filter(card=>!positions[card.id])){
     const slot=resourceFreeSlot(card,cursor,placed,geometry);placed.push(slot);slots.set(card.id,slot);cursor={x:slot.x+slot.width+geometry.gap,row:slot.row};
   }
-  return {geometry,slots};
+  return {geometry,slots,coordinates:new Map(Object.keys(positions).map(id=>[id,{x:left(id),row:positions[id].row}]))};
 }
 function layoutResourceCards(){
   const grid=$('.resource-card-grid');if(!grid||resourceDrag?.started)return;
   const width=Math.floor(grid.clientWidth);if(!width)return;
   const cards=[...grid.querySelectorAll(':scope>[data-resource-card]')];
-  const plan=planResourceCards(cards.map(card=>({id:card.dataset.resourceCard,size:card.dataset.cardSize})),width,cardLayout(current()).positions);
+  const layout=cardLayout(current()),plan=planResourceCards(cards.map(card=>({id:card.dataset.resourceCard,size:card.dataset.cardSize})),width,layout.positions,layout);
   resourceCardGrids.set(grid,plan);setCardStyle(grid,'gridTemplateColumns',`repeat(${width}, 1px)`);
   for(const card of cards){const slot=plan.slots.get(card.dataset.resourceCard);setCardStyle(card,'width',slot.width+'px');setCardStyle(card,'gridColumn',`${slot.x+1} / span ${slot.width}`);setCardStyle(card,'gridRow',`${slot.row+1} / span ${slot.span}`);}
   if(observedCardGrid!==grid){cardGridObserver?.disconnect();observedCardGrid=grid;cardGridObserver=new ResizeObserver(layoutResourceCards);cardGridObserver.observe(grid);}
@@ -80,17 +124,32 @@ async function saveCardPreferences(serverId,body){
   if(cardSaves.has(serverId))throw new Error('Please wait for the card settings to finish saving.');
   cardSaves.add(serverId);++dashboardSequence;
   const s=state.data.servers.find(s=>s.id===serverId);
+  // Save the current neighbour relationships before a size change can reflow them.
+  if(body.layout&&!body.layout.positions&&current()?.id===serverId&&Object.keys(cardLayout(s).positions||{}).length){const plan=resourceCardGrids.get($('.resource-card-grid'));if(plan)body={...body,layout:{...body.layout,positions:captureRelativePositions(plan)}};}
   if(body.layout&&s){const old=cardLayout(s);pendingCardLayouts.set(serverId,{default_size:body.layout.default_size||old.default_size,sizes:{...(body.layout.reset_sizes?{}:old.sizes),...body.layout.sizes},order:body.layout.order||old.order,positions:{...old.positions,...body.layout.positions}});if(current()?.id===serverId)renderMain();}
   try{const saved=await api(`/servers/${serverId}/cards`,'PATCH',body);const server=state.data.servers.find(s=>s.id===serverId);if(server)server.card_layout=saved.card_layout;await load();return saved;}
   finally{pendingCardLayouts.delete(serverId);cardSaves.delete(serverId);if(current()?.id===serverId)renderMain();}
 }
-function overlayCardLayout(form){return {default_size:form.elements.card_default_size.value,reset_sizes:form.elements.card_reset_sizes.value==='1',sizes:Object.fromEntries([...form.querySelectorAll('[data-card-size-value]')].map(input=>[input.dataset.cardSizeValue,input.value]))};}
+function overlayCardLayout(form){const plan=resourceCardGrids.get($('.resource-card-grid'));return {default_size:form.elements.card_default_size.value,reset_sizes:form.elements.card_reset_sizes.value==='1',sizes:Object.fromEntries([...form.querySelectorAll('[data-card-size-value]')].map(input=>[input.dataset.cardSizeValue,input.value])),...(plan&&Object.keys(cardLayout(current()).positions||{}).length?{positions:captureRelativePositions(plan)}:{})};}
+function overlayCardSizes(form){
+  const s=current(),reset=form.elements.card_reset_sizes?.value==='1';
+  const sizes=new Map(resourceCardIds(s).map(id=>[id,reset?form.elements.card_default_size.value:resourceCardSize(s,id)]));
+  for(const input of form.querySelectorAll('[data-card-size-value]'))sizes.set(input.dataset.cardSizeValue,input.value);
+  return [...sizes.values()];
+}
 function setCardSizeChoice(el){
   const form=el.closest('form');if(!form||form.dataset.busy)return;
   for(const field of form.querySelectorAll('[data-card-size-field]'))if(field.dataset.cardSizeField===el.dataset.card){field.querySelector('input').value=el.dataset.value;updateSlidingControl(field.querySelector('.sliding-control'),el.dataset.value);}
+  const all=form.querySelector('[data-action=overlay-card-size]')?.closest('.sliding-control');if(all){const sizes=new Set(overlayCardSizes(form));updateSlidingControl(all,sizes.size===1?[...sizes][0]:'mixed');}
+}
+function confirmCardSizeReset(sizes,size){return new Set(sizes).size<2||window.confirm(`These cards have mixed sizes. Set all cards to ${size}? This replaces your individual card sizes and may move cards in your custom layout.`);}
+async function setAllCardSizes(el){
+  const s=current();if(cardSaves.has(s.id)||!confirmCardSizeReset(resourceCardIds(s).map(id=>resourceCardSize(s,id)),el.dataset.value))return;
+  return saveCardPreferences(s.id,{layout:{default_size:el.dataset.value,reset_sizes:true}});
 }
 function setOverlayCardSize(el){
   const form=el.closest('form');if(!form||form.dataset.busy)return;
+  if(!confirmCardSizeReset(overlayCardSizes(form),el.dataset.value))return;
   form.elements.card_default_size.value=el.dataset.value;form.elements.card_reset_sizes.value='1';
   updateSlidingControl(el.closest('.sliding-control'),el.dataset.value);
   for(const field of form.querySelectorAll('[data-card-size-field]')){field.querySelector('input').value=el.dataset.value;updateSlidingControl(field.querySelector('.sliding-control'),el.dataset.value);}
@@ -101,22 +160,28 @@ function resourceChoicesFromForm(form){return [...form.querySelectorAll('[data-r
   return {id:row.dataset.resourceSetting,...Object.fromEntries(['monitor','warn','card'].map(key=>[key,row.querySelector('[data-resource-option='+key+']').checked])),limit_mode,...limits};
 });}
 function resourceCardSettings(el){
-  const s=current(),id=el.dataset.card,rows=(s.metrics?.resources||[]).filter(r=>resourceCardId(r)===id),disks=id==='disk'?(s.metrics.disks||[]).filter(d=>d.monitor&&d.card):[];
-  const label=resourceMeta[id]?.label||rows[0]?.label||'CPU / SoC',rect=el.getBoundingClientRect();
-  modal(e(label)+' settings',`<form id="resource-card-form" data-server="${e(s.id)}" data-card="${e(id)}"><label>Card size</label>${cardSizeField(s,id)}<p class="hint">Large keeps Medium’s height and uses 1.5× its width.</p>${rows.map(r=>`<fieldset data-resource-setting="${e(r.id)}" data-group="${e(r.group)}">${rows.length>1?`<legend>${e(r.label)}</legend>`:''}<div class="card-checks">${['monitor','warn','card'].map((key,i)=>`<label class="check-line"><input type="checkbox" data-resource-option="${key}" ${r[key]?'checked':''} ${key!=='monitor'&&!r.monitor?'disabled':''}>${['Monitoring','Warning','Resource card'][i]}</label>`).join('')}</div><div class="card-warning-limits"><label>Warning limits<select data-resource-limit="mode" ${r.monitor&&r.warn?'':'disabled'}><option value="default" ${r.limit_mode==='default'?'selected':''}>${['cpu','memory','temperature'].includes(r.group)?'Inherited':'No defaults'}</option><option value="custom" ${r.limit_mode==='custom'?'selected':''}>Custom</option></select></label><div class="resource-limits">${['low','high'].map(side=>`<label>${side==='low'?'Low':'High'} ${e(r.unit)}<input type="number" step="any" data-resource-limit="${side}" value="${r[side]??''}" placeholder="Off" ${r.monitor&&r.warn&&r.limit_mode==='custom'?'':'disabled'}></label>`).join('')}</div></div></fieldset>`).join('')}${disks.map(d=>`<fieldset data-volume="${e(d.mount)}"><legend>Volume ${e(d.mount)}</legend>${['monitor','warn','card'].map((key,i)=>`<label class="check-line"><input type="checkbox" data-volume-option="${key}" ${d[key]?'checked':''}>${['Monitoring','Warning','Resource card'][i]}</label>`).join('')}<p class="hint">Warnings use this server’s disk limits.</p></fieldset>`).join('')}${!rows.length&&!disks.length?'<p class="hint">Resource controls become available after a successful check.</p>':''}<div class="form-error" role="alert"></div><div class="form-actions">${button('close','Cancel','','ghost')}<button type="submit" class="primary">Save</button></div></form>`);
+  const s=current(),id=el.dataset.card,rows=admin()?(s.metrics?.resources||[]).filter(r=>resourceCardId(r)===id):[],disks=admin()&&id==='disk'?(s.metrics.disks||[]).filter(d=>d.monitor&&d.card):[];
+  const label=resourceMeta[id]?.label||resourceRow(s,id)?.label||'CPU / SoC',rect=el.getBoundingClientRect();
+  modal(e(label)+' settings',`<form id="resource-card-form" data-server="${e(s.id)}" data-card="${e(id)}"><label>Card size</label>${cardSizeField(s,id)}<p class="hint">Large keeps Medium’s height and uses 1.5× its width.</p>${rows.map(r=>`<fieldset data-resource-setting="${e(r.id)}" data-group="${e(r.group)}">${rows.length>1?`<legend>${e(r.label)}</legend>`:''}<div class="card-checks">${['monitor','warn','card'].map((key,i)=>`<label class="check-line"><input type="checkbox" data-resource-option="${key}" ${r[key]?'checked':''} ${key!=='monitor'&&!r.monitor?'disabled':''}>${['Monitoring','Warning','Resource card'][i]}</label>`).join('')}</div><div class="card-warning-limits"><label>Warning limits<select data-resource-limit="mode" ${r.monitor&&r.warn?'':'disabled'}><option value="default" ${r.limit_mode==='default'?'selected':''}>${['cpu','memory','temperature'].includes(r.group)?'Inherited':'No defaults'}</option><option value="custom" ${r.limit_mode==='custom'?'selected':''}>Custom</option></select></label><div class="resource-limits">${['low','high'].map(side=>`<label>${side==='low'?'Low':'High'} ${e(r.unit)}<input type="number" step="any" data-resource-limit="${side}" value="${r[side]??''}" placeholder="Off" ${r.monitor&&r.warn&&r.limit_mode==='custom'?'':'disabled'}></label>`).join('')}</div></div></fieldset>`).join('')}${disks.map(d=>`<fieldset data-volume="${e(d.mount)}"><legend>Volume ${e(d.mount)}</legend>${['monitor','warn','card'].map((key,i)=>`<label class="check-line"><input type="checkbox" data-volume-option="${key}" ${d[key]?'checked':''}>${['Monitoring','Warning','Resource card'][i]}</label>`).join('')}<p class="hint">Warnings use this server’s disk limits.</p></fieldset>`).join('')}${admin()&&!rows.length&&!disks.length?'<p class="hint">Resource controls become available after a successful check.</p>':''}<div class="form-error" role="alert"></div><div class="form-actions">${button('close','Cancel','','ghost')}<button type="submit" class="primary">Save</button></div></form>`);
   $('.modal-backdrop').classList.add('resource-popover-backdrop');const pop=$('.modal');pop.classList.add('resource-card-popover');
-  pop.style.left=Math.max(10,Math.min(innerWidth-pop.offsetWidth-10,rect.right-pop.offsetWidth))+'px';pop.style.top=Math.max(10,Math.min(innerHeight-pop.offsetHeight-10,rect.bottom+8))+'px';
+  pop.style.left=Math.max(10,Math.min(innerWidth-pop.offsetWidth-10,rect.right-pop.offsetWidth))+'px';pop.style.top=Math.max(10,Math.min(innerHeight-pop.offsetHeight-10,rect.bottom+8))+'px';pop.style.maxHeight=`calc(100dvh - ${parseFloat(pop.style.top)+10}px)`;
 }
 async function saveResourceCardForm(form){
   const resources=resourceChoicesFromForm(form),volumes=[...form.querySelectorAll('[data-volume]')].map(row=>({mount:row.dataset.volume,...Object.fromEntries(['monitor','warn','card'].map(key=>[key,row.querySelector('[data-volume-option='+key+']').checked]))}));
   const size=form.querySelector('[data-card-size-value]').value;
-  await saveCardPreferences(form.dataset.server,{layout:{sizes:{[form.dataset.card]:size}},resources,volumes});markFormSaved(form);closeOverlay();toast('Resource card saved');
+  await saveCardPreferences(form.dataset.server,{layout:{sizes:{[form.dataset.card]:size}},...(admin()?{resources,volumes}:{})});markFormSaved(form);closeOverlay();toast('Resource card saved');
 }
 function clearResourceDrag(){
   const old=resourceDrag;resourceDrag=null;resourceGhost?.remove();resourceGhost=null;resourceDropSlot?.remove();resourceDropSlot=null;
   document.querySelectorAll('.resource-card-dragging').forEach(el=>el.classList.remove('resource-card-dragging'));
   if(old?.started){state.dragging=false;old.grid.style.minHeight=old.minHeight;}
   if(old?.handle.hasPointerCapture(old.pointer))old.handle.releasePointerCapture(old.pointer);
+}
+function captureRelativePositions(plan,slots=[...plan.slots.values()]){
+  const positions=relativeResourcePositions(slots,plan.geometry);
+  // Flatten hidden anchors before replacing visible relationships to avoid cycles.
+  for(const [id,point] of plan.coordinates)if(!positions[id])positions[id]={x:Math.min(1,point.x/plan.geometry.width),row:point.row,anchor:null,edge:'left',offset:point.x};
+  return positions;
 }
 async function moveResourceCard(id,position,serverId){
   if(!position||current()?.id!==serverId)return;
@@ -125,7 +190,7 @@ async function moveResourceCard(id,position,serverId){
   if(next.x===old.x&&next.row===old.row)return;
   if(!resourceSlotFree(next,others,plan.geometry))throw new Error('That space is occupied. Choose an empty slot.');
   const slots=[...others,next].sort((a,b)=>a.row-b.row||a.x-b.x);
-  const positions=Object.fromEntries(slots.map(slot=>[slot.id,{x:slot.x/plan.geometry.width,row:slot.row}]));
+  const positions=captureRelativePositions(plan,slots);
   await saveCardPreferences(serverId,{layout:{positions,order:slots.map(slot=>slot.id)}});
 }
 function updateResourceDrop(event){
@@ -141,7 +206,7 @@ function updateResourceDrop(event){
   resourceDropSlot.classList.toggle('invalid',!valid);resourceDropSlot.style.left=rect.left+x+'px';resourceDropSlot.style.top=rect.top+row*g.rowStep+'px';resourceDropSlot.style.width=slot.width+'px';resourceDropSlot.style.height=slot.span*g.rowStep-g.gap+'px';
 }
 document.addEventListener('pointerdown',event=>{
-  const handle=event.target.closest('.resource-card-handle');if(!handle||!event.isPrimary||event.button!==0||!admin()||cardSaves.has(current()?.id))return;
+  const handle=event.target.closest('.resource-card-handle');if(!handle||!event.isPrimary||event.button!==0||cardSaves.has(current()?.id))return;
   const card=handle.closest('[data-resource-card]'),rect=card.getBoundingClientRect(),grid=card.parentNode;event.preventDefault();handle.focus({preventScroll:true});handle.setPointerCapture(event.pointerId);
   resourceDrag={handle,card,grid,minHeight:grid.style.minHeight,id:card.dataset.resourceCard,server:current().id,pointer:event.pointerId,x:event.clientX,y:event.clientY,dx:event.clientX-rect.left,dy:event.clientY-rect.top,started:false,position:null};
 });

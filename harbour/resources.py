@@ -3,16 +3,25 @@ import hashlib
 import json
 import math
 
-from . import remote_probe
+from . import remote_probe, store
 
 
 def preferences(server):
     return json.loads(server.get('resource_settings') or '{}')
 
 
-def card_layout(server):
+def card_layout(server, user_id=None):
+    saved = store.one('SELECT layout FROM user_card_layouts WHERE user_id=? AND server_id=?',
+                      (user_id, server['id'])) if user_id is not None else None
+    # The old shared layout is an immutable starting point until a user saves their own.
     return {'default_size': 'medium', 'sizes': {}, 'order': [], 'positions': {},
-            **json.loads(server.get('card_layout') or '{}')}
+            **json.loads(saved['layout'] if saved else server.get('card_layout') or '{}')}
+
+
+def save_card_layout(con, server_id, user_id, layout):
+    con.execute('INSERT INTO user_card_layouts (user_id,server_id,layout) VALUES (?,?,?) '
+                'ON CONFLICT(user_id,server_id) DO UPDATE SET layout=excluded.layout',
+                (user_id, server_id, json.dumps(layout)))
 
 
 def card_ids(server):

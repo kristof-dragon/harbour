@@ -91,11 +91,11 @@ def test_layout_migration_and_disappeared_sensor_preferences(client):
     with store.db() as con:
         con.execute('ALTER TABLE servers DROP COLUMN card_layout')
     store.initialize(); store.initialize()
-    assert dashboard(client)['card_layout'] == dict(default_size='medium', sizes={}, order=[], positions={})
+    assert dashboard(client)['card_layout']['sizes'][fan] == 'large'
     assert not resources.preferences(server())['cpu']['card']
 
 
-def test_cards_require_admin_csrf_and_respect_server_lock(client):
+def test_cards_require_csrf_and_monitoring_requires_admin(client):
     lock = app.server_lock('atlas'); lock.acquire()
     try:
         assert patch(client, layout={'default_size': 'small'}).status_code == 409
@@ -107,7 +107,9 @@ def test_cards_require_admin_csrf_and_respect_server_lock(client):
     assert client.post('/api/users', json=dict(name='viewer', password='viewer-password-strong', role='user')).status_code == 200
     viewer = client.post('/api/login', json=dict(name='viewer', password='viewer-password-strong')).json()
     client.headers['X-CSRF-Token'] = viewer['csrf']
-    assert patch(client, layout={'default_size': 'small'}).status_code == 403
+    assert patch(client, layout={'default_size': 'small'}).status_code == 200
+    assert patch(client, resources=[option('cpu', card=False)]).status_code == 403
+    assert patch(client, volumes=[dict(mount='/', monitor=True, warn=False, card=True)]).status_code == 403
 
 
 def test_disk_popover_and_overlay_share_flags_and_pending_alerts(client):
@@ -124,3 +126,45 @@ def test_disk_popover_and_overlay_share_flags_and_pending_alerts(client):
     before = server()
     assert patch(client, layout={'sizes': {'disk': 'large'}}, volumes=[{**volume, 'monitor': False}]).status_code == 400
     assert server() == before
+
+
+def test_per_user_layout_survives_logout_restart_and_preserves_legacy(client):
+    legacy = dict(default_size='small', sizes={'load': 'large'}, order=['cpu', 'load'],
+                  positions={'cpu': {'x': 0, 'row': 0}, 'load': {'x': .25, 'row': 0}})
+    store.execute('UPDATE servers SET card_layout=? WHERE id=?', (json.dumps(legacy), 'atlas'))
+    assert dashboard(client)['card_layout'] == legacy
+    personal = {**legacy, 'positions': {
+        'cpu': {'x': 0, 'row': 0, 'anchor': None, 'edge': 'left', 'offset': 0},
+        'load': {'x': .25, 'row': 0, 'anchor': 'cpu', 'edge': 'right', 'offset': 10}}}
+    assert patch(client, layout=personal).status_code == 200
+    assert client.post('/api/users', json=dict(name='other', password='another-strong-password', role='admin')).status_code == 200
+    assert client.post('/api/logout').status_code == 200
+    store.initialize()
+    login = client.post('/api/login', json=dict(name='other', password='another-strong-password')).json()
+    client.headers['X-CSRF-Token'] = login['csrf']
+    assert dashboard(client)['card_layout'] == legacy
+    assert save(client, [], card_layout={'sizes': {'cpu': 'medium'}}).status_code == 200
+    assert dashboard(client)['card_layout']['sizes']['cpu'] == 'medium'
+    assert json.loads(server()['card_layout']) == legacy
+    assert client.post('/api/logout').status_code == 200
+    store.initialize()
+    login = client.post('/api/login', json=dict(name='admin', password='test-password-strong')).json()
+    client.headers['X-CSRF-Token'] = login['csrf']
+    assert dashboard(client)['card_layout'] == personal
+    # Unrelated settings saves never create or reset anyone's layout.
+    assert save(client, []).status_code == 200
+    assert dashboard(client)['card_layout'] == personal
+    assert len(store.rows('SELECT * FROM user_card_layouts')) == 2
+
+
+@pytest.mark.parametrize('positions', [
+    {'cpu': dict(x=0, row=0, anchor='cpu', offset=10)},
+    {'cpu': dict(x=0, row=0, anchor='unknown', offset=10)},
+    {'cpu': dict(x=0, row=0, anchor='memory', offset=10), 'memory': dict(x=.2, row=0, anchor='cpu', offset=10)},
+    {'cpu': dict(x=0, row=0, anchor='memory'), 'memory': dict(x=.2, row=0)},
+])
+def test_invalid_relative_positions_are_atomic(client, positions):
+    before = dashboard(client)['card_layout']
+    assert patch(client, layout={'positions': positions}, resources=[option('cpu', card=False)]).status_code == 400
+    assert dashboard(client)['card_layout'] == before
+    assert next(r for r in dashboard(client)['metrics']['resources'] if r['id'] == 'cpu')['card']
