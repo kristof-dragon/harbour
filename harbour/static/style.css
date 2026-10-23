@@ -231,7 +231,8 @@ textarea{min-height:110px;resize:vertical;font-family:var(--mono);font-size:.78r
 .notice{padding:17px 0;border-bottom:1px solid var(--line)}
 .notice-title{display:flex;align-items:center;gap:8px;font-weight:550;font-size:.92rem}
 .notice.warn .notice-title .icon{color:var(--red)}
-.notification-actions{display:flex;justify-content:flex-end;margin:0 0 16px}
+.notification-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin:0 0 16px}
+.notification-action-group{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
 .notice.update .notice-title .icon{color:var(--blue)}
 .notice p{font-size:.84rem;color:var(--muted);margin:8px 0;overflow-wrap:anywhere}
 .notice-actions{display:flex;gap:10px;justify-content:space-between;align-items:center;font-size:.8rem}

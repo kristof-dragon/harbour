@@ -5,6 +5,10 @@ const now=Date.now()/1000,thresholds={cpu:85,memory:85,disk:85,disk_free_gb:10,t
 const host={id:'host',name:'Test server',host:'192.0.2.1',port:22,server_type:'plain',services:[],warnings:[{id:'cpu',title:'CPU usage is high',detail:'95%',event_id:60,dismissed:false}],updates:0,checked:now,monitoring_enabled:true,poll_seconds:60,connection_status:'up',thresholds,metrics:{cpu:95,cores:4,memory:{percent:30,total:8e9,used:2.4e9},disks:[],temperature:{sensors:[]},os:'Test Linux',kernel:'test',uptime:1000}};
 const events=Array.from({length:60},(_,i)=>({id:i+1,server_id:'host',server_name:'Test server',warning_key:i===59?'cpu':'temperature:'+i,source:'resource',title:i===59?'CPU usage is high':i===58?'NVMe <img src=x onerror="window.injected=true">':'NVMe sensor '+i,detail:'Temperature exceeded its configured limit',definition:{unit:i===59?'%':'°C',low:null,high:i===59?85:80,side:'high'},started_at:now-3600-i*60,last_seen:now-3500-i*60,detected_at:now-3400-i*60,closed_at:i===59?null:now-3000-i*60,close_reason:i===59?null:'recovered',initial_values:{value:82},latest_values:{value:90},extreme_values:{value:96},observation_gap:i===58?1:0,status:i===59?'active':'resolved'}));
 let user='alice',failNext=false,delayNext=0;const acknowledgements={alice:new Map(),bob:new Map()};
+const updateDismissed={alice:false,bob:false},hidden={alice:new Map(),bob:new Map()};
+host.services=[{id:'web',name:'Web',image:'example/web:latest',update:{status:'available'}}];
+events[58].occurrence_count=383;events[58].first_seen=now-86400;
+const occurrences=Array.from({length:383},(_,i)=>({...events[58],id:1000+i,occurrence_count:undefined,first_seen:undefined,started_at:now-86400+i*120}));
 const summary=()=>({unacknowledged:events.filter(e=>!acknowledgements[user].has(e.id)).length,latest_id:60,started_at:now-86400});
 const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'harbour/static',req.url==='/'?'index.html':req.url.replace('/static/',''));try{res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html');res.end(fs.readFileSync(file));}catch{res.writeHead(404).end();}});
 (async()=>{
@@ -18,11 +22,13 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
    if(url.pathname==='/api/config')data={demo:true,version:'test'};
    else if(url.pathname==='/api/me')data={id:user,name:user,role:'user',csrf:'test'};
    else if(url.pathname==='/api/session/activity')data={ok:true};
-   else if(url.pathname==='/api/dashboard')data={servers:[{...host,warnings:host.warnings.map(w=>({...w,dismissed:acknowledgements[user].has(w.event_id)}))}],thresholds,jobs:[],warning_events:summary()};
+   else if(url.pathname==='/api/dashboard')data={servers:[{...host,updates:updateDismissed[user]?0:1,services:host.services.map(s=>({...s,dismissed:updateDismissed[user]})),warnings:host.warnings.map(w=>({...w,dismissed:acknowledgements[user].has(w.event_id)}))}],thresholds,jobs:[],warning_events:summary()};
    else if(url.pathname.endsWith('/history'))data={from:now-3600,to:now,hours:1,resolution_seconds:60,poll_seconds:60,points:[],disk_mounts:[]};
    else if(url.pathname==='/api/warning-events'){
     if(failNext){failNext=false;await route.fulfill({status:503,json:{detail:'History temporarily unavailable'}});return;}
-    let rows=events.map(e=>({...e,acknowledged_at:acknowledgements[user].get(e.id)||null})).sort((a,b)=>b.id-a.id);
+    let rows=(p.get('view')==='occurrences'?occurrences:events).map(e=>({...e,acknowledged_at:acknowledgements[user].get(e.id)||null,hidden_at:hidden[user].get(e.id)||null})).sort((a,b)=>b.id-a.id);
+    if(p.get('view')==='occurrences'){assert.equal(p.get('server_id'),'host');assert.equal(p.get('warning_key'),events[58].warning_key);}
+    if(p.get('visibility')==='visible')rows=rows.filter(e=>!e.hidden_at);
     if(p.get('acknowledgement')==='unacknowledged')rows=rows.filter(e=>!e.acknowledged_at);
     if(p.get('acknowledgement')==='acknowledged')rows=rows.filter(e=>e.acknowledged_at);
     if(p.get('status')&&p.get('status')!=='all')rows=rows.filter(e=>e.status===p.get('status'));
@@ -33,8 +39,19 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
    }else if(url.pathname.endsWith('/acknowledgement')){
     const id=Number(url.pathname.split('/')[3]);assert.equal(request.method(),'PUT');
     request.postDataJSON().acknowledged?acknowledgements[user].set(id,now):acknowledgements[user].delete(id);data={ok:true};
-   }else if(url.pathname==='/api/dismiss-all'){let dismissed=0;for(const e of events)if(!acknowledgements[user].has(e.id)){acknowledgements[user].set(e.id,now);dismissed++;}data={ok:true,dismissed};}
-   else if(url.pathname==='/api/dismissals'){acknowledgements[user].clear();data={ok:true};}
+   }else if(url.pathname.endsWith('/visibility')){
+    const id=Number(url.pathname.split('/')[3]);request.postDataJSON().hidden?hidden[user].set(id,now):hidden[user].delete(id);data={ok:true};
+   }else if(url.pathname==='/api/hide-warnings'){
+    for(const e of events)hidden[user].set(e.id,now);data={ok:true,hidden:events.length};
+   }else if(url.pathname==='/api/dismiss-all'){
+    assert.ok(['warnings','updates'].includes(p.get('kind')));let dismissed=0;
+    if(p.get('kind')==='warnings'){for(const e of events)if(!acknowledgements[user].has(e.id)){acknowledgements[user].set(e.id,now);dismissed++;}}
+    else{dismissed=updateDismissed[user]?0:1;updateDismissed[user]=true;}data={ok:true,dismissed};
+   }else if(url.pathname==='/api/dismissals'){
+    assert.ok(['warnings','updates'].includes(p.get('kind')));
+    if(p.get('kind')==='warnings')hidden[user].clear();
+    else updateDismissed[user]=false;data={ok:true};
+   }
    else throw Error('Unexpected API request '+url.pathname);
    await route.fulfill({json:data});
   });
@@ -42,15 +59,31 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
   const badge=page.locator('[data-action=warnings] b');assert.equal(await badge.textContent(),'60');
   await page.locator('[data-action=warnings]').click();await page.locator('[data-key="warning-event:59"]').waitFor();
   assert.equal(await page.locator('.warning-event img').count(),0);
+  assert.equal(await page.getByRole('button',{name:'Dismiss all updates',exact:true}).count(),0);
+  await page.locator('[data-key="warning-event:59"] [data-action=warning-occurrences]').click();await page.waitForFunction(()=>!warningHistory.pending);
+  assert.equal(await page.locator('.warning-event').count(),50);assert.equal(await page.locator('[name=server]').inputValue(),'host');
+  await page.getByRole('button',{name:'Older',exact:true}).click();await page.waitForFunction(()=>!warningHistory.pending);
+  assert.equal(await page.locator('.warning-event').count(),50);
+  await page.getByRole('button',{name:'Back to all warnings',exact:true}).click();await page.waitForFunction(()=>!warningHistory.pending);
+  assert.equal(await page.locator('[name=server]').inputValue(),'');
+  await page.locator('[data-action=notice-tab][data-kind=warnings]').click();await page.waitForFunction(()=>!warningHistory.pending);
   const resolved=page.locator('[data-key="warning-event:59"]');assert.match(await resolved.textContent(),/Resolved/);assert.match(await resolved.textContent(),/Peak: 96 °C/);
+  assert.match(await resolved.textContent(),/383 occurrences/);assert.match(await resolved.textContent(),/latest occurrence/);
   await resolved.locator('summary').click();assert.match(await resolved.textContent(),/High: 80 °C/);assert.match(await resolved.textContent(),/interrupted/);
-  await resolved.locator('[data-action=warning-ack]').click();await resolved.waitFor({state:'detached'});assert.equal(await badge.textContent(),'59');
-  await page.locator('[data-key="warning-event:60"] [data-action=warning-ack]').click();await page.locator('[data-key="warning-event:60"]').waitFor({state:'detached'});
-  assert.equal(await page.locator('.server-item.has-warning').count(),1);
+  await resolved.locator('[data-action=warning-visibility]').click();await resolved.waitFor({state:'detached'});assert.equal(await badge.textContent(),'60');
+  await page.getByRole('button',{name:'Bring back warnings',exact:true}).click();await resolved.waitFor();assert.equal(await badge.textContent(),'60');
+  await resolved.locator('[data-action=warning-ack]').click();await page.waitForFunction(()=>!warningHistory.pending&&warningHistory.data.events.find(e=>e.id===59)?.acknowledged_at);assert.equal(await badge.textContent(),'59');
+  assert.equal(await resolved.locator('[data-action=warning-ack]').isDisabled(),true);
+  await page.locator('[data-key="warning-event:60"] [data-action=warning-ack]').click();await page.waitForFunction(()=>!warningHistory.pending&&warningHistory.data.events.find(e=>e.id===60)?.acknowledged_at);
+  assert.equal(await page.locator('.server-item.has-warning').count(),0);
+  assert.equal(await page.locator('.metric.warning,.resource-warning,.server-warnings').count(),0);
+  await page.locator('[data-key="warning-event:60"] [data-action=warning-visibility]').click();await page.locator('[data-key="warning-event:60"]').waitFor({state:'detached'});
+  await page.getByRole('button',{name:'Bring back warnings',exact:true}).click();await page.locator('[data-key="warning-event:60"]').waitFor();
+  assert.equal(await page.locator('.server-item.has-warning').count(),0);assert.equal(await badge.textContent(),'58');
   await page.locator('[data-kind=history]').click();await page.locator('#warning-history-filter').waitFor();await page.locator('[data-key="warning-event:59"]').waitFor();
   await page.locator('[name=ack]').selectOption('acknowledged');await page.getByRole('button',{name:'Apply filters',exact:true}).click();await page.waitForFunction(()=>!warningHistory.pending);
   assert.equal(await page.locator('.warning-event').count(),2);
-  await page.locator('[data-key="warning-event:59"] [data-action=warning-ack]').click();await page.locator('[data-key="warning-event:59"]').waitFor({state:'detached'});
+  assert.equal(await page.locator('[data-key="warning-event:59"] [data-action=warning-ack]').isDisabled(),true);
   await page.locator('[name=ack]').selectOption('all');await page.getByRole('button',{name:'Apply filters',exact:true}).click();await page.waitForFunction(()=>!warningHistory.pending);
   await page.getByRole('button',{name:'Older',exact:true}).click();await page.waitForFunction(()=>!warningHistory.pending);assert.equal(await page.locator('.warning-event').count(),10);
   await page.getByRole('button',{name:'Newer',exact:true}).click();await page.waitForFunction(()=>!warningHistory.pending);assert.equal(await page.locator('.warning-event').count(),50);
@@ -64,12 +97,32 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
   assert.equal(await page.getByRole('heading',{name:'Notifications',exact:true}).count(),1);
   await page.screenshot({path:'test-results/warning-history-mobile.png'});
   assert.equal(await page.locator('.warning-history-drawer').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
-  await page.getByRole('button',{name:'Close notifications',exact:true}).click();await page.reload();await page.locator('.server-item').waitFor();assert.equal(await badge.textContent(),'59');
+  await page.getByRole('button',{name:'Close notifications',exact:true}).click();await page.reload();await page.locator('.server-item').waitFor();assert.equal(await badge.textContent(),'58');
   user='bob';await page.reload();await page.locator('.server-item').waitFor();assert.equal(await badge.textContent(),'60');
   await page.locator('[data-action=warnings]').click();await page.locator('.warning-event').first().waitFor();
-  await page.getByRole('button',{name:'Acknowledge warnings & dismiss updates',exact:true}).click();await page.getByText('Nothing new',{exact:true}).waitFor();assert.equal(await badge.textContent(),'0');
+  await page.getByRole('button',{name:'Acknowledge all warnings',exact:true}).click();await page.waitForFunction(()=>!warningHistory.pending&&state.data.warning_events.unacknowledged===0);assert.equal(await badge.textContent(),'0');
+  assert.equal(await page.locator('.warning-event').count(),50);
+  await page.getByRole('button',{name:'Remove warnings from list',exact:true}).click();await page.getByText('Nothing new',{exact:true}).waitFor();
+  assert.equal(updateDismissed.bob,false);
+  await page.getByRole('button',{name:'Bring back warnings',exact:true}).click();await page.locator('[data-key="warning-event:60"]').waitFor();assert.equal(await badge.textContent(),'0');
+  assert.equal(await page.locator('.warning-event').count(),50);
+  assert.equal(await page.locator('.server-item.has-warning').count(),0);
+  await page.locator('[data-action=notice-tab][data-kind=updates]').click();
+  assert.equal(await page.getByRole('button',{name:'Acknowledge all warnings',exact:true}).count(),0);
+  await page.getByRole('button',{name:'Dismiss all updates',exact:true}).click();await page.getByText('Nothing new',{exact:true}).waitFor();assert.equal(await badge.textContent(),'0');
+  await page.getByRole('button',{name:'Bring back updates',exact:true}).click();await page.locator('.notice.update').waitFor();assert.equal(await badge.textContent(),'0');
+  await page.locator('[data-action=notice-tab][data-kind=all]').click();await page.waitForFunction(()=>!warningHistory.pending);
+  assert.equal(await page.getByRole('button',{name:'Acknowledge all warnings',exact:true}).count(),1);
+  assert.equal(await page.getByRole('button',{name:'Dismiss all updates',exact:true}).count(),1);
+  assert.equal(await page.locator('.warning-history-drawer').evaluate(el=>el.scrollWidth<=el.clientWidth),true);
+  await page.screenshot({path:'test-results/warning-controls-mobile.png'});
+  await page.setViewportSize({width:1360,height:1000});await page.screenshot({path:'test-results/warning-controls-desktop.png'});
   await page.locator('[data-kind=history]').click();await page.locator('.warning-event').first().waitFor();assert.equal(await page.locator('.warning-event').count(),50);
+  events[59]={...events[59],id:61,occurrence_count:2,first_seen:events[59].started_at,started_at:now,last_seen:now};host.warnings[0].event_id=61;
+  await page.locator('[data-action=notice-tab][data-kind=warnings]').click();await page.evaluate(()=>{invalidateWarningHistory();return load();});await page.waitForFunction(()=>!warningHistory.pending&&warningHistory.data.events.some(e=>e.id===61));
+  assert.equal(await badge.textContent(),'1');assert.equal(await page.locator('.server-item.has-warning').count(),1);assert.equal(await page.locator('.metric.warning').count(),1);
+  assert.match(await page.locator('[data-key="warning-event:61"]').textContent(),/2 occurrences/);
   assert.deepEqual(errors,[]);
-  console.log('PASS: resolved warning inbox, peaks and limits, safe labels, per-user acknowledgement and reload, persistent active indicators, searchable history, pagination, focus preservation, error recovery, bulk acknowledgement and mobile fit');
+  console.log('PASS: grouped recurrence history, separate acknowledgement and visibility, independent update actions and silent restoration, per-user acknowledgement, indicators silenced until recurrence, pagination, focus preservation, error recovery and mobile fit');
  }finally{await browser.close();server.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

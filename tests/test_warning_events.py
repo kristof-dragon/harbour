@@ -30,7 +30,7 @@ def reading(value, at, server_id='atlas', missing=False):
 
 
 def temperature_events(client, **params):
-    response = client.get('/api/warning-events', params={'search': 'Temperature', **params})
+    response = client.get('/api/warning-events', params={'view': 'occurrences', 'search': 'Temperature', **params})
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -173,7 +173,8 @@ def test_bulk_ack_includes_resolved_warnings_and_restore_keeps_history(client):
     assert temperature_events(client, acknowledgement='unacknowledged')['events'] == []
     assert temperature_events(client)['events'][0]['status'] == 'resolved'
     assert client.delete('/api/dismissals').status_code == 200
-    assert len(temperature_events(client, acknowledgement='unacknowledged')['events']) == 1
+    assert temperature_events(client, acknowledgement='unacknowledged')['events'] == []
+    assert len(temperature_events(client, visibility='visible')['events']) == 1
 
 
 def test_no_invented_history_before_installation_or_future_samples(client):
@@ -252,3 +253,162 @@ def test_newly_discovered_sensor_backfill_does_not_use_new_global_limits(client)
         events.observe_resources(con, server, metrics, app.thresholds_for(server), now + 60)
     event, = client.get('/api/warning-events').json()['events']
     assert event['definition']['high'] == 70 and event['status'] == 'active'
+
+
+def test_existing_backlog_is_one_warning_with_retained_occurrence_evidence(client):
+    start_history(); server = app.get_server('atlas')
+    with store.db() as con:
+        for i in range(450):
+            at = 1000 + i * 120
+            events.observe(con, server, 'temperature:nvme', 'resource', at, True, 'NVMe temperature',
+                           definition={'high': 65, 'unit': '°C'}, values={'value': 70 + i % 5}, received_at=at)
+            events.observe(con, server, 'temperature:nvme', 'resource', at + 60, False, received_at=at + 60)
+    store.initialize()  # Existing records need no destructive migration.
+    page = client.get('/api/warning-events').json()
+    warning, = page['events']
+    assert page['unacknowledged'] == 1 and page['next_before'] is None
+    assert warning['occurrence_count'] == 450 and warning['first_seen'] == 1000
+    assert warning['status'] == 'resolved' and warning['started_at'] == 1000 + 449 * 120
+    assert client.get('/api/dashboard').json()['warning_events']['unacknowledged'] == 1
+    evidence = client.get('/api/warning-events', params={'view': 'occurrences', 'server_id': 'atlas',
+                                                       'warning_key': 'temperature:nvme', 'limit': 100}).json()
+    assert len(evidence['events']) == 100 and evidence['next_before']
+    assert 'occurrence_count' not in evidence['events'][0]
+    assert client.put(f"/api/warning-events/{warning['id']}/acknowledgement", json={}).status_code == 200
+    assert client.get('/api/warning-events?acknowledgement=unacknowledged').json()['events'] == []
+    assert store.one('SELECT COUNT(*) n FROM warning_events')['n'] == 450
+    assert store.one('SELECT COUNT(*) n FROM warning_acknowledgements')['n'] == 450
+
+
+def test_group_acknowledgement_preserves_new_recurrences_and_other_users(client):
+    reading(90, 1000); reading(50, 1060); reading(95, 1120); reading(50, 1180)
+    before = temperature_events(client, view='warnings')['events'][0]
+    reading(91, 1240)
+    client.put(f"/api/warning-events/{before['id']}/acknowledgement", json={})
+    group, = temperature_events(client, view='warnings', acknowledgement='unacknowledged')['events']
+    assert group['occurrence_count'] == 3 and group['status'] == 'active'
+    assert group['id'] != before['id'] and group['acknowledged_at'] is None
+    client.put(f"/api/warning-events/{group['id']}/acknowledgement", json={})
+    assert temperature_events(client, view='warnings', acknowledgement='unacknowledged')['events'] == []
+    client.post('/api/users', json={'name': 'reader', 'password': 'reader-password-long', 'role': 'user'})
+    login = client.post('/api/login', json={'name': 'reader', 'password': 'reader-password-long'}).json()
+    client.headers['X-CSRF-Token'] = login['csrf']
+    assert len(temperature_events(client, view='warnings', acknowledgement='unacknowledged')['events']) == 1
+    client.put(f"/api/warning-events/{group['id']}/acknowledgement?scope=occurrence", json={})
+    assert len(temperature_events(client, acknowledgement='unacknowledged')['events']) == 2
+    # Older unseen evidence still makes this one unacknowledged warning.
+    assert len(temperature_events(client, view='warnings', acknowledgement='unacknowledged')['events']) == 1
+
+
+def test_grouping_precedes_status_filters_and_pagination_and_separates_hosts(client):
+    start_history(); server = app.get_server('atlas')
+    with store.db() as con:
+        for i in range(5):
+            for at, active in [(1000, True), (1060, False), (1120, True), (1180, False)]:
+                events.observe(con, server, f'sensor:{i}', 'resource', at, active, f'Sensor {i}', received_at=at)
+        events.observe(con, server, 'sensor:0', 'resource', 1240, True, 'Sensor 0', received_at=1240)
+        other = dict(server, id='boreal', name='Other server')
+        # Use a real second fixture host rather than combining identical labels.
+        other['id'] = store.one("SELECT id FROM servers WHERE id<>'atlas' LIMIT 1")['id']
+        events.observe(con, other, 'sensor:0', 'resource', 1240, True, 'Sensor 0', received_at=1240)
+    active = client.get('/api/warning-events?status=active').json()['events']
+    assert len(active) == 2 and len({e['server_id'] for e in active}) == 2
+    resolved = client.get('/api/warning-events?status=resolved').json()['events']
+    assert len(resolved) == 4 and all(e['warning_key'] != 'sensor:0' for e in resolved)
+    seen = set(); before = None
+    while True:
+        params = {'limit': 2, **({'before': before} if before else {})}
+        page = client.get('/api/warning-events', params=params).json()
+        for warning in page['events']:
+            identity = (warning['server_id'], warning['warning_key'])
+            assert identity not in seen
+            seen.add(identity)
+        before = page['next_before']
+        if before is None:
+            break
+    assert len(seen) == 6
+
+
+def test_warning_and_update_actions_are_independent_and_restore_keeps_acknowledgement(client):
+    reading(90, 1000); reading(50, 1060)
+    start_history()
+    with store.db() as con:
+        events.observe_connection(con, app.get_server('atlas'), 1120, 'Unavailable')
+    update_count = sum(s['updates'] for s in client.get('/api/dashboard').json()['servers'])
+    assert update_count > 0
+    result = client.post('/api/dismiss-all?kind=warnings')
+    assert result.status_code == 200 and result.json()['dismissed'] >= 2
+    assert client.get('/api/warning-events').json()['unacknowledged'] == 0
+    assert len(client.get('/api/warning-events?visibility=visible').json()['events']) == 2
+    assert sum(s['updates'] for s in client.get('/api/dashboard').json()['servers']) == update_count
+    assert client.post('/api/hide-warnings').status_code == 200
+    assert client.get('/api/warning-events?visibility=visible').json()['events'] == []
+    client.post('/api/dismiss-all?kind=updates')
+    assert sum(s['updates'] for s in client.get('/api/dashboard').json()['servers']) == 0
+    client.delete('/api/dismissals?kind=warnings')
+    restored = client.get('/api/warning-events?visibility=visible').json()['events']
+    assert len(restored) == 2 and all(w['acknowledged_at'] for w in restored)
+    assert client.get('/api/warning-events').json()['unacknowledged'] == 0
+    assert sum(s['updates'] for s in client.get('/api/dashboard').json()['servers']) == 0
+    client.post('/api/hide-warnings')
+    client.delete('/api/dismissals?kind=updates')
+    assert sum(s['updates'] for s in client.get('/api/dashboard').json()['servers']) == update_count
+    assert client.get('/api/warning-events?visibility=visible').json()['events'] == []
+    assert client.get('/api/warning-events').json()['unacknowledged'] == 0
+    assert client.post('/api/dismiss-all?kind=invalid').status_code == 422
+    assert client.delete('/api/dismissals?kind=invalid').status_code == 422
+    client.headers.pop('X-CSRF-Token')
+    assert client.post('/api/dismiss-all?kind=warnings').status_code == 403
+    assert client.post('/api/hide-warnings').status_code == 403
+    assert client.delete('/api/dismissals?kind=updates').status_code == 403
+
+
+def test_visibility_does_not_acknowledge_and_only_recurrence_reactivates(client):
+    reading(90, 1000)
+    event = temperature_events(client, view='warnings')['events'][0]
+    path = f"/api/warning-events/{event['id']}"
+    # Removing alone must not silence an unacknowledged warning.
+    assert client.put(path + '/visibility', json={'hidden': True}).status_code == 200
+    assert temperature_events(client, view='warnings', visibility='visible')['events'] == []
+    assert temperature_events(client, view='warnings')['unacknowledged'] == 1
+    assert client.put(path + '/visibility', json={'hidden': False}).status_code == 200
+    assert client.put(path + '/acknowledgement', json={}).status_code == 200
+    reading(99, 1060)
+    listed, = temperature_events(client, view='warnings', visibility='visible')['events']
+    assert listed['acknowledged_at'] and listed['status'] == 'active'
+    assert listed['occurrence_count'] == 1
+    client.put(path + '/visibility', json={'hidden': True})
+    store.initialize()
+    client.delete('/api/dismissals?kind=warnings')
+    assert temperature_events(client, visibility='visible')['events'][0]['acknowledged_at']
+    assert temperature_events(client)['unacknowledged'] == 0
+    client.put(path + '/visibility', json={'hidden': True})
+    reading(50, 1120); reading(96, 1180)
+    recurring, = temperature_events(client, view='warnings', visibility='visible')['events']
+    assert recurring['occurrence_count'] == 2 and recurring['acknowledged_at'] is None
+    assert recurring['hidden_at'] is None and recurring['status'] == 'active'
+    assert temperature_events(client)['unacknowledged'] == 1
+    assert client.put('/api/warning-events/999999/visibility', json={}).status_code == 404
+    client.headers.pop('X-CSRF-Token')
+    assert client.put(path + '/visibility', json={}).status_code == 403
+
+
+def test_visibility_and_acknowledgement_are_personal_for_current_warnings(client):
+    server = next(s for s in client.get('/api/dashboard').json()['servers'] if s['warnings'])
+    warning = server['warnings'][0]
+    body = {'server_id': server['id'], 'warning_id': warning['id']}
+    assert client.post('/api/current-warning', json={**body, 'action': 'acknowledge'}).status_code == 200
+    assert client.post('/api/current-warning', json={**body, 'action': 'hide'}).status_code == 200
+    current = next(w for s in client.get('/api/dashboard').json()['servers'] if s['id'] == server['id'] for w in s['warnings'] if w['id'] == warning['id'])
+    assert current['dismissed'] and current['hidden']
+    client.delete('/api/dismissals?kind=updates')
+    assert store.rows("SELECT * FROM dismissals WHERE service_id LIKE 'hidden-warning:%'")
+    client.delete('/api/dismissals?kind=warnings')
+    current = next(w for s in client.get('/api/dashboard').json()['servers'] if s['id'] == server['id'] for w in s['warnings'] if w['id'] == warning['id'])
+    assert current['dismissed'] and not current.get('hidden')
+    client.post('/api/current-warning', json={**body, 'action': 'hide'})
+    client.post('/api/users', json={'name': 'reader', 'password': 'reader-password-long', 'role': 'user'})
+    login = client.post('/api/login', json={'name': 'reader', 'password': 'reader-password-long'}).json()
+    client.headers['X-CSRF-Token'] = login['csrf']
+    current = next(w for s in client.get('/api/dashboard').json()['servers'] if s['id'] == server['id'] for w in s['warnings'] if w['id'] == warning['id'])
+    assert not current['dismissed'] and not current.get('hidden')

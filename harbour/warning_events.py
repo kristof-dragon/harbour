@@ -26,6 +26,7 @@ def initialize(con):
         CREATE UNIQUE INDEX IF NOT EXISTS warning_event_open
           ON warning_events(server_id,warning_key) WHERE closed_at IS NULL;
         CREATE INDEX IF NOT EXISTS warning_event_server ON warning_events(server_id,id DESC);
+        CREATE INDEX IF NOT EXISTS warning_event_identity ON warning_events(server_id,warning_key,id DESC);
         CREATE INDEX IF NOT EXISTS warning_event_closed ON warning_events(closed_at);
         CREATE TABLE IF NOT EXISTS warning_observations (
           server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
@@ -38,6 +39,10 @@ def initialize(con):
           event_id INTEGER NOT NULL REFERENCES warning_events(id) ON DELETE CASCADE,
           user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           acknowledged_at REAL NOT NULL, PRIMARY KEY(user_id,event_id));
+        CREATE TABLE IF NOT EXISTS warning_hidden (
+          event_id INTEGER NOT NULL REFERENCES warning_events(id) ON DELETE CASCADE,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          hidden_at REAL NOT NULL, PRIMARY KEY(user_id,event_id));
     ''')
     con.execute("INSERT OR IGNORE INTO settings VALUES ('warning_history_started_at',?)", (str(time.time()),))
 
@@ -170,16 +175,26 @@ def invalidate(con, server_id, keys=None, reason='settings_changed', at=None):
 
 
 def live_for_user(server_id, user_id):
-    return {r['warning_key']: r for r in store.rows('SELECT e.id,e.warning_key,a.acknowledged_at FROM warning_events e LEFT JOIN warning_acknowledgements a ON a.event_id=e.id AND a.user_id=? WHERE e.server_id=? AND e.closed_at IS NULL', (user_id, server_id))}
+    return {r['warning_key']: r for r in store.rows('''SELECT e.id,e.warning_key,a.acknowledged_at,h.hidden_at
+        FROM warning_events e LEFT JOIN warning_acknowledgements a ON a.event_id=e.id AND a.user_id=?
+        LEFT JOIN warning_hidden h ON h.event_id=e.id AND h.user_id=?
+        WHERE e.server_id=? AND e.closed_at IS NULL''', (user_id, user_id, server_id))}
 
 
 def summary(user_id):
-    row = store.one('SELECT COUNT(*) AS unacknowledged,MAX(e.id) AS latest_id FROM warning_events e WHERE NOT EXISTS (SELECT 1 FROM warning_acknowledgements a WHERE a.event_id=e.id AND a.user_id=?)', (user_id,))
+    row = store.one('''SELECT COUNT(*) AS unacknowledged,MAX(latest_id) AS latest_id FROM (
+        SELECT MAX(e.id) AS latest_id FROM warning_events e
+        WHERE NOT EXISTS (SELECT 1 FROM warning_acknowledgements a WHERE a.event_id=e.id AND a.user_id=?)
+        GROUP BY e.server_id,e.warning_key)''', (user_id,))
     return {**row, 'started_at': float(store.one("SELECT value FROM settings WHERE key='warning_history_started_at'")['value'])}
 
 
 def acknowledge_all(con, user_id):
-    return con.execute('INSERT OR IGNORE INTO warning_acknowledgements SELECT id,?,? FROM warning_events', (user_id, time.time())).rowcount
+    count = con.execute('''SELECT COUNT(*) FROM (SELECT e.server_id,e.warning_key FROM warning_events e
+        WHERE NOT EXISTS (SELECT 1 FROM warning_acknowledgements a WHERE a.event_id=e.id AND a.user_id=?)
+        GROUP BY e.server_id,e.warning_key)''', (user_id,)).fetchone()[0]
+    con.execute('INSERT OR IGNORE INTO warning_acknowledgements SELECT id,?,? FROM warning_events', (user_id, time.time()))
+    return count
 
 
 def prune(now=None):
@@ -191,13 +206,36 @@ def prune(now=None):
 
 @router.get('')
 def listing(user=Depends(authenticated), server_id: str = Query(default='', max_length=100),
+            warning_key: str = Query(default='', max_length=500),
+            view: Literal['warnings', 'occurrences'] = 'warnings',
+            visibility: Literal['all', 'visible', 'hidden'] = 'all',
             status: Literal['all', 'active', 'resolved', 'ended'] = 'all',
             acknowledgement: Literal['all', 'unacknowledged', 'acknowledged'] = 'all',
             search: str = Query(default='', max_length=200), before: int | None = Query(default=None, ge=1),
             limit: int = Query(default=50, ge=1, le=100)):
     conditions, args = [], [user['id']]
+    # Group before filtering/pagination: status and limits describe the latest
+    # occurrence, while any unseen occurrence keeps the single warning in the inbox.
+    if view == 'warnings':
+        query = '''WITH grouped AS (
+            SELECT e.server_id,e.warning_key,MAX(e.id) AS latest_id,
+                MIN(e.started_at) AS first_seen,COUNT(*) AS occurrence_count,
+                CASE WHEN COUNT(a.event_id)=COUNT(*) THEN MAX(a.acknowledged_at) END AS acknowledged_at
+            FROM warning_events e LEFT JOIN warning_acknowledgements a ON a.event_id=e.id AND a.user_id=?
+            GROUP BY e.server_id,e.warning_key)
+            SELECT e.*,a.acknowledged_at,a.first_seen,a.occurrence_count,h.hidden_at
+            FROM grouped a JOIN warning_events e ON e.id=a.latest_id'''
+    else:
+        query = '''SELECT e.*,a.acknowledged_at,h.hidden_at FROM warning_events e
+            LEFT JOIN warning_acknowledgements a ON a.event_id=e.id AND a.user_id=?'''
+    query += ' LEFT JOIN warning_hidden h ON h.event_id=e.id AND h.user_id=?'
+    args.append(user['id'])
+    if visibility != 'all':
+        conditions.append('h.hidden_at IS ' + ('NULL' if visibility == 'visible' else 'NOT NULL'))
     if server_id:
         conditions.append('e.server_id=?'); args.append(server_id)
+    if warning_key:
+        conditions.append('e.warning_key=?'); args.append(warning_key)
     if status == 'active':
         conditions.append('e.closed_at IS NULL')
     elif status == 'resolved':
@@ -213,14 +251,14 @@ def listing(user=Depends(authenticated), server_id: str = Query(default='', max_
     if before is not None:
         conditions.append('e.id<?'); args.append(before)
     where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
-    rows = store.rows('SELECT e.*,a.acknowledged_at FROM warning_events e LEFT JOIN warning_acknowledgements a ON a.event_id=e.id AND a.user_id=?' + where + ' ORDER BY e.id DESC LIMIT ?', (*args, limit + 1))
+    rows = store.rows(query + where + ' ORDER BY e.id DESC LIMIT ?', (*args, limit + 1))
     more = len(rows) > limit; rows = rows[:limit]
     for row in rows:
         for key in ('definition', 'initial_values', 'latest_values', 'extreme_values'):
             row[key] = json.loads(row[key])
         row['status'] = 'active' if row['closed_at'] is None else 'resolved' if row['close_reason'] == 'recovered' else 'ended'
     days = json.loads(store.one("SELECT value FROM settings WHERE key='monitoring'")['value'])['retention_days']
-    return {'events': rows, 'next_before': rows[-1]['id'] if more else None, 'retention_days': days, **summary(user['id'])}
+    return {'events': rows, 'view': view, 'next_before': rows[-1]['id'] if more else None, 'retention_days': days, **summary(user['id'])}
 
 
 class AcknowledgementInput(BaseModel):
@@ -228,14 +266,38 @@ class AcknowledgementInput(BaseModel):
     acknowledged: bool = True
 
 
-@router.put('/{event_id}/acknowledgement')
-def acknowledge(event_id: int, body: AcknowledgementInput, user=Depends(authenticated)):
+class VisibilityInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    hidden: bool = True
+
+
+@router.put('/{event_id}/visibility')
+def visibility(event_id: int, body: VisibilityInput, user=Depends(authenticated)):
     with store.db() as con:
         con.execute('BEGIN IMMEDIATE')
         if not con.execute('SELECT 1 FROM warning_events WHERE id=?', (event_id,)).fetchone():
             raise HTTPException(404, 'Warning event no longer exists')
-        if body.acknowledged:
-            con.execute('INSERT OR IGNORE INTO warning_acknowledgements VALUES (?,?,?)', (event_id, user['id'], time.time()))
+        if body.hidden:
+            con.execute('INSERT OR IGNORE INTO warning_hidden VALUES (?,?,?)', (event_id, user['id'], time.time()))
         else:
-            con.execute('DELETE FROM warning_acknowledgements WHERE event_id=? AND user_id=?', (event_id, user['id']))
+            con.execute('DELETE FROM warning_hidden WHERE event_id=? AND user_id=?', (event_id, user['id']))
+    return {'ok': True}
+
+
+@router.put('/{event_id}/acknowledgement')
+def acknowledge(event_id: int, body: AcknowledgementInput, user=Depends(authenticated),
+                scope: Literal['warning', 'occurrence'] = 'warning'):
+    with store.db() as con:
+        con.execute('BEGIN IMMEDIATE')
+        event = con.execute('SELECT server_id,warning_key FROM warning_events WHERE id=?', (event_id,)).fetchone()
+        if not event:
+            raise HTTPException(404, 'Warning event no longer exists')
+        # Only acknowledge occurrences the displayed warning could include. A
+        # recurrence recorded after it was loaded must remain unacknowledged.
+        where = 'server_id=? AND warning_key=? AND id<=?' if scope == 'warning' else 'id=?'
+        args = (*event, event_id) if scope == 'warning' else (event_id,)
+        if body.acknowledged:
+            con.execute('INSERT OR IGNORE INTO warning_acknowledgements SELECT id,?,? FROM warning_events WHERE ' + where, (user['id'], time.time(), *args))
+        else:
+            con.execute('DELETE FROM warning_acknowledgements WHERE user_id=? AND event_id IN (SELECT id FROM warning_events WHERE ' + where + ')', (user['id'], *args))
     return {'ok': True}

@@ -541,7 +541,7 @@ def warning_notification(warning):
 
 
 def clear_resolved_warning_dismissals(server_id, warnings=None):
-    records = store.rows("SELECT user_id,service_id,digest FROM dismissals WHERE server_id=? AND service_id LIKE 'warning:%'", (server_id,))
+    records = store.rows("SELECT user_id,service_id,digest FROM dismissals WHERE server_id=? AND (service_id LIKE 'warning:%' OR service_id LIKE 'hidden-warning:%')", (server_id,))
     if not records:
         return
     server = store.one('SELECT * FROM servers WHERE id=?', (server_id,))
@@ -553,8 +553,8 @@ def clear_resolved_warning_dismissals(server_id, warnings=None):
     active = {warning_notification(w) for w in warnings}
     unavailable = resources.unavailable(server, snapshot.get('metrics', {}), thresholds_for(server))
     expired = [(r['user_id'], server_id, r['service_id'], r['digest']) for r in records
-               if (r['service_id'], r['digest']) not in active
-               and r['service_id'].removeprefix('warning:') not in unavailable]
+               if (r['service_id'].removeprefix('hidden-'), r['digest']) not in active
+               and r['service_id'].removeprefix('hidden-').removeprefix('warning:') not in unavailable]
     if expired:
         with store.db() as con:
             con.executemany('DELETE FROM dismissals WHERE user_id=? AND server_id=? AND service_id=? AND digest=?', expired)
@@ -576,6 +576,10 @@ def public_server(server, user):
         if event:
             warning['event_id'] = event['id']
         warning['dismissed'] = event['acknowledged_at'] is not None if event else warning_notification(warning) in dismissed
+        key, digest = warning_notification(warning)
+        hidden = event['hidden_at'] is not None if event else ('hidden-' + key, digest) in dismissed
+        if hidden:
+            warning['hidden'] = True
     for s in services:
         # Reclassify cached checks too, so an upgrade immediately clears old
         # same-version badges without waiting for the next registry interval.
@@ -1383,6 +1387,29 @@ class DismissInput(Input):
     service_id: str
 
 
+class CurrentWarningInput(Input):
+    server_id: str
+    warning_id: str
+    action: Literal['acknowledge', 'hide']
+
+
+@app.post('/api/current-warning')
+def current_warning(body: CurrentWarningInput, user=Depends(authenticated)):
+    server = public_server(get_server(body.server_id), user)
+    warning = next((w for w in server['warnings'] if w['id'] == body.warning_id), None)
+    if not warning:
+        raise HTTPException(404, 'Warning is no longer current')
+    if warning.get('event_id'):
+        if body.action == 'acknowledge':
+            return warning_events.acknowledge(warning['event_id'], warning_events.AcknowledgementInput(), user)
+        return warning_events.visibility(warning['event_id'], warning_events.VisibilityInput(), user)
+    key, digest = warning_notification(warning)
+    if body.action == 'hide':
+        key = 'hidden-' + key
+    store.execute('INSERT OR IGNORE INTO dismissals VALUES (?,?,?,?)', (user['id'], body.server_id, key, digest))
+    return {'ok': True}
+
+
 @app.post("/api/dismiss")
 def dismiss(body: DismissInput, user=Depends(authenticated)):
     server = public_server(get_server(body.server_id), user)
@@ -1394,30 +1421,51 @@ def dismiss(body: DismissInput, user=Depends(authenticated)):
 
 
 @app.delete("/api/dismissals")
-def restore_dismissals(user=Depends(authenticated)):
+def restore_dismissals(user=Depends(authenticated), kind: Literal['all', 'warnings', 'updates'] = 'all'):
     with store.db() as con:
-        con.execute("DELETE FROM dismissals WHERE user_id=?", (user["id"],))
-        con.execute('DELETE FROM warning_acknowledgements WHERE user_id=?', (user['id'],))
+        con.execute('BEGIN IMMEDIATE')
+        if kind in {'all', 'updates'}:
+            con.execute("DELETE FROM dismissals WHERE user_id=? AND service_id NOT LIKE 'warning:%' AND service_id NOT LIKE 'hidden-warning:%'", (user['id'],))
+        if kind in {'all', 'warnings'}:
+            con.execute("DELETE FROM dismissals WHERE user_id=? AND service_id LIKE 'hidden-warning:%'", (user['id'],))
+            con.execute('DELETE FROM warning_hidden WHERE user_id=?', (user['id'],))
     return {"ok": True}
 
 
 @app.post("/api/dismiss-all")
-def dismiss_all(user=Depends(authenticated)):
+def dismiss_all(user=Depends(authenticated), kind: Literal['all', 'warnings', 'updates'] = 'all'):
     records = []
     for row in store.rows('SELECT * FROM servers'):
         server = public_server(row, user)
-        for warning in server['warnings']:
+        for warning in server['warnings'] if kind in {'all', 'warnings'} else []:
             if not warning['dismissed'] and not warning.get('event_id'):
                 key, digest = warning_notification(warning)
                 records.append((user['id'], server['id'], key, digest))
-        for service in server.get('services', []):
+        for service in server.get('services', []) if kind in {'all', 'updates'} else []:
             update = service.get('update', {})
             if update.get('status') == 'available' and update.get('digest') and not service['dismissed']:
                 records.append((user['id'], server['id'], service['notification_key'], update['digest']))
     with store.db() as con:
+        con.execute('BEGIN IMMEDIATE')
         con.executemany('INSERT OR IGNORE INTO dismissals VALUES (?,?,?,?)', records)
-        acknowledged = warning_events.acknowledge_all(con, user['id'])
+        acknowledged = warning_events.acknowledge_all(con, user['id']) if kind in {'all', 'warnings'} else 0
     return {"ok": True, "dismissed": len(records) + acknowledged}
+
+
+@app.post('/api/hide-warnings')
+def hide_warnings(user=Depends(authenticated)):
+    records = []
+    for row in store.rows('SELECT * FROM servers'):
+        for warning in public_server(row, user)['warnings']:
+            if not warning.get('event_id') and not warning.get('hidden'):
+                key, digest = warning_notification(warning)
+                records.append((user['id'], row['id'], 'hidden-' + key, digest))
+    with store.db() as con:
+        con.execute('BEGIN IMMEDIATE')
+        con.executemany('INSERT OR IGNORE INTO dismissals VALUES (?,?,?,?)', records)
+        count = con.execute('''INSERT OR IGNORE INTO warning_hidden
+            SELECT MAX(id),?,? FROM warning_events GROUP BY server_id,warning_key''', (user['id'], time.time())).rowcount
+    return {'ok': True, 'hidden': count + len(records)}
 
 
 @app.get("/api/users")

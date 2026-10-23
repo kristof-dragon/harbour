@@ -28,7 +28,7 @@ def test_dismiss_all_is_private_persistent_and_keeps_active_warnings(client):
     assert sum(s['updates'] for s in reader) == sum(s['updates'] for s in before)
     assert client.post('/api/dismiss-all').status_code == 200
     assert client.delete('/api/dismissals').status_code == 200
-    assert not any(w['dismissed'] for s in dashboard(client) for w in s['warnings'])
+    assert all(w['dismissed'] for s in dashboard(client) for w in s['warnings'])
     assert sum(s['updates'] for s in dashboard(client)) > 0
     client.headers.pop('X-CSRF-Token')
     assert client.post('/api/dismiss-all').status_code == 403

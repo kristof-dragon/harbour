@@ -7,14 +7,14 @@ function timezoneLabel(tz) {
 function sidebarMetrics(server) {
   return [['cpu', 'cpu', server.metrics.cpu], ['memory', 'memory', server.metrics.memory.percent],
     ['disk', 'disk', cardDisk(server)?.percent], ['temperature', 'temperature', (primaryResource(server)?primaryResource(server).value:server.metrics.temperature?.package)]].filter(([key])=>useResourceCard(server,key)).map(([key, symbol, value]) => {
-    const warning = key==='temperature'&&primaryResource(server)?primaryResource(server).warning:server.warnings.some(w => key === 'temperature' ? w.kind === 'cpu_package' : w.id === key || w.id.startsWith(key + ':'));
+    const warning = key==='temperature'&&primaryResource(server)?warningActive(server,primaryResource(server).id,primaryResource(server).warning):activeWarnings(server).some(w => key === 'temperature' ? w.kind === 'cpu_package' : w.id === key || w.id.startsWith(key + ':'));
     return `<span class="resource-chip ${warning ? 'resource-warning' : ''}" ${warning ? `data-warning-server="${e(server.id)}" data-warning-kind="${key}"` : ''}>${icon(symbol)}${value==null?'—':Math.round(value)+(key==='temperature'?'°':'%')}</span>`;
   }).join('');
 }
 
 function serverWarnings(server) {
-  if (!server.warnings.length) return '';
-  return `<details class="warning-banner server-warnings" data-warning-open="${e(server.id)}" ${state.open.has('warnings:'+server.id)?'open':''}><summary>${icon('warning')}<b>${count(server.warnings.length, 'active warning')}</b><span class="warning-summary">${e(server.warnings.map(w=>w.title).join(' · '))}</span>${icon('down')}</summary><ul>${server.warnings.map(w=>`<li><strong>${e(w.title)}</strong><span>${e(w.detail)}</span></li>`).join('')}</ul>${server.error&&server.checked?`<p>Last successful reading: ${age(server.checked)}.</p>`:''}</details>`;
+  if (!activeWarnings(server).length) return '';
+  return `<details class="warning-banner server-warnings" data-warning-open="${e(server.id)}" ${state.open.has('warnings:'+server.id)?'open':''}><summary>${icon('warning')}<b>${count(activeWarnings(server).length, 'active warning')}</b><span class="warning-summary">${e(activeWarnings(server).map(w=>w.title).join(' · '))}</span>${icon('down')}</summary><ul>${activeWarnings(server).map(w=>`<li><strong>${e(w.title)}</strong><span>${e(w.detail)}</span></li>`).join('')}</ul>${server.error&&server.checked?`<p>Last successful reading: ${age(server.checked)}.</p>`:''}</details>`;
 }
 
 let tooltipTimer;
@@ -24,7 +24,7 @@ function showWarningTooltip(target) {
   if (!server?.warnings.length) return;
   hideWarningTooltip();
   const kind = target.dataset.warningKind;
-  const warnings = server.warnings.filter(w => !kind || w.id === kind || w.id.startsWith(kind + ':'));
+  const warnings = activeWarnings(server).filter(w => !kind || w.id === kind || w.id.startsWith(kind + ':'));
   const tip = document.createElement('div');
   tip.id = 'warning-tooltip'; tip.className = 'warning-tooltip'; tip.setAttribute('role', 'tooltip');
   tip.innerHTML = `<b>${e(server.name)}</b><ul>${warnings.map(w => `<li><strong>${e(w.title)}</strong><span>${e(w.detail)}</span></li>`).join('')}</ul>`;

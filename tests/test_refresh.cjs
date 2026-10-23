@@ -48,9 +48,10 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  else if(url.pathname.endsWith('/plan')){lastPlan=route.request().postDataJSON();data={token:'test-plan',commands:[]};}
  else if(url.pathname==='/api/dismiss-all'){
   let dismissed=0;
-  for(const s of dashboard.servers){for(const w of s.warnings){if(!w.dismissed)dismissed++;w.dismissed=true;}for(const c of s.services){if(c.update?.status==='available'&&!c.dismissed){dismissed++;c.dismissed=true;}}s.updates=0;}
+  for(const s of dashboard.servers){if(url.searchParams.get('kind')==='warnings'){for(const w of s.warnings){if(!w.dismissed)dismissed++;w.dismissed=true;}}else{for(const c of s.services){if(c.update?.status==='available'&&!c.dismissed){dismissed++;c.dismissed=true;}}s.updates=0;}}
   data={ok:true,dismissed};
  }
+ else if(url.pathname==='/api/hide-warnings'){for(const s of dashboard.servers)for(const w of s.warnings)w.hidden=true;data={ok:true};}
  else throw Error('Unexpected request '+url.pathname);
  await route.fulfill({json:data});});
  await page.goto('http://127.0.0.1:'+server.address().port);await page.locator('.server-item').first().waitFor();await page.locator('[data-card-chart=cpu] svg').waitFor();
@@ -213,13 +214,17 @@ const server=http.createServer((req,res)=>{const file=path.join(process.cwd(),'h
  if(process.env.HARBOUR_TEST_CAPTURE)await page.locator('.service-table').screenshot({path:'test-results/stack-chips-mobile-v0112.png'});
  await statusFilter.getByRole('button',{name:'Running',exact:true}).click();
  await page.setViewportSize({width:1280,height:800});dashboard.servers[0].services=originalServices;await page.evaluate(()=>load());
- // Dismiss all empties notices but leaves resource warnings and server indicators visible.
+ // Acknowledgement silences indicators; visibility changes are independent.
  dashboard.servers[0].warnings=[{id:'cpu',title:'CPU usage is high',detail:'99% used',dismissed:false}];
  await page.evaluate(()=>load());await page.getByRole('button',{name:'Open notifications',exact:true}).click();
- assert.ok(await page.locator('.notice').count()>0);await page.getByRole('button',{name:'Dismiss all',exact:true}).click();
+ assert.ok(await page.locator('.notice').count()>0);await page.getByRole('button',{name:'Acknowledge all warnings',exact:true}).click();
+ await page.getByRole('button',{name:'Dismiss all updates',exact:true}).click();
+ await page.waitForFunction(()=>state.data.servers.every(s=>s.updates===0));
+ assert.equal(await page.locator('.notice').count(),1);
+ await page.getByRole('button',{name:'Remove warnings from list',exact:true}).click();
  await page.getByText('Nothing new',{exact:true}).waitFor();assert.equal(await page.locator('.notice').count(),0);
- assert.equal(await page.getByRole('button',{name:'Dismiss all',exact:true}).isDisabled(),true);
- assert.equal(await page.locator('[data-key="server:host-0"] .count-badge.warn').textContent(),'1');
+ assert.equal(await page.getByRole('button',{name:'Acknowledge all warnings',exact:true}).isDisabled(),true);
+ assert.equal(await page.locator('[data-key="server:host-0"] .count-badge.warn').count(),0);
  assert.equal(await page.locator('[data-action=warnings] b').textContent(),'0');
  await page.getByRole('button',{name:'Close notifications',exact:true}).click();
  await page.setViewportSize({width:390,height:844});await page.evaluate(()=>{state.tab='containers';renderMain();});
