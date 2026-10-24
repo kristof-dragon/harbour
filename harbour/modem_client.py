@@ -163,6 +163,10 @@ class Client:
             # Check the overall deadline between bounded reads, including slow responses.
             chunks, size = [], 0
             while True:
+                # A complete Content-Length response can close its socket in read1.
+                # Do not change its timeout after all response bytes were received.
+                if response.isclosed():
+                    break
                 if deadline and time.monotonic() >= deadline:
                     raise ModemError('timeout', 'Modem collection exceeded its time limit.')
                 if response_socket and deadline:

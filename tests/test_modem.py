@@ -233,6 +233,7 @@ def firmware(monkeypatch):
                 return
             self.send_response(302 if state['redirect'] else 200)
             self.send_header('Location', 'http://192.168.1.2/steal')
+            self.send_header('Content-Length', str(len(b'loginUsername loginPassword HashPassword sha256')))
             self.end_headers()
             self.wfile.write(b'loginUsername loginPassword HashPassword sha256')
         def do_POST(self):
