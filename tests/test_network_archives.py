@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from harbour import network, network_archives as archives, network_recorder as recorder, store
+from harbour import network, network_archives as archives, network_recorder as recorder, network_reports, store
 from test_harbour import client
 from test_openwrt import enable
 
@@ -208,7 +208,8 @@ def test_rollover_recovers_rename_before_checkpoint_and_empty_attempt(client, mo
     network.maintain('atlas')
     row = store.one('SELECT * FROM network_archives')
     os.replace(archives.path(row, True), archives.path(row))
-    clock(monkeypatch, row['day']+86400+60)
+    # Calendar cycles can be 25 hours when the clocks go back.
+    clock(monkeypatch, network_reports.next_slot(row['day'], network_reports.policy('atlas'))+60)
     network.maintain('atlas')
     assert store.one('SELECT complete FROM network_archives')['complete'] == 1
     empty = {'id':'0'*32, 'server_id':'atlas', 'day':row['day']-86400, 'size':0}

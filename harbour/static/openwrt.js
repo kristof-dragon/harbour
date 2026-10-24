@@ -46,7 +46,8 @@ function networkChart(label,unit,series,start,end){
   const tick=value=>new Intl.NumberFormat(undefined,{notation:'compact',maximumFractionDigits:1}).format(value);
   return `<article class="network-chart"><div class="between"><h3>${e(label)}</h3><span class="hint">${e(unit)}</span></div><div class="network-plot"><div class="network-axis"><span>${e(tick(high))}</span><span>${e(tick((high+low)/2))}</span><span>${e(tick(low))}</span></div><svg viewBox="0 0 1000 180" preserveAspectRatio="none" role="img" aria-label="${e(label)} over the last two minutes">${paths}</svg></div><div class="network-times"><span>${e(new Date(start*1000).toLocaleTimeString())}</span><span>${e(new Date(end*1000).toLocaleTimeString())}</span></div><div class="network-legend">${visible.map((s,i)=>`<span><i style="background:${colors[i%colors.length]}"></i>${e(s.name)}</span>`).join('')}</div></article>`;
 }
-function renderNetwork(s,section=['network','wireless','incidents','calls','analysis','reports','archives'].includes(state.tab)?state.tab:'network'){
+function renderNetwork(s,section=['network','wireless','modem','incidents','calls','analysis','reports','archives'].includes(state.tab)?state.tab:'network'){
+  if(section==='modem')return renderModem(s);
   if(section==='reports')return renderReports(s);
   if(section==='analysis')return renderConnectionAnalysis(s);
   const v=networkView(s),d=v.data,r=v.readings,settings=d?.effective_settings||d?.settings;
@@ -114,6 +115,7 @@ function renderNetwork(s,section=['network','wireless','incidents','calls','anal
 }
 
 async function loadNetwork(s,force=false){
+  if(current()?.id===s.id&&state.tab==='modem')return loadModem(s,force);
   if(current()?.id===s.id&&state.tab==='reports')return loadReports(s,force);
   if(current()?.id===s.id&&state.tab==='analysis')return loadConnectionAnalysis(s,force);
   if(current()?.id===s.id&&state.tab==='calls')return refreshCallTests(s,force);

@@ -141,6 +141,12 @@ requiring Python on the router. Use an existing authorised SSH credential.
 Router configuration changes, key installation and host-collector installation
 are disabled for this type.
 
+The **Modem** tab adds optional direct Compal ONE diagnostics from the Harbour
+host. Administrator credentials are encrypted and never returned to the browser.
+Polling starts only when enabled, reuses sessions, and pauses on rejected logins.
+Read the [modem setup and firmware validation limits](harbour/MODEM.md) before
+interpreting the reported channel values or event log.
+
 When deployed on the on-site server, the separate `network-recorder` service
 records 250 ms–2 s ICMP probes alongside approximately one-second router CPU,
 interface, Wi-Fi and queue readings. Open **Network → Recording settings** to

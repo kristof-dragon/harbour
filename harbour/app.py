@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from . import __version__, auth, call_endpoint, call_tests, collector_setup, cpu, demo, history, install_artifacts, logins, network, network_incidents, notifications, polling, recording, remote_probe, resources, ssh, store, volumes
 from .auth import authenticated, admin
-from . import network_diagnostics, network_reports, footprint, bridge, resource_limits, resource_settings, warning_events
+from . import network_diagnostics, network_reports, footprint, bridge, resource_limits, resource_settings, warning_events, modem
 
 pool = ThreadPoolExecutor(max_workers=4)
 resource_workers = None
@@ -354,6 +354,7 @@ async def lifespan(app):
     store.initialize()
     install_artifacts.recover()
     network.initialize()
+    modem.initialize()
     call_tests.initialize()
     call_endpoint.initialize()
     network_diagnostics.initialize()
@@ -380,10 +381,13 @@ async def lifespan(app):
     telegram.start()
     call_scheduler = threading.Thread(target=call_tests.schedule_loop, args=(stop,), daemon=True)
     call_scheduler.start()
+    modem_worker = threading.Thread(target=modem.run, args=(stop,), daemon=True)
+    modem_worker.start()
     try:
         yield
     finally:
         stop.set()
+        modem_worker.join()
         footprint_thread.join(timeout=20)
         call_scheduler.join(timeout=20)
         call_tests.close_all()
@@ -407,6 +411,7 @@ app.include_router(install_artifacts.router)
 app.include_router(notifications.router)
 app.include_router(warning_events.router)
 app.include_router(network.router)
+app.include_router(modem.router)
 app.include_router(network_incidents.router)
 app.include_router(call_tests.router)
 app.include_router(call_endpoint.router)
