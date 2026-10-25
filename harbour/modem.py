@@ -36,15 +36,12 @@ def initialize():
         ''')
 
 
-class Settings(BaseModel):
+class ConnectionSettings(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    enabled: bool = False
     url: str = Field(default=DEFAULT['url'], max_length=120)
     username: str = Field(default='', max_length=80)
     password: SecretStr = Field(default=SecretStr(''), max_length=256)
     clear_password: bool = False
-    interval_seconds: int = Field(default=60, ge=30, le=900, strict=True)
-    retention_days: int = Field(default=7, ge=1, le=30, strict=True)
 
     @field_validator('url')
     @classmethod
@@ -57,6 +54,12 @@ class Settings(BaseModel):
         if any(ord(c) < 32 for c in value):
             raise ValueError('Username contains a control character')
         return value.strip()
+
+
+class Settings(ConnectionSettings):
+    enabled: bool = False
+    interval_seconds: int = Field(default=60, ge=30, le=900, strict=True)
+    retention_days: int = Field(default=7, ge=1, le=30, strict=True)
 
 
 def lock_for(id_):
@@ -215,6 +218,65 @@ def test_connection(id_: str, user=Depends(auth.admin)):
     network.host(id_)
     poll_one(id_, manual=True)
     return public(id_)
+
+
+@router.post('/test-settings')
+def test_settings(id_: str, body: ConnectionSettings, user=Depends(auth.admin)):
+    """Check the overlay's draft without writing settings, history or polling state."""
+    network.host(id_)
+    lock = lock_for(id_)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, 'A modem check is already running.')
+    target_lock = lock_for(('test-endpoint', body.url))
+    target_acquired = False
+    try:
+        target_acquired = target_lock.acquire(blocking=False)
+        if not target_acquired:
+            raise HTTPException(409, 'A connection test for this modem address is already running.')
+        row = config(id_)
+        previous = json.loads(row['config']) if row else {}
+        password = body.password.get_secret_value()
+        if password and body.clear_password:
+            raise HTTPException(422, 'Choose a replacement password or remove the saved password.')
+        if body.clear_password:
+            raise HTTPException(400, 'A password is needed to test the connection. Uncheck Remove saved password or enter a replacement.')
+        saved_identity = previous.get('url') == body.url and previous.get('username') == body.username
+        if not password:
+            if not row or not row['password_encrypted']:
+                raise HTTPException(400, 'Enter the modem password to test the connection.')
+            if not saved_identity:
+                raise HTTPException(422, 'Re-enter the password when testing a different address or username.')
+        if store.one('SELECT server_id FROM modem_settings WHERE url=? AND server_id<>?', (body.url, id_)):
+            raise HTTPException(409, 'This modem address is already configured for another router.')
+        if store.DEMO:
+            return {'demo': True, 'sample': None}
+        started = time.time()
+        try:
+            cached = _clients.get(id_) if not password and saved_identity else None
+            if cached and cached[0] == row['revision']:
+                connection = cached[1]
+            else:
+                if not password:
+                    password = store.cipher().decrypt(row['password_encrypted'].encode()).decode()
+                connection = Client(body.url, body.username, password)
+            result = connection.poll()
+            # The overlay needs a connection verdict, not raw diagnostic values.
+            sample = {'state': result['state'], 'authentication': result.get('authentication'),
+                      'sections': {name: {'state': part['state']} for name, part in result.get('sections', {}).items()}}
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, ModemError) else 'Modem connection test failed; check the settings and test again.'
+            if isinstance(exc, AuthenticationError):
+                message = 'Modem login was rejected or requires attention. Check the credentials and test again.'
+            sample = {'state': 'unavailable', 'sections': {}, 'error': message,
+                      'error_code': exc.code if isinstance(exc, ModemError) else 'collection_failed'}
+        finally:
+            password = ''
+        sample.update(at=started, received_at=time.time(), collection_ms=round((time.time()-started)*1000, 2))
+        return {'demo': False, 'sample': sample}
+    finally:
+        if target_acquired:
+            target_lock.release()
+        lock.release()
 
 
 @router.get('/history')

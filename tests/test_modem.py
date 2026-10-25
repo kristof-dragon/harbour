@@ -35,6 +35,10 @@ def settings(**changes):
     return {**modem.DEFAULT, 'username': 'admin', 'password': PASSWORD, **changes}
 
 
+def connection(**changes):
+    return {'url': modem.DEFAULT['url'], 'username': '', 'password': PASSWORD, **changes}
+
+
 def sample(state='ok'):
     return {'at': time.time(), 'received_at': time.time(), 'state': state,
             'sections': {'device': {'state': 'ok', 'fields': [{'field': 'status/uptime', 'value': '123'}]}}, 'cause': 'not_established'}
@@ -105,6 +109,7 @@ def test_permissions_csrf_demo_and_unique_target(router_client, monkeypatch):
     assert c.put(BASE, json=settings()).status_code == 200
     monkeypatch.setattr(modem, 'Client', lambda *a: pytest.fail('Demo contacted modem'))
     assert c.post(BASE+'/test').json()['sample'] is None
+    assert c.post(BASE+'/test-settings', json=connection()).json() == {'demo': True, 'sample': None}
     store.execute("UPDATE servers SET server_type='openwrt' WHERE id='beacon'")
     # Use a real second demo server rather than depending on its name.
     other = store.one("SELECT id FROM servers WHERE id<>'atlas'")['id']
@@ -112,6 +117,7 @@ def test_permissions_csrf_demo_and_unique_target(router_client, monkeypatch):
     assert c.put('/api/servers/'+other+'/modem', json=settings()).status_code == 409
     csrf = c.headers.pop('X-CSRF-Token')
     assert c.post(BASE+'/test').status_code == 403
+    assert c.post(BASE+'/test-settings', json=connection()).status_code == 403
     c.headers['X-CSRF-Token'] = csrf
     c.post('/api/users', json={'name': 'reader', 'password': 'reader-password-strong', 'role': 'user'})
     login = c.post('/api/login', json={'name': 'reader', 'password': 'reader-password-strong'}).json()
@@ -120,8 +126,103 @@ def test_permissions_csrf_demo_and_unique_target(router_client, monkeypatch):
     assert c.get(BASE+'/export').status_code == 200
     assert c.put(BASE, json=settings()).status_code == 403
     assert c.post(BASE+'/test').status_code == 403
+    assert c.post(BASE+'/test-settings', json=connection()).status_code == 403
     c.cookies.clear()
     assert c.get(BASE).status_code == 401
+
+
+def test_draft_connection_before_save_returns_only_transient_summary(router_client, monkeypatch):
+    calls = []
+    class Fake:
+        def __init__(self, *args):
+            calls.append(args)
+        def poll(self):
+            result = sample()
+            result['sections']['device']['fields'].append({'field': 'sensitive', 'value': PASSWORD})
+            result['authentication'] = {'state': 'authenticated', 'mode': 'password_only'}
+            return result
+    monkeypatch.setattr(modem, 'Client', Fake)
+    monkeypatch.setattr(store, 'DEMO', False)
+    result = router_client.post(BASE+'/test-settings', json=connection()).json()
+    assert calls == [(modem.DEFAULT['url'], '', PASSWORD)]
+    assert result['sample']['state'] == 'ok'
+    assert result['sample']['authentication']['mode'] == 'password_only'
+    assert result['sample']['sections'] == {'device': {'state': 'ok'}}
+    assert PASSWORD not in json.dumps(result)
+    assert modem.config('atlas') is None
+    assert store.one('SELECT COUNT(*) AS n FROM modem_samples')['n'] == 0
+    assert modem._clients == {}
+
+
+@pytest.mark.parametrize('failure', [None, protocol.AuthenticationError(), RuntimeError(PASSWORD)])
+def test_draft_test_never_changes_saved_settings_or_history(router_client, monkeypatch, failure):
+    c, calls = router_client, []
+    c.put(BASE, json=settings(username='', enabled=True))
+    row = modem.config('atlas')
+    modem.persist('atlas', row['revision'], sample(), blocked=True, failures=3)
+    before = modem.config('atlas')
+    history = store.rows('SELECT * FROM modem_samples')
+    class Fake:
+        def __init__(self, *args):
+            calls.append(args)
+        def poll(self):
+            if failure:
+                raise failure
+            return sample()
+    monkeypatch.setattr(modem, 'Client', Fake)
+    monkeypatch.setattr(store, 'DEMO', False)
+    for draft in (connection(password=''), connection(url='http://192.168.0.1', username='other', password='new-fixture-password')):
+        response = c.post(BASE+'/test-settings', json=draft)
+        assert response.status_code == 200
+        assert response.json()['sample']['state'] == ('unavailable' if failure else 'ok')
+        assert PASSWORD not in response.text and 'new-fixture-password' not in response.text
+        assert 'Polling is paused' not in response.text
+        assert modem.config('atlas') == before
+        assert store.rows('SELECT * FROM modem_samples') == history
+    assert calls == [(modem.DEFAULT['url'], '', PASSWORD), ('http://192.168.0.1', 'other', 'new-fixture-password')]
+    assert modem._clients == {}
+
+
+def test_draft_saved_secret_target_and_concurrency_guards(router_client, monkeypatch):
+    c = router_client
+    c.put(BASE, json=settings(username=''))
+    before = modem.config('atlas')
+    monkeypatch.setattr(modem, 'Client', lambda *args: pytest.fail('Invalid draft reached the modem'))
+    monkeypatch.setattr(store, 'DEMO', False)
+    for change in ({'url':'http://192.168.0.1'}, {'username':'other'}):
+        assert c.post(BASE+'/test-settings', json=connection(password='', **change)).status_code == 422
+    assert c.post(BASE+'/test-settings', json=connection(password='', clear_password=True)).status_code == 400
+    assert c.post(BASE+'/test-settings', json=connection(clear_password=True)).status_code == 422
+    assert c.post(BASE+'/test-settings', json=connection(url='http://127.0.0.1')).status_code == 422
+    assert c.post(BASE+'/test-settings', json=connection(enabled=True)).status_code == 422
+    with modem.lock_for('atlas'):
+        assert c.post(BASE+'/test-settings', json=connection()).status_code == 409
+    with modem.lock_for(('test-endpoint', modem.DEFAULT['url'])):
+        assert c.post(BASE+'/test-settings', json=connection()).status_code == 409
+    other = store.one("SELECT id FROM servers WHERE id<>'atlas'")['id']
+    store.execute("UPDATE servers SET server_type='openwrt' WHERE id=?", (other,))
+    assert c.post('/api/servers/'+other+'/modem/test-settings', json=connection()).status_code == 409
+    assert modem.config('atlas') == before
+    assert store.one('SELECT COUNT(*) AS n FROM modem_samples')['n'] == 0
+
+
+def test_draft_test_reuses_only_unchanged_saved_session(router_client, monkeypatch):
+    c, calls = router_client, []
+    class Fake:
+        def __init__(self, *args):
+            calls.append(args)
+        def poll(self):
+            return sample()
+    monkeypatch.setattr(modem, 'Client', Fake)
+    monkeypatch.setattr(store, 'DEMO', False)
+    c.put(BASE, json=settings(username=''))
+    c.post(BASE+'/test')
+    cached = modem._clients['atlas']
+    assert c.post(BASE+'/test-settings', json=connection(password='')).status_code == 200
+    assert len(calls) == 1
+    assert c.post(BASE+'/test-settings', json=connection(password='new-fixture-password')).status_code == 200
+    assert len(calls) == 2
+    assert modem._clients['atlas'] == cached
 
 
 @pytest.mark.parametrize('enabled', [False, True])

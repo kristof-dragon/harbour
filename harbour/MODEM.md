@@ -2,10 +2,12 @@
 
 Open an OpenWrt server’s **Modem** tab and choose **Modem settings** as an
 administrator. Configure the modem address and its administration credentials,
-then use **Save & test connection** inside the settings overlay. It saves the
-displayed settings, runs one check and leaves the result visible. The main tab's
-**Test connection** checks the already saved settings. Polling is off until
-explicitly enabled; a manual test does not enable it.
+then use **Test connection** inside the settings overlay. It checks the entered
+address and credentials without saving settings, changing polling state, or
+adding test readings to the overview/history. The result stays in the overlay;
+edited values remain available to save or discard. **Save** is a separate action
+and does not run a connection test. Polling is off until explicitly enabled.
+The address field's **ⓘ** help lists common modem/gateway IP addresses.
 The default address is `http://192.168.100.1`; the Harbour container must have a
 route to it. No software, SSH work or measurement process runs on the router.
 The existing OpenWrt and network recorder settings are independent.
@@ -43,7 +45,8 @@ DNS lookup are not used. Only login function 15 and read functions 1, 2, 10, 11,
 The pre-login `sessionToken` cookie and authenticated SID remain in process memory
 and are reused only for the configured modem. The token is bounded, never returned
 to Harbour's browser, and redacted from collected values. A rejected/expired login pauses
-automatic polling until settings are saved or a manual test succeeds. Firmware
+automatic polling until settings are saved (or the legacy saved-settings test
+API succeeds). Overlay tests do not change that state. Firmware
 may allow only one administrator session: pause polling before interactive use.
 No attempt is made to evict an existing administrator or bypass a lockout.
 
@@ -57,6 +60,15 @@ minutes. The read cycle has a 25-second deadline, 4-second socket timeouts,
 Five status requests are made per established-session cycle; initial login adds
 two requests. Host monitoring pause also suspends background modem polling.
 Demo mode never contacts hardware. No additional runtime dependency is required.
+
+`POST /api/servers/{id}/modem/test-settings` checks draft connection settings.
+It requires an administrator and CSRF protection, uses the same per-server lock
+as saved collections, and returns only a transient summary. A blank password
+uses the saved secret only when address and username are unchanged. Enter a
+password when testing another address or username; it is not stored. Existing
+configured sessions may be reused for unchanged saved credentials. The legacy
+`POST .../modem/test` remains available for saved-settings collection clients;
+it is no longer used by the browser UI.
 
 System/device values, downstream/upstream channels and event logs are stored
 with their reported field names. Units and counter scaling are not inferred.
@@ -88,3 +100,16 @@ do not prove that a particular firmware exposes every authenticated diagnostic
 field. Confirm credentials using the settings form, inspect the first readings,
 and compare values/units with the modem interface before interpreting DOCSIS
 power, SNR, error counters or event codes as ISP evidence.
+
+## Address examples
+
+The help lists examples, not a scan or a supported-device catalogue. Check the
+device label and ISP documentation, and distinguish the modem from any separate
+router. Common examples are `192.168.100.1`, `192.168.0.1`, `192.168.1.1`,
+`192.168.1.254` and `10.0.0.1`. Sources:
+
+- [NETGEAR cable modem access](https://kb.netgear.com/000059644/How-do-I-log-in-to-my-NETGEAR-cable-modem)
+- [Virgin Media modem/router mode addresses](https://www.virginmedia.com/help/broadband/reboot-or-reset-hub)
+- [TP-Link device addresses](https://www.tp-link.com/us/support/faq/1170/)
+- [AT&T gateway access](https://www.att.com/support/article/u-verse-high-speed-internet/KM1206322/)
+- [Xfinity gateway Admin Tool](https://www.xfinity.com/support/articles/admin-tool-access)
