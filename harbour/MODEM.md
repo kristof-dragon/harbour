@@ -2,7 +2,10 @@
 
 Open an OpenWrt server’s **Modem** tab and choose **Modem settings** as an
 administrator. Configure the modem address and its administration credentials,
-save, then use **Test connection**. Polling is off until explicitly enabled.
+then use **Save & test connection** inside the settings overlay. It saves the
+displayed settings, runs one check and leaves the result visible. The main tab's
+**Test connection** checks the already saved settings. Polling is off until
+explicitly enabled; a manual test does not enable it.
 The default address is `http://192.168.100.1`; the Harbour container must have a
 route to it. No software, SSH work or measurement process runs on the router.
 The existing OpenWrt and network recorder settings are independent.
@@ -12,6 +15,15 @@ protocol and getter numbers were checked against device-served JavaScript.
 Authenticated XML schemas, field units and firmware compatibility still need
 verification against the actual modem. Other modem families are not supported.
 There is no default password guessing or configuration/reset operation.
+
+Username is optional. On supported Compal forms Harbour uses an explicitly
+configured username, or the default supplied by the modem's actual login form.
+On supported password-only forms it omits the username from authentication.
+If a username is required but the form provides no default, the test asks for
+one without submitting the password. This is firmware-dependent, not inferred
+from the sticker or model alone. Other authentication protocols remain unsupported.
+The test distinguishes successful authentication from readable diagnostics;
+neither establishes that the line is healthy.
 
 ## Credentials and access
 

@@ -2,8 +2,8 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),http=require('node:http'),path=require('node:path');
 const {chromium}=require('playwright');
 const host={id:'router',name:'Example router',host:'192.0.2.2',port:22,username:'root',server_type:'openwrt',services:[],warnings:[],updates:0,checked:Date.now()/1000,monitoring_enabled:true,poll_seconds:60,connection_status:'up',metrics:null};
-let role='admin',saved=null,testCalls=0,releaseTest;
-let data={settings:{enabled:false,url:'http://192.168.100.1',username:'admin',interval_seconds:60,retention_days:7},password_saved:true,blocked:false,sample:null,stale:false,observer:'example-observer',demo:false,server_monitoring_enabled:true};
+let role='admin',saved=null,testCalls=0,releaseTest,testError=null,saveError=false;
+let data={settings:{enabled:false,url:'http://192.168.100.1',username:'',interval_seconds:60,retention_days:7},password_saved:true,blocked:false,sample:null,stale:false,observer:'example-observer',demo:false,server_monitoring_enabled:true};
 const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(),'harbour/static',req.url==='/'?'index.html':req.url.replace('/static/',''));res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':file.endsWith('.svg')?'image/svg+xml':'text/html');res.end(fs.readFileSync(file));}catch{res.writeHead(404).end();}});
 (async()=>{
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -19,9 +19,9 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
    else if(url.pathname.endsWith('/modem/history'))response={samples:data.sample?[data.sample]:[],truncated:false};
    else if(url.pathname.endsWith('/modem/test')){
     testCalls++;await new Promise(resolve=>releaseTest=resolve);
-    data.sample={at:Date.now()/1000,received_at:Date.now()/1000,state:'partial',configuration_revision:'fixture-revision',collection_ms:20,sections:{downstream:{state:'ok',fields:[{field:'channel/power',value:'123'},{field:'channel/note',value:'<img src=x onerror="window.modemInjected=true">'}]},upstream:{state:'unavailable',error:'No usable XML',fields:[]}}};response=data;
+    data.sample=testError?{at:Date.now()/1000,received_at:Date.now()/1000,state:'unavailable',error:testError,sections:{}}:{at:Date.now()/1000,received_at:Date.now()/1000,state:'partial',authentication:{state:'authenticated',mode:'modem_default'},configuration_revision:'fixture-revision',collection_ms:20,sections:{downstream:{state:'ok',fields:[{field:'channel/power',value:'123'},{field:'channel/note',value:'<img src=x onerror="window.modemInjected=true">'}]},upstream:{state:'unavailable',error:'No usable XML',fields:[]}}};response=data;
    }else if(url.pathname.endsWith('/modem')){
-    if(method==='PUT'){saved=route.request().postDataJSON();const {password,clear_password,...settings}=saved;data={...data,settings};}
+    if(method==='PUT'){saved=route.request().postDataJSON();if(saveError){await route.fulfill({status:422,json:{detail:'Re-enter the password when changing the address.'}});return;}const {password,clear_password,...settings}=saved;data={...data,settings};}
     response=data;
    }else if(url.pathname.includes('/network')){await route.fulfill({status:503,json:{detail:'Synthetic network data unavailable'}});return;}
    await route.fulfill({json:response});
@@ -34,7 +34,9 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.equal(await password.inputValue(),'');
   assert.equal(await password.getAttribute('type'),'password');
   await form.locator('[name=interval_seconds]').fill('90');
-  await form.locator('[type=submit]').click();
+  assert.equal(await form.locator('[name=username]').inputValue(),'');
+  assert.equal(await form.locator('[name=username]').getAttribute('required'),null);
+  await form.locator('[value=save]').click();
   await form.waitFor({state:'detached'});
   assert.equal(saved.password,'');assert.equal(saved.interval_seconds,90);
   await page.locator('[data-action=modem-test]').click();
@@ -45,6 +47,36 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   assert.equal(await page.locator('.modem-sections img').count(),0);
   assert.equal(await page.evaluate(()=>window.modemInjected),undefined);
   assert.match(await page.locator('.modem-view').textContent(),/Collection gap/);
+  await page.locator('[data-action=modem-settings]').click();
+  await form.locator('[name=interval_seconds]').fill('120');
+  await form.locator('[value=test]').click();
+  await page.waitForFunction(()=>document.querySelector('.modem-test-result')?.textContent.includes('Checking'));
+  await page.waitForFunction(()=>document.querySelector('#modem-settings-form [value=test]').disabled);
+  assert.equal(saved.interval_seconds,120);assert.equal(saved.username,'');assert.equal(saved.password,'');assert.equal(saved.enabled,false);
+  assert.equal(await password.inputValue(),'');
+  assert.equal(testCalls,2);releaseTest();
+  await form.locator('.modem-test-result').filter({hasText:'Login succeeded using the modem’s default username'}).waitFor();
+  assert.match(await form.locator('.modem-test-result').textContent(),/downstream \(1\/2\).*unavailable/);
+  await form.locator('[value=test]').waitFor({state:'visible'});
+  await page.waitForFunction(()=>!document.querySelector('#modem-settings-form [value=test]').disabled);
+  assert.equal(await page.evaluate(()=>formDirty(document.querySelector('#modem-settings-form'))),false);
+  await page.screenshot({path:'/tmp/harbour-modem-overlay-result.png',fullPage:true});
+  await form.locator('[name=retention_days]').fill('8');
+  assert.equal(await form.locator('.modem-test-result').textContent(),'');
+  testError='Modem login was rejected or requires attention. Polling is paused; check the credentials and test again.';
+  await form.locator('[value=test]').click();
+  await page.waitForFunction(()=>document.querySelector('.modem-test-result')?.textContent.includes('Checking'));
+  assert.equal(testCalls,3);releaseTest();
+  await form.locator('.modem-test-result').filter({hasText:'login was rejected'}).waitFor();
+  assert.equal(await form.count(),1);assert.equal(await password.inputValue(),'');
+  await page.waitForFunction(()=>!document.querySelector('#modem-settings-form [value=test]').disabled);
+  saveError=true;
+  await form.locator('[name=url]').fill('http://192.168.0.1');
+  await form.locator('[value=test]').click();
+  await form.locator('.form-error').filter({hasText:'Re-enter the password'}).waitFor();
+  assert.equal(testCalls,3);assert.equal(await form.locator('[name=url]').inputValue(),'http://192.168.0.1');
+  saveError=false;
+  await page.evaluate(()=>closeOverlay(true));
   await page.screenshot({path:'/tmp/harbour-modem-desktop.png',fullPage:true});
   await page.setViewportSize({width:390,height:844});
   await page.locator('[data-action=modem-settings]').click();
@@ -52,6 +84,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await password.fill('synthetic-sticker-password');
   await page.screenshot({path:'/tmp/harbour-modem-mobile.png',fullPage:true});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  assert.equal(await form.evaluate(el=>el.closest('.modal').scrollWidth<=el.closest('.modal').clientWidth),true);
   assert.equal(await page.evaluate(()=>Object.values(localStorage).some(v=>v.includes('synthetic-sticker-password'))),false);
   await page.evaluate(()=>closeOverlay(true));
   role='user';await page.reload();await page.locator('[data-tab=modem]').click();

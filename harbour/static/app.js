@@ -518,7 +518,7 @@ document.addEventListener('click',async event=>{
 });
 document.addEventListener('submit',async event=>{
   if(event.target.id==='warning-history-filter')return;
-  if(['resource-settings-form','report-policy','report-range','bridge-settings','bridge-annotation','bridge-identity','bridge-profile-form','login-filter','incident-filters','incident-brief-form','endpoint-form','call-test-form'].includes(event.target.id)||event.target.matches('.collector-sudo-form'))return;
+  if(['resource-settings-form','report-policy','report-range','bridge-settings','bridge-annotation','bridge-identity','bridge-profile-form','login-filter','incident-filters','incident-brief-form','endpoint-form','call-test-form','modem-settings-form'].includes(event.target.id)||event.target.matches('.collector-sudo-form'))return;
   event.preventDefault();const form=event.target;if(form.dataset.busy)return;const data=Object.fromEntries(new FormData(form));const submit=$('[type=submit]',form);const restoreForm=busyOnboarding(form);$('.form-error',form).textContent='';
   try{
     if(monitorForms.has(form.id)){await handleMonitorForm(form,data);return;}

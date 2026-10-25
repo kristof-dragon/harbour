@@ -14,6 +14,7 @@ from harbour import modem, modem_client as protocol, store
 BASE = '/api/servers/atlas/modem'
 PASSWORD = 'fixture-only-password'
 REAL_WORKER = modem.run
+LOGIN_SCRIPT = b'''<script>function HashPassword(p){return sha256(p)};var Data={'fun':15,'Password':HashPassword(p)};</script>'''
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +58,42 @@ def test_encrypted_keep_remove_and_credentials_never_returned(router_client):
     assert PASSWORD not in c.put(BASE, json=settings(password=PASSWORD*100)).text
 
 
+def test_optional_username_can_save_enable_and_test(router_client, monkeypatch):
+    c, calls = router_client, []
+    class Fake:
+        def __init__(self, url, username, password):
+            calls.append((username, password))
+        def poll(self):
+            return sample()
+    monkeypatch.setattr(modem, 'Client', Fake)
+    monkeypatch.setattr(store, 'DEMO', False)
+    for enabled in (False, True):
+        saved = c.put(BASE, json=settings(username='', enabled=enabled))
+        assert saved.status_code == 200
+        result = c.post(BASE+'/test').json()
+        assert result['sample']['state'] == 'ok'
+        assert result['settings']['username'] == ''
+        assert result['settings']['enabled'] is enabled
+        assert PASSWORD not in json.dumps(result)
+    assert calls == [('', PASSWORD), ('', PASSWORD)]
+
+
+def test_required_username_blocks_worker_without_exposing_credentials(router_client, monkeypatch):
+    c = router_client
+    class Fake:
+        def __init__(self, *args):
+            pass
+        def poll(self):
+            raise protocol.ModemError('username_required', 'This modem requires a username.')
+    monkeypatch.setattr(modem, 'Client', Fake)
+    monkeypatch.setattr(store, 'DEMO', False)
+    c.put(BASE, json=settings(username='', enabled=True))
+    result = c.post(BASE+'/test').json()
+    assert result['blocked']
+    assert result['sample']['error_code'] == 'username_required'
+    assert PASSWORD not in json.dumps(result)
+
+
 @pytest.mark.parametrize('url', ['http://example.com', 'http://127.0.0.1', 'http://169.254.169.254', 'http://8.8.8.8', 'file:///tmp/x', 'http://[::1]', 'http://user:pass@192.168.1.1', 'http://192.168.1.1/path', 'http://192.168.1.1?next=x', 'http://192.168.1.1#x', 'http://192.168.1.1:0', 'http://192.168.1.1:65536', 'http://192.168.\n1.1'])
 def test_target_validation(url):
     with pytest.raises(ValueError):
@@ -87,7 +124,8 @@ def test_permissions_csrf_demo_and_unique_target(router_client, monkeypatch):
     assert c.get(BASE).status_code == 401
 
 
-def test_poll_session_reuse_gap_backoff_block_and_recovery(router_client, monkeypatch):
+@pytest.mark.parametrize('enabled', [False, True])
+def test_poll_session_reuse_gap_backoff_block_and_recovery(router_client, monkeypatch, enabled):
     c, calls = router_client, []
     class Fake:
         failure = None
@@ -100,11 +138,11 @@ def test_poll_session_reuse_gap_backoff_block_and_recovery(router_client, monkey
             return sample()
     monkeypatch.setattr(modem, 'Client', Fake)
     monkeypatch.setattr(store, 'DEMO', False)
-    assert c.put(BASE, json=settings(enabled=True)).status_code == 200
+    assert c.put(BASE, json=settings(enabled=enabled)).status_code == 200
     assert c.post(BASE+'/test').json()['sample']['state'] == 'ok'
     assert c.post(BASE+'/test').status_code == 200
     assert calls == ['login', 'poll', 'poll']
-    assert c.put(BASE, json=settings(enabled=True, password='', interval_seconds=120)).status_code == 200
+    assert c.put(BASE, json=settings(enabled=enabled, password='', interval_seconds=120)).status_code == 200
     assert c.get(BASE).json()['sample'] is None  # New settings epoch.
     assert c.post(BASE+'/test').status_code == 200
     assert calls.count('login') == 1  # Cadence changes retain the session.
@@ -216,7 +254,8 @@ def test_snapshot_and_xml_bounds_redaction():
 
 @pytest.fixture
 def firmware(monkeypatch):
-    state = {'requests': [], 'login': b'successful;SID=fixture-session', 'bad_section': None, 'redirect': False, 'oversize': False, 'slow': False}
+    state = {'requests': [], 'login': b'successful;SID=fixture-session', 'bad_section': None, 'redirect': False, 'oversize': False, 'slow': False,
+             'page': b'<input name="loginUsername" value="admin"><input name="loginPassword" type="password">'+LOGIN_SCRIPT}
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -233,9 +272,9 @@ def firmware(monkeypatch):
                 return
             self.send_response(302 if state['redirect'] else 200)
             self.send_header('Location', 'http://192.168.1.2/steal')
-            self.send_header('Content-Length', str(len(b'loginUsername loginPassword HashPassword sha256')))
+            self.send_header('Content-Length', str(len(state['page'])))
             self.end_headers()
-            self.wfile.write(b'loginUsername loginPassword HashPassword sha256')
+            self.wfile.write(state['page'])
         def do_POST(self):
             data = parse_qs(self.rfile.read(int(self.headers['Content-Length'])).decode())
             state['requests'].append((self.path, data, self.headers.get('Cookie')))
@@ -276,6 +315,43 @@ def test_actual_http_protocol_session_and_partial_read(firmware):
             c.request('/xml/setter.xml', {'fun': function})
     with pytest.raises(ValueError):
         c.request('/xml/getter.xml', {'fun': 99})
+
+
+@pytest.mark.parametrize('username,default,expected,mode', [
+    ('', 'admin', 'admin', 'modem_default'),
+    ('', 'operator', 'operator', 'modem_default'),
+    ('custom', 'admin', 'custom', 'configured_username'),
+    ('custom', '', 'custom', 'configured_username'),
+])
+def test_login_uses_configured_or_actual_form_default(firmware, username, default, expected, mode):
+    firmware['page'] = firmware['page'].replace(b'value="admin"', ('value="'+default+'"').encode())
+    result = protocol.Client('http://192.168.100.1', username, PASSWORD).poll()
+    assert firmware['requests'][1][1]['Username'] == [expected]
+    assert result['authentication'] == {'state': 'authenticated', 'mode': mode}
+
+
+@pytest.mark.parametrize('username', ['', 'unused'])
+def test_password_only_omits_username(firmware, username):
+    firmware['page'] = firmware['page'].replace(b'<input name="loginUsername" value="admin">', b'')
+    result = protocol.Client('http://192.168.100.1', username, PASSWORD).poll()
+    assert 'Username' not in firmware['requests'][1][1]
+    assert result['authentication']['mode'] == 'password_only'
+
+
+@pytest.mark.parametrize('page,code', [
+    (b'<input name="loginUsername"><input name="loginPassword" type="password">'+LOGIN_SCRIPT, 'username_required'),
+    (b'loginUsername loginPassword HashPassword sha256', 'unsupported'),
+    (b'<input name="password" type="password">', 'unsupported'),
+    (b'<input name="loginPassword" type="password">HashPassword sha256 loginUsername', 'unsupported'),
+    (b'<input name="loginPassword" type="password"><input name="loginPassword" type="password">HashPassword sha256', 'unsupported'),
+    (b'<input name="loginPassword" type="password">'+LOGIN_SCRIPT.replace(b"'fun':15", b"'fun':99"), 'unsupported'),
+])
+def test_missing_username_or_unknown_form_never_submits_password(firmware, page, code):
+    firmware['page'] = page
+    with pytest.raises(protocol.ModemError) as exc:
+        protocol.Client('http://192.168.100.1', '', PASSWORD).poll()
+    assert exc.value.code == code
+    assert len(firmware['requests']) == 1
 
 
 @pytest.mark.parametrize('answer', [b'idloginrightincorrect', b'KDGchangePW', b'unsuccessful SID=x', b'not successful SID=x', b'successful', b'successful SID=bad%0d%0a'])

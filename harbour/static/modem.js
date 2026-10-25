@@ -25,17 +25,35 @@ async function loadModem(s,force=false){
   catch(error){v.error=error.message;}
   finally{v.loaded=Date.now();v.busy=false;paintModem(s);}
 }
-async function modemSettings(s){
-  const d=await api(`/servers/${s.id}/modem`);modemView(s).data=d;
+async function modemSettings(s,saved=null){
+  const d=saved||await api(`/servers/${s.id}/modem`);modemView(s).data=d;
   const c=d.settings;
   modal('Modem settings',`<form id="modem-settings-form" data-id="${e(s.id)}">
     <label class="check-line"><input type="checkbox" name="enabled" ${c.enabled?'checked':''}> Enable direct polling</label>
-    <div class="form-grid"><label>${fieldCaption('Modem address','Private IPv4 HTTP(S) address, reachable from this Harbour instance. Redirects and proxies are not used. HTTPS requires a valid certificate.')}<input name="url" type="url" value="${e(c.url)}" maxlength="120" required></label><label>Username<input name="username" value="${e(c.username)}" maxlength="80" autocomplete="off"></label></div>
+    <div class="form-grid"><label>${fieldCaption('Modem address','Private IPv4 HTTP(S) address, reachable from this Harbour instance. Redirects and proxies are not used. HTTPS requires a valid certificate.')}<input name="url" type="url" value="${e(c.url)}" maxlength="120" required></label><label>${fieldCaption('Username (optional)','Leave blank for the default supplied by the modem login form, or for a supported password-only form. If the modem requires a username without providing a default, the test will ask for one. Unrecognised login protocols are not tried.')}<input name="username" value="${e(c.username)}" maxlength="80" autocomplete="off" placeholder="Automatic / password only"></label></div>
     <label>${fieldCaption('Modem password',`Encrypted in Harbour’s database using its application secret. Never returned to the browser. ${d.password_saved?'Leave blank to keep the saved password.':'Enter the modem administration password.'} Use HTTPS to access Harbour. The modem’s HTTP interface sends a password hash and session cookie without transport encryption; these remain sensitive credentials.`)}<input type="password" name="password" value="" maxlength="256" autocomplete="new-password" placeholder="${d.password_saved?'Saved · leave blank to keep':'Modem administration password'}"></label>
     ${d.password_saved?'<label class="check-line"><input type="checkbox" name="clear_password"> Remove saved password (disable polling first)</label>':''}
     <div class="form-grid"><label>${fieldCaption('Poll interval (seconds)','One sequential status read cycle, default once per minute. Failures back off to at most 15 minutes; rejected logins pause until you save settings or test again. Sessions are reused.')}<input name="interval_seconds" type="number" min="30" max="900" step="1" value="${c.interval_seconds}" required></label><label>History retention (days)<input name="retention_days" type="number" min="1" max="30" step="1" value="${c.retention_days}" required></label></div>
-    <div class="form-error" role="alert"></div><div class="form-actions"><button type="submit" class="primary">Save modem settings</button></div></form>`);
+    <div class="form-error" role="alert"></div><div class="modem-test-result hint" role="status" aria-live="polite"></div><div class="form-actions"><button type="submit" name="action" value="save" class="primary">Save modem settings</button><button type="submit" name="action" value="test" ${d.demo?'disabled':''}>Save &amp; test connection</button></div></form>`);
 }
+function modemTestResult(d){
+  const sample=d.sample;
+  if(d.demo)return 'Demo mode: no connection was attempted.';
+  if(!sample)return 'No test reading was returned.';
+  if(sample.error)return sample.error;
+  const mode=({modem_default:'using the modem’s default username',configured_username:'using the configured username',password_only:'using password-only authentication'})[sample.authentication?.mode];
+  const login=sample.authentication?.state==='authenticated'?`Login succeeded${mode?' '+mode:''}. `:'';
+  const sections=Object.entries(sample.sections||{}),read=sections.filter(([,v])=>v.state==='ok').map(([k])=>k);
+  return login+(read.length?`Diagnostic sections read: ${read.join(', ')} (${read.length}/${sections.length}).`:'No usable diagnostic sections were returned.')+(read.length<sections.length?' Some diagnostics are unavailable.':'');
+}
+function modemFormBusy(form,busy){
+  form.dataset.busy=busy?'true':'';
+  form.querySelectorAll('input,button[type=submit]').forEach(el=>{el.disabled=busy;});
+}
+document.addEventListener('input',event=>{
+  const form=event.target.closest('#modem-settings-form');
+  if(form)form.querySelector('.modem-test-result').textContent='';
+});
 document.addEventListener('click',async event=>{
   const el=event.target.closest('[data-action]'),s=current();if(!s||!admin())return;
   try{
@@ -49,8 +67,21 @@ document.addEventListener('click',async event=>{
 });
 document.addEventListener('submit',async event=>{
   const form=event.target;if(form.id!=='modem-settings-form')return;event.preventDefault();
-  const s={id:form.dataset.id},data=Object.fromEntries(new FormData(form)),submit=form.querySelector('[type=submit]');submit.disabled=true;
-  try{await api(`/servers/${s.id}/modem`,'PUT',{enabled:data.enabled==='on',url:data.url,username:data.username,password:data.password,clear_password:data.clear_password==='on',interval_seconds:Number(data.interval_seconds),retention_days:Number(data.retention_days)});form.reset();closeOverlay(true);await loadModem(s,true);}
-  catch(error){formError(error.message,form);}
-  finally{data.password='';submit.disabled=false;}
+  if(form.dataset.busy)return;
+  const s={id:form.dataset.id},v=modemView(s),data=Object.fromEntries(new FormData(form)),test=event.submitter?.value==='test';
+  if(v.testing)return;
+  let activeForm=form;
+  modemFormBusy(form,true);form.querySelector('.form-error').textContent='';form.querySelector('.modem-test-result').textContent='';
+  try{
+    const saved=await api(`/servers/${s.id}/modem`,'PUT',{enabled:data.enabled==='on',url:data.url,username:data.username,password:data.password,clear_password:data.clear_password==='on',interval_seconds:Number(data.interval_seconds),retention_days:Number(data.retention_days)});
+    data.password='';form.elements.password.value='';markFormSaved(form);v.data=saved;
+    if(test){
+      v.testing=true;paintModem(s);
+      if(form.isConnected){await modemSettings(s,saved);activeForm=document.querySelector('#modem-settings-form');modemFormBusy(activeForm,true);activeForm.querySelector('.modem-test-result').textContent='Settings saved. Checking connection…';}
+      v.data=await api(`/servers/${s.id}/modem/test`,'POST');
+      if(activeForm.isConnected)activeForm.querySelector('.modem-test-result').textContent=modemTestResult(v.data);
+    }else if(form.isConnected){closeOverlay(true);}
+    await loadModem(s,true);
+  }catch(error){if(activeForm.isConnected)formError(error.message,activeForm);else toast(error.message,true);}
+  finally{data.password='';v.testing=false;if(activeForm.isConnected){modemFormBusy(activeForm,false);if(v.data?.demo)activeForm.querySelector('[value=test]').disabled=true;}paintModem(s);}
 });

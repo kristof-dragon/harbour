@@ -108,8 +108,8 @@ def save(id_: str, body: Settings, user=Depends(auth.admin)):
                 encrypted = ''
             elif password:
                 encrypted = store.cipher().encrypt(password.encode()).decode()
-            if body.enabled and (not encrypted or not body.username):
-                raise HTTPException(422, 'Save the modem username and password before enabling polling.')
+            if body.enabled and not encrypted:
+                raise HTTPException(422, 'Save the modem password before enabling polling.')
             duplicate = con.execute('SELECT server_id FROM modem_settings WHERE url=? AND server_id<>?', (body.url, id_)).fetchone()
             if duplicate:
                 raise HTTPException(409, 'This modem address is already configured for another router.')
@@ -118,7 +118,7 @@ def save(id_: str, body: Settings, user=Depends(auth.admin)):
             con.execute('INSERT INTO modem_settings(server_id,url,config,password_encrypted,revision) VALUES (?,?,?,?,?) ON CONFLICT(server_id) DO UPDATE SET url=excluded.url,config=excluded.config,password_encrypted=excluded.password_encrypted,revision=excluded.revision,next_attempt=0,blocked=0,failures=0',
                         (id_, body.url, json.dumps(values), encrypted, revision))
         cached = _clients.get(id_)
-        if cached and old and cached[0] == old['revision'] and encrypted == old['password_encrypted'] and previous.get('url') == body.url and previous.get('username') == body.username and body.enabled:
+        if cached and old and cached[0] == old['revision'] and encrypted == old['password_encrypted'] and previous.get('url') == body.url and previous.get('username') == body.username:
             _clients[id_] = (revision, cached[1])
         else:
             _clients.pop(id_, None)
@@ -179,9 +179,9 @@ def poll_one(id_, manual=False):
         settings = json.loads(row['config'])
         if not manual and (row['blocked'] or row['next_attempt'] > time.time() or not settings['enabled']):
             return
-        if not row['password_encrypted'] or not settings['username']:
+        if not row['password_encrypted']:
             if manual:
-                raise HTTPException(400, 'Enter the modem username and password first.')
+                raise HTTPException(400, 'Enter the modem password first.')
             return
         if store.DEMO:
             return  # Never send demo credentials or create invented hardware samples.
@@ -197,7 +197,7 @@ def poll_one(id_, manual=False):
             failure = 0 if sample['state'] == 'ok' else row['failures']+1
         except Exception as exc:
             # Never persist raw server responses, tokens, passwords or exception text.
-            blocked = isinstance(exc, AuthenticationError)
+            blocked = isinstance(exc, AuthenticationError) or (isinstance(exc, ModemError) and exc.code == 'username_required')
             failure = row['failures']+1
             code = exc.code if isinstance(exc, ModemError) else 'collection_failed'
             message = str(exc) if isinstance(exc, ModemError) else 'Modem collection failed; check the settings and test again.'
@@ -245,8 +245,8 @@ def run(stop):
             active = set()
             for row in rows:
                 settings = json.loads(row['config'])
-                if settings['enabled']:
-                    active.add(row['server_id'])
+                # Manual tests also reuse sessions while automatic polling is off.
+                active.add(row['server_id'])
                 if stop.is_set():
                     break
                 if settings['enabled'] and not row['blocked'] and row['next_attempt'] <= time.time():

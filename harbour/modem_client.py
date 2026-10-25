@@ -6,6 +6,7 @@ Firmware-specific XML values retain their names/units until verified on hardware
 """
 import hashlib
 import http.client
+from html.parser import HTMLParser
 import ipaddress
 import re
 import socket
@@ -29,6 +30,48 @@ class ModemError(Exception):
 class AuthenticationError(ModemError):
     def __init__(self):
         super().__init__('authentication_required', 'Modem login was rejected or requires attention. Polling is paused; check the credentials and test again.')
+
+
+class LoginForm(HTMLParser):
+    """Inspect known inputs only; never execute modem JavaScript or follow actions."""
+    def __init__(self):
+        super().__init__()
+        self.inputs = {}
+        self.duplicate = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag != 'input':
+            return
+        attrs = dict(attrs)
+        name = attrs.get('name')
+        if name in ('loginUsername', 'loginPassword'):
+            self.duplicate |= name in self.inputs
+            self.inputs[name] = attrs
+
+
+def login_identity(page, username):
+    """Blank usernames use a firmware default, or no username on password-only forms."""
+    form = LoginForm()
+    form.feed(page.decode('utf-8', 'replace'))
+    password = form.inputs.get('loginPassword', {})
+    if (form.duplicate or password.get('type', '').lower() != 'password'
+            or not all(part in page for part in (b'HashPassword', b'sha256'))
+            or not re.search(br'''["']fun["']\s*:\s*15\b''', page)
+            or not re.search(br'''["']Password["']\s*:\s*HashPassword\s*\(''', page)):
+        raise ModemError('unsupported', 'The modem login protocol does not match the supported Compal ONE firmware.')
+    field = form.inputs.get('loginUsername')
+    if field is None:
+        # A different firmware that still refers to a missing username is not a
+        # supported password-only form. Do not guess its authentication payload.
+        if b'loginUsername' in page or re.search(br'''["']Username["']\s*:''', page):
+            raise ModemError('unsupported', 'The modem login form could not be identified safely.')
+        return None, 'password_only'
+    value = username or (field.get('value') or '').strip()
+    if not value:
+        raise ModemError('username_required', 'This modem requires a username and provides no default. Enter its username and test again.')
+    if len(value) > 80 or any(ord(c) < 32 for c in value):
+        raise ModemError('unsupported', 'The modem login form supplied an unsupported username.')
+    return value, 'configured_username' if username else 'modem_default'
 
 
 def endpoint(value):
@@ -110,6 +153,7 @@ class Client:
     def __init__(self, url, username, password):
         self.url, self.username, self.password = endpoint(url), username, password
         self.sid = None
+        self.login_mode = None
 
     def request(self, path, values=None, deadline=None):
         if path not in ('/common_page/login.html', '/js/CommonAPI.js', '/xml/getter.xml', '/xml/setter.xml'):
@@ -193,17 +237,18 @@ class Client:
 
     def login(self, deadline):
         page = self.request('/common_page/login.html', deadline=deadline)
-        # Fail closed on other firmware login schemes instead of trying passwords.
-        if not all(part in page for part in (b'loginUsername', b'loginPassword', b'HashPassword', b'sha256')):
-            raise ModemError('unsupported', 'The modem login protocol does not match the supported Compal ONE firmware.')
-        response = self.request('/xml/setter.xml', {'fun': 15, 'Username': self.username,
-                                'Password': hashlib.sha256(self.password.encode()).hexdigest()}, deadline).decode('utf-8', 'replace')
+        username, mode = login_identity(page, self.username)
+        values = {'fun': 15, 'Password': hashlib.sha256(self.password.encode()).hexdigest()}
+        if username is not None:
+            values['Username'] = username
+        response = self.request('/xml/setter.xml', values, deadline).decode('utf-8', 'replace')
         if re.search(r'incorrect|passwordneedstochange|KDGchangePW|KDGsuperUser|unsuccessful|not\s+successful', response, re.I):
             raise AuthenticationError()
         sid = re.search(r'\bSID=([A-Za-z0-9_-]{1,256})(?:\s|$|[;<])', response)
         if not re.search(r'\bsuccessful\b', response, re.I) or not sid:
             raise AuthenticationError()
         self.sid = sid[1]
+        self.login_mode = mode
 
     def poll(self):
         deadline, started = time.monotonic()+25, time.time()
@@ -224,5 +269,6 @@ class Client:
                 sections[name] = {'observed_at': at, 'received_at': time.time(), 'state': 'unavailable', 'error': str(exc), 'fields': []}
         usable = sum(s['state'] == 'ok' for s in sections.values())
         return {'at': started, 'received_at': time.time(), 'state': 'ok' if usable == len(SECTIONS) else 'partial' if usable else 'unavailable',
+                'authentication': {'state': 'authenticated', 'mode': self.login_mode},
                 'sections': sections, 'timestamp_basis': 'Harbour request/receipt time; modem event times are preserved as reported',
                 'cause': 'not_established'}
