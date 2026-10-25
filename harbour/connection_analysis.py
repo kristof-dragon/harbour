@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 
 from . import incidents
 
-VERSION = 2
+VERSION = 3
 RULES = {'jitter_ms': 30, 'rtt_rise_ms': 20, 'max_alignment_seconds': 1,
          'minimum_coverage': .8, 'sender_shortfall_fraction': .9,
          'cpu_percent': 90, 'softirq_percent': 50, 'memory_percent': 90,

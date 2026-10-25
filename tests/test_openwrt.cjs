@@ -23,6 +23,8 @@ sys.path.insert(0,'tests')
 from test_connection_analysis import fixture,result
 from harbour.network_diagnostics import summarize
 from harbour.connection_analysis import patterns
+from test_modem_evidence import sample
+from harbour.modem_evidence import Assessment,correlate
 t,e=fixture(120,losses={'upload':list(range(0,120,3))})
 shift=time.time()-1200
 for row in e['local']['samples']: row['at']+=shift
@@ -31,6 +33,10 @@ for row in e['analysis']['timeline']:
 for key in ('start','end'): e['window'][key]+=shift
 for key in ('load_started','load_finished'): t['result'][key]+=shift
 r=result(t,e);r['server_id']='router'
+a=Assessment(r['start'],r['end'])
+a.add(sample(r['start'], '1', event='<img src=x onerror=window.modemInjection=true>'))
+a.add(sample(r['start']+63, '2'))
+r['modem']=a.finish();r['modem_correlation']=correlate(r['modem'],r['episodes'])
 r['quality'].append('<img src=x onerror="window.analysisInjection=true">')
 print(json.dumps({'detail':r,'summary':summarize(r),'patterns':patterns([r])}))`],{encoding:'utf8'});
 assert.equal(diagnosticGenerated.status,0,diagnosticGenerated.stderr);
@@ -165,6 +171,18 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.getByRole('tab',{name:'Summary',exact:true}).click();
   await page.getByRole('tab',{name:'Summary',exact:true}).press('ArrowRight');
   assert.equal(await page.getByRole('tab',{name:'Episodes (40)',exact:true}).getAttribute('aria-selected'),'true');
+  await page.getByRole('tab',{name:'Modem',exact:true}).click();
+  assert.match(await page.locator('#analysis-panel-modem').textContent(),/Modem-reported fault indications observed/);
+  assert.match(await page.locator('#analysis-panel-modem').textContent(),/Observation intervals overlap/);
+  await page.locator('#analysis-panel-modem').getByText('Modem signals and supporting readings',{exact:true}).click();
+  assert.equal(await page.evaluate(()=>window.modemInjection),undefined);
+  fs.mkdirSync('test-results',{recursive:true});
+  await page.locator('.analysis-review-body').evaluate(el=>el.scrollTop=0);
+  await page.screenshot({path:'test-results/modem-correlation-desktop.png'});
+  await page.setViewportSize({width:390,height:844});
+  await page.waitForFunction(()=>document.documentElement.scrollWidth<=innerWidth);
+  await page.screenshot({path:'test-results/modem-correlation-mobile.png'});
+  await page.setViewportSize({width:1440,height:1000});
   await page.getByRole('tab',{name:'Summary',exact:true}).click();
   fs.mkdirSync('test-results',{recursive:true});
   await page.screenshot({path:'test-results/connection-analysis-desktop.png'});
@@ -175,7 +193,7 @@ const server=http.createServer((req,res)=>{try{const file=path.join(process.cwd(
   await page.getByRole('button',{name:'Close dialog',exact:true}).click();
   await page.setViewportSize({width:1440,height:1000});
   const downloadWait=page.waitForEvent('download');
-  await page.getByRole('link',{name:'Download all conclusions in period (.json.gz)',exact:true}).click();
+  await page.getByRole('link',{name:'Download analysis + evidence in period (.json.gz)',exact:true}).click();
   const handoff=await downloadWait;
   assert.equal(handoff.suggestedFilename(),'harbour-connection-analysis.json.gz');
   assert.equal(JSON.parse(require('node:zlib').gunzipSync(fs.readFileSync(await handoff.path()))).reports.length,1);

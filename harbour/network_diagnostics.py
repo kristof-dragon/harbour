@@ -9,7 +9,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from . import __version__, call_evidence, call_tests, connection_analysis as analysis, network, network_incidents, store, resource_limits as resources
+from . import __version__, call_evidence, call_tests, connection_analysis as analysis, network, network_incidents, store, modem_evidence, resource_limits as resources
 from .auth import authenticated
 
 router = APIRouter(prefix='/api/servers/{id_}/network/analysis')
@@ -26,6 +26,10 @@ GUIDE = (
     'Respect timing uncertainty and exclusions. Do not infer actual media quality, one-way latency, exact packet bursts or an ISP fault. '
     'Give an evidence-backed assessment and the next discriminating check. Root cause is not established by correlation. '
     'This file is self-contained for reviewing its conclusions; complete raw packet or application evidence was not collected. '
+    'modem_evidence contains a separate modem-only assessment and all retained modem snapshots for the selected period. '
+    'Each report.modem has its own evidence namespace; modem_evidence_refs resolve there. '
+    'Modem correlation tables only intersect observation intervals, and exclude unverified modem log times. '
+    'Read coverage and omitted counts. Modem indications do not change the independent network conclusions. '
     'SHA-256 verifies content consistency, not independent authenticity.'
 )
 
@@ -39,7 +43,10 @@ def initialize():
 
 
 def summarize(report):
-    return {k: v for k, v in report.items() if k not in ('episodes', 'path_findings', 'evidence', 'run_context', 'cohort_basis')}
+    result = {k: v for k, v in report.items() if k not in ('episodes', 'path_findings', 'evidence', 'run_context', 'cohort_basis', 'modem', 'modem_correlation')}
+    if 'modem' in report:
+        result['modem'] = {k: report['modem'][k] for k in ('state', 'conclusion', 'coverage', 'signal_counts', 'findings_omitted')}
+    return result
 
 
 def persist(report, source_digest):
@@ -72,7 +79,7 @@ def cache_call(test, evidence):
     """Called on completed collection, before raw-test retention can remove it."""
     with analysis_lock:
         server = network.host(test['server_id'])
-        report = analysis.analyze_call(test, evidence, server)
+        report = modem_evidence.attach(analysis.analyze_call(test, evidence, server))
         persist(report, call_digest(test, evidence))
         return report
 
@@ -97,7 +104,7 @@ def report(server, source, identity):
                     return resources.unpack(cached['payload'])
                 # Rebuild only from saved evidence; never fetch a remote endpoint.
                 evidence['analysis'] = call_evidence.analyze(test, evidence)
-                result = analysis.analyze_call(test, evidence, server)
+                result = modem_evidence.attach(analysis.analyze_call(test, evidence, server))
                 persist(result, fingerprint)
                 return result
         else:
@@ -107,12 +114,16 @@ def report(server, source, identity):
                 fingerprint = analysis.digest(bundle)
                 if cached and row['complete'] and cached['version'] == analysis.VERSION and cached['digest'] == fingerprint:
                     return resources.unpack(cached['payload'])
-                result = analysis.analyze_incident(bundle, server)
+                result = modem_evidence.attach(analysis.analyze_incident(bundle, server))
                 if row['complete']:
                     persist(result, fingerprint)
                 return result
         if cached:
-            return resources.unpack(cached['payload'])
+            saved = resources.unpack(cached['payload'])
+            if 'modem' not in saved:
+                modem_evidence.attach(saved)
+                persist(saved, cached['digest'])
+            return saved
         raise HTTPException(404, 'Saved evidence is unavailable. Complete a test or collect its evidence from Call tests.')
 
 
@@ -177,6 +188,8 @@ def brief(reports):
                   f"{r['episode_count']} episodes; {len(r['quality'])} evidence limitations."]
         for f in r.get('contributors', []):
             lines.append(f"{f['assessment']}: {f['title']}. {f['conclusion']} Next check: {f['next_check']}")
+        if r.get('modem'):
+            lines.append('Independent modem assessment: '+r['modem']['conclusion'])
         lines.extend('Limit: '+q for q in r['quality'])
         lines.append('')
     return '\n'.join(lines)
@@ -195,7 +208,7 @@ def handoff(server, reports, selection=None):
                             'selection': selection or {'report_ids': [r['id'] for r in reports]},
                             'retention': {'report_limit_per_router': MAX_REPORTS, 'compressed_bytes_per_router': MAX_CACHE_BYTES},
                             'hash_basis': 'SHA-256 of each report: JSON sorted keys, compact separators, ASCII escaping, UTF-8. Hashes establish consistency, not authenticity.',
-                            'scope': 'Self-contained conclusions with selected measured evidence and full comparison counts, not full raw archives.'}
+                            'scope': 'Self-contained network conclusions with selected evidence, plus a separate modem-only assessment and all retained modem snapshots in the selection. Network raw archives remain separate.'}
                 prefix = json.dumps(metadata, allow_nan=False, ensure_ascii=False)
                 writer.write(prefix[:-1]+',"reports":[')
                 for index, summary in enumerate(reports):
@@ -211,7 +224,13 @@ def handoff(server, reports, selection=None):
                     if index:
                         writer.write(',')
                     json.dump({'report_sha256': analysis.digest(data), 'report': data}, writer, allow_nan=False, ensure_ascii=False, separators=(',', ':'))
-                writer.write(']}')
+                writer.write('],"modem_evidence":')
+                start = selection['from'] if selection and 'from' in selection else min(r['start'] for r in reports)
+                end = selection['until'] if selection and 'until' in selection else max(r['end'] for r in reports)
+                with store.db() as con:
+                    con.execute('BEGIN')
+                    modem_evidence.write_export(writer, con, server['id'], start, end, archived=True)
+                writer.write('}')
         return network_incidents.PreparedDownload(file, 'harbour-connection-analysis.json.gz')
     except BaseException:
         file.close()

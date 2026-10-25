@@ -1,15 +1,16 @@
 """Direct modem polling on the Harbour host, independently of router SSH."""
+import io
 import json
 import secrets
 import socket
 import threading
 import time
+import tempfile
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
-from . import auth, network, store
+from . import auth, network, store, modem_evidence, resource_limits as resources
 from .modem_client import Client, ModemError, AuthenticationError, endpoint
 
 router = APIRouter(prefix='/api/servers/{id_}/modem')
@@ -21,6 +22,7 @@ MAX_HISTORY = 64 * 1024 * 1024
 
 
 def initialize():
+    modem_evidence.initialize()
     with store.db() as con:
         con.executescript('''
         CREATE TABLE IF NOT EXISTS modem_settings (
@@ -161,23 +163,30 @@ def bounded_sample(sample):
 
 def persist(id_, revision, sample, blocked=False, failures=0):
     sample = {**sample, 'configuration_revision': revision}
-    payload = bounded_sample(sample)
     with store.db() as con:
         con.execute('BEGIN IMMEDIATE')
         row = con.execute('SELECT * FROM modem_settings WHERE server_id=?', (id_,)).fetchone()
         if not row or row['revision'] != revision:
             return False
         settings = json.loads(row['config'])
+        sample['poll_interval_seconds'] = settings['interval_seconds']
+        payload = bounded_sample(sample)
         con.execute('INSERT INTO modem_samples(server_id,revision,measured,received,state,payload,bytes,collection_ms) VALUES (?,?,?,?,?,?,?,?)',
                     (id_, revision, sample['at'], sample['received_at'], sample['state'], payload, len(payload.encode()), sample.get('collection_ms')))
+        modem_evidence.capture(con, id_, json.loads(payload))
         delay = min(900, settings['interval_seconds']*2**min(failures, 4))
         con.execute('UPDATE modem_settings SET next_attempt=?,blocked=?,failures=? WHERE server_id=? AND revision=?',
                     (time.time()+delay, blocked, failures, id_, revision))
-        # Metadata-only bounded retention. Never sort large payloads in a write transaction.
+        # Bounded cleanup; preserve legacy evidence before pruning short history.
         cutoff = time.time()-settings['retention_days']*86400
         size = con.execute('SELECT COALESCE(SUM(bytes),0) FROM modem_samples WHERE server_id=?', (id_,)).fetchone()[0]
-        con.execute('DELETE FROM modem_samples WHERE id IN (SELECT id FROM modem_samples WHERE server_id=? AND (measured<? OR ?=1) ORDER BY measured,id LIMIT 256)',
-                    (id_, cutoff, int(size > MAX_HISTORY)))
+        retiring = con.execute('SELECT id,payload FROM modem_samples WHERE server_id=? AND (measured<? OR ?=1) ORDER BY measured,id LIMIT 256',
+                               (id_, cutoff, int(size > MAX_HISTORY)))
+        ids = []
+        for old in retiring:
+            modem_evidence.capture(con, id_, json.loads(old['payload']))
+            ids.append((old['id'],))
+        con.executemany('DELETE FROM modem_samples WHERE id=?', ids)
     return True
 
 
@@ -320,10 +329,27 @@ def history(id_: str, hours: int = Query(24, ge=1, le=720), summary: bool = Quer
 
 
 @router.get('/export')
-def export(id_: str, hours: int = Query(24, ge=1, le=720), user=Depends(auth.authenticated)):
-    data = history(id_, hours, False, user)
-    return Response(json.dumps({'schema': 1, 'server_id': id_, 'cause': 'not_established', **data}),
-                    media_type='application/json', headers={'Content-Disposition': 'attachment; filename="modem-evidence.json"'})
+@resources.bounded
+def export(id_: str, hours: int = Query(24, ge=1, le=720), until: float | None = Query(None, ge=0, allow_inf_nan=False), user=Depends(auth.authenticated)):
+    network.host(id_)
+    end = until if until is not None else time.time()
+    file = tempfile.TemporaryFile(mode='w+b', dir=store.DATA)
+    try:
+        writer = io.TextIOWrapper(file, encoding='utf-8')
+        try:
+            with store.db() as con:
+                con.execute('BEGIN')
+                modem_evidence.write_export(writer, con, id_, end-hours*3600, end, archived=True)
+            writer.flush()
+        finally:
+            writer.detach()
+        from .network_incidents import PreparedDownload
+        response = PreparedDownload(file, 'modem-evidence.json')
+        response.headers['content-type'] = 'application/json'
+        return response
+    except BaseException:
+        file.close()
+        raise
 
 
 def run(stop):

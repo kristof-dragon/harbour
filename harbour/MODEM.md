@@ -102,10 +102,65 @@ History is persisted in Harbour SQLite with a default seven-day retention
 (1–30 days configurable) and 64 MiB payload cap per modem. Bounded cleanup runs
 on collections; paused monitors retain their existing data until collection
 resumes. Settings and samples are removed when their parent server is deleted.
-The history API and JSON export include at most the latest 256 snapshots in a
-requested window (default 24 hours, maximum 720). `truncated` is explicit.
-`GET /api/servers/{id}/modem/history?summary=false` includes section values;
-the default summary excludes them. Export includes values and revision IDs.
+The history API remains limited to the latest 256 snapshots for interactive
+browsing, with an explicit `truncated` flag. The evidence JSON export streams
+**all retained snapshots** in the requested window (default 24 hours, maximum
+720), including archived modem evidence. An optional `until` Unix timestamp
+fixes the end of the window. It includes coverage, a modem-only assessment,
+values and revision IDs. A preceding baseline can appear in referenced evidence,
+but is excluded from the window's sample count. There is no 256-reading export cap.
+
+Each sanitized snapshot is also compressed into the report evidence store in the
+same transaction as collection. Legacy snapshots are captured before short-history
+pruning. This archive follows the existing daily-report age and storage policy;
+it is included in that policy's byte budget. It is retired with complete days,
+so retaining modem evidence does not bypass the report storage limits. A paused
+report processor can retain staging evidence until successful publication, just
+as it does for network facts. No second hardware poll is performed.
+
+## Independent indications and analysis handoff
+
+The Analysis review has a **Modem** section. Its assessment consumes only recorded
+modem values. Network conclusions and contributor rules are unchanged. A separate
+table intersects the modem observation intervals with network episodes; overlap
+is a review aid, not additional root-cause attribution.
+
+Supported Compal fields provide these conservative rules:
+
+- A decrease in the explicitly formatted `cm_system_uptime` indicates a restart
+  or uptime reset; its cause is unknown.
+- `IsQamLocked`, `IsFECLocked` or `IsMpegLocked` equal to `0` on an identified,
+  populated downstream channel is a modem-reported unlock indication.
+- Increases in `PostRs`, `t3Timeouts` or `t4Timeouts` are indications. `PreRs`
+  increases are context, without an invented error rate or severity threshold.
+  Counters are matched by direction, channel ID and frequency. Cumulative
+  nonzero values alone do not indicate a fault in the selected window.
+- Counter decreases are reset/discontinuity context. A settings, observer,
+  endpoint or firmware change, a known uptime reset, or an excessive collection
+  gap breaks counter comparisons. Unsupported units are never guessed.
+- Warning/error/critical/alert/emergency log entries are deduplicated by content
+  and shown as historical context. Their unverified device timestamps do not
+  participate in automatic temporal correlation.
+
+No defined indication is **not** a healthy-line verdict. Every assessment carries
+coverage, missing/partial/truncated readings, first/last observations and method
+limits. At most 128 findings and 64 supporting snapshots are retained in each
+assessment; counts cover all processed observation intervals (channel changes within an interval are grouped) and omitted examples are
+explicit. Correlation tables retain at most 512 rows with an omitted count.
+
+Daily reports preserve the assessment and its selected evidence. Connection
+analysis downloads include the independent assessments, correlation tables and
+a separate `modem_evidence` section containing all retained modem snapshots in
+the selected period. Each modem assessment owns its evidence namespace;
+`modem_evidence_refs` resolve inside its `evidence` object. Baseline evidence is
+included when used, even if just before the selection. Older reports can lack
+modem evidence; expired readings cannot be reconstructed.
+
+Exports are prepared locally and streamed to disk, with an explicit failure
+rather than clipping if the modem section exceeds eight times the configured
+processing byte budget. Files remain self-contained for offline/LLM review;
+credentials, login cookies and tokens are never sourced from settings for export.
+Operational addresses and bounded event text remain part of the evidence.
 
 ## Validation boundary
 

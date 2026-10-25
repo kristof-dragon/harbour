@@ -20,7 +20,7 @@ from . import network, report_facts as facts, store, resource_limits as resource
 from .auth import admin, authenticated
 
 router = APIRouter(prefix='/api/servers/{id_}/network/reports')
-VERSION = 1
+VERSION = 2
 DAY = dt.timedelta(days=1)
 
 
@@ -45,6 +45,8 @@ class Policy(BaseModel):
 
 
 def initialize():
+    from . import modem_evidence
+    modem_evidence.initialize()
     with store.db() as con:
         con.executescript('''
         CREATE TABLE IF NOT EXISTS report_policy (
@@ -317,6 +319,9 @@ def compile_day(id_, day, cfg):
     state = store.one('SELECT retired_before FROM report_state WHERE server_id=?', (id_,))
     if state and state['retired_before'] and start < state['retired_before']:
         report['quality'].insert(0, 'Earlier evidence in this day was retired under the previous retention/timezone policy; this day is partial.')
+    from . import modem_evidence
+    report['modem'] = modem_evidence.assess(id_, start, end)
+    report['modem_correlation'] = modem_evidence.correlate(report['modem'], report['timeline'])
     payload = pack(report)
     store.execute('INSERT OR REPLACE INTO report_days VALUES (?,?,?,?,?,?,?)',
                   (id_, str(day), cfg['timezone'], start, end, report['generated'], payload))
@@ -357,6 +362,7 @@ def retire_before(id_, cutoff):
     with store.db() as con:
         con.execute('INSERT OR IGNORE INTO report_state(server_id) VALUES (?)', (id_,))
         con.execute('UPDATE report_state SET retired_before=max(coalesce(retired_before,0),?) WHERE server_id=?', (cutoff,id_))
+        con.execute('DELETE FROM report_modem_samples WHERE server_id=? AND measured<?', (id_, cutoff))
         con.execute('DELETE FROM report_days WHERE server_id=? AND end<=?', (id_, cutoff))
         con.execute('DELETE FROM report_sources WHERE server_id=? AND end<?', (id_, cutoff))
         con.execute('''DELETE FROM report_chunks WHERE end<=? AND archive_id IN
@@ -367,6 +373,7 @@ def retire_before(id_, cutoff):
 def stored_bytes(id_):
     sizes = {}
     for name, sql in (
+        ('modem_evidence', 'SELECT coalesce(sum(length(payload)),0) AS n FROM report_modem_samples WHERE server_id=?'),
         ('daily_reports', 'SELECT coalesce(sum(length(payload)),0) AS n FROM report_days WHERE server_id=?'),
         ('call_summaries', 'SELECT coalesce(sum(length(payload)),0) AS n FROM report_sources WHERE server_id=?'),
         ('compact_facts', 'SELECT coalesce(sum(length(c.payload)),0) AS n FROM report_chunks c JOIN report_archives a ON a.id=c.archive_id WHERE a.server_id=?')):

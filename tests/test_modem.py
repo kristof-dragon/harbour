@@ -292,8 +292,9 @@ def test_nonoverlap_and_epoch_stale_history_retention(router_client, monkeypatch
             s = sample()
             payload = json.dumps(s)
             con.execute('INSERT INTO modem_samples(server_id,revision,measured,received,state,payload,bytes) VALUES (?,?,?,?,?,?,?)', ('atlas', revision, s['at'], s['received_at'], 'ok', payload, len(payload)))
-    assert c.get(BASE+'/export').json()['truncated']
-    assert len(c.get(BASE+'/export').json()['samples']) == 256
+    assert c.get(BASE+'/history').json()['truncated']
+    assert not c.get(BASE+'/export').json()['truncated']
+    assert len(c.get(BASE+'/export').json()['samples']) == 261
     monkeypatch.setattr(modem, 'MAX_HISTORY', 1)
     modem.persist('atlas', revision, sample())
     assert store.one('SELECT COUNT(*) AS n FROM modem_samples')['n'] == 6

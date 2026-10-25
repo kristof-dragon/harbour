@@ -154,6 +154,16 @@ def render(server, period):
                 content += '<p class="notice">'+e(call['episodes_omitted'])+' call episodes were omitted by the source analyzer; this report cannot reconstruct them.</p>'
         entries.sort(key=lambda item:(item['at'],item.get('id','')))
         content += '<h3>Reconciled timeline</h3><div class="timeline">'+(''.join(entry(item,zone) for item in entries) if entries else '<p>No incidents or review signals in the available evidence. Check the coverage before interpreting this.</p>')+'</div>'
+        modem = day.get('modem')
+        if modem:
+            content += '<h3>Independent modem assessment</h3><p>'+e(modem['conclusion'])+'</p>'
+            content += table(['Network observation', 'Modem indication', 'Relationship'],
+                [[timestamp(r['start'], zone)+' · '+r['network_observation'], '; '.join(r['modem_observations']) or 'No overlapping retained indication', r['relationship']]
+                 for r in day.get('modem_correlation', {}).get('rows', [])])
+            content += '<p class="quality">'+e(modem['coverage'].get('snapshots', 0))+' modem readings; '+e(modem['findings_omitted'])+' signal examples omitted. Historical modem log times are unaligned.</p>'
+            for finding in modem['findings']:
+                content += '<details><summary>'+e(finding['title'])+'</summary><p>'+e(finding['detail'])+'</p><pre>'+e(json.dumps({ref: modem['evidence'][ref] for ref in finding['modem_evidence_refs']}, ensure_ascii=False, indent=2))+'</pre></details>'
+            content += '<div class="quality">'+''.join('<p>'+e(q)+'</p>' for q in modem['limitations'])+'</div>'
         content += '<h3>Final daily statistics</h3>'+path_table(day['paths'])
         content += table(['Recording type','Observations'],sorted(day['kinds'].items()))
         if day.get('telemetry'):
