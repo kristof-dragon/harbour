@@ -6,6 +6,7 @@ Firmware-specific XML values retain their names/units until verified on hardware
 """
 import hashlib
 import http.client
+from http.cookies import CookieError, SimpleCookie
 from html.parser import HTMLParser
 import ipaddress
 import re
@@ -153,6 +154,7 @@ class Client:
     def __init__(self, url, username, password):
         self.url, self.username, self.password = endpoint(url), username, password
         self.sid = None
+        self.session_token = None
         self.login_mode = None
 
     def request(self, path, values=None, deadline=None):
@@ -171,8 +173,13 @@ class Client:
         headers = {'User-Agent': 'Harbour-Modem/1', 'Accept': 'text/xml, text/html',
                    'Referer': self.url+'/', 'Origin': self.url, 'X-Requested-With': 'XMLHttpRequest',
                    'Connection': 'close'}
+        cookies = []
+        if self.session_token:
+            cookies.append('sessionToken=' + self.session_token)
         if self.sid:
-            headers['Cookie'] = 'SID=' + self.sid
+            cookies.append('SID=' + self.sid)
+        if cookies:
+            headers['Cookie'] = '; '.join(cookies)
         data = None
         if values is not None:
             data = urllib.parse.urlencode(values).encode()
@@ -202,6 +209,28 @@ class Client:
                 raise AuthenticationError()
             if response.status != 200:
                 raise ModemError('http_error', 'Modem did not return a successful response. Redirects are not followed.')
+            # This firmware closes XML requests that omit the pre-login cookie.
+            # Keep only its known, bounded token in memory, for this origin alone.
+            for name, value in response.getheaders():
+                if name.lower() != 'set-cookie':
+                    continue
+                jar = SimpleCookie()
+                try:
+                    jar.load(value)
+                except CookieError:
+                    raise ModemError('invalid_response', 'Modem returned an unsupported session cookie.') from None
+                cookie = jar.get('sessionToken')
+                if cookie is None:
+                    continue
+                if (cookie['domain'].lstrip('.') not in ('', url.hostname)
+                        or cookie['path'] not in ('', '/') or (cookie['secure'] and url.scheme != 'https')):
+                    continue
+                if not cookie.value or cookie['max-age'] == '0':
+                    self.session_token = None
+                elif re.fullmatch(r'[A-Za-z0-9._~+/=-]{1,256}', cookie.value):
+                    self.session_token = cookie.value
+                else:
+                    raise ModemError('invalid_response', 'Modem returned an unsupported session cookie.')
             if response.getheader('Content-Encoding', 'identity').lower() != 'identity':
                 raise ModemError('invalid_response', 'Compressed modem responses are not supported.')
             # Check the overall deadline between bounded reads, including slow responses.
@@ -238,9 +267,10 @@ class Client:
     def login(self, deadline):
         page = self.request('/common_page/login.html', deadline=deadline)
         username, mode = login_identity(page, self.username)
-        values = {'fun': 15, 'Password': hashlib.sha256(self.password.encode()).hexdigest()}
+        values = {'fun': 15}
         if username is not None:
             values['Username'] = username
+        values['Password'] = hashlib.sha256(self.password.encode()).hexdigest()
         response = self.request('/xml/setter.xml', values, deadline).decode('utf-8', 'replace')
         if re.search(r'incorrect|passwordneedstochange|KDGchangePW|KDGsuperUser|unsuccessful|not\s+successful', response, re.I):
             raise AuthenticationError()
@@ -255,12 +285,12 @@ class Client:
         if not self.sid:
             self.login(deadline)
         sections = {}
-        redactions = (self.password, hashlib.sha256(self.password.encode()).hexdigest(), self.sid)
         for name, function in SECTIONS.items():
             at = time.time()
             try:
+                redactions = (self.password, hashlib.sha256(self.password.encode()).hexdigest(), self.sid, self.session_token)
                 root = xml_document(self.request('/xml/getter.xml', {'fun': function}, deadline))
-                content = fields(root, redactions)
+                content = fields(root, (*redactions, self.session_token))
                 sections[name] = {'observed_at': at, 'received_at': time.time(), 'state': 'ok' if content['fields'] else 'unavailable', **content}
             except AuthenticationError:
                 self.sid = None

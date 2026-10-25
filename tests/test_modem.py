@@ -255,6 +255,7 @@ def test_snapshot_and_xml_bounds_redaction():
 @pytest.fixture
 def firmware(monkeypatch):
     state = {'requests': [], 'login': b'successful;SID=fixture-session', 'bad_section': None, 'redirect': False, 'oversize': False, 'slow': False,
+             'cookie': 'sessionToken=fixture-preauth; Path=/; HttpOnly',
              'page': b'<input name="loginUsername" value="admin"><input name="loginPassword" type="password">'+LOGIN_SCRIPT}
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -273,14 +274,22 @@ def firmware(monkeypatch):
             self.send_response(302 if state['redirect'] else 200)
             self.send_header('Location', 'http://192.168.1.2/steal')
             self.send_header('Content-Length', str(len(state['page'])))
+            self.send_header('Set-Cookie', state['cookie'])
             self.end_headers()
             self.wfile.write(state['page'])
         def do_POST(self):
             data = parse_qs(self.rfile.read(int(self.headers['Content-Length'])).decode())
             state['requests'].append((self.path, data, self.headers.get('Cookie')))
+            previous_token = state.get('token', 'fixture-preauth')
+            if 'sessionToken='+previous_token not in (self.headers.get('Cookie') or ''):
+                self.close_connection = True
+                return
             self.send_response(200)
+            if state.get('rotate_cookie') and self.path.endswith('getter.xml'):
+                state['token'] = 'fixture-rotated'
+                self.send_header('Set-Cookie', 'sessionToken=fixture-rotated; Path=/; HttpOnly')
             self.end_headers()
-            response = state['login'] if self.path.endswith('setter.xml') else b'<status><power>123</power></status>'
+            response = state['login'] if self.path.endswith('setter.xml') else ('<status><power>123</power><value>'+previous_token+' '+state.get('token', previous_token)+'</value></status>').encode()
             if data.get('fun') == [str(state['bad_section'])]:
                 response = b'malformed XML'
             if state['oversize']:
@@ -302,19 +311,52 @@ def test_actual_http_protocol_session_and_partial_read(firmware):
     assert c.poll()['state'] == 'ok'
     login = firmware['requests'][1]
     assert login[1] == {'fun': ['15'], 'Username': ['admin'], 'Password': [hashlib.sha256(PASSWORD.encode()).hexdigest()]}
+    assert login[2] == 'sessionToken=fixture-preauth'
     assert len(firmware['requests']) == 7
-    assert all(req[2] == 'SID=fixture-session' for req in firmware['requests'][2:])
+    assert all(req[2] == 'sessionToken=fixture-preauth; SID=fixture-session' for req in firmware['requests'][2:])
     firmware['bad_section'] = 10
     result = c.poll()
     assert len(firmware['requests']) == 12
     assert result['state'] == 'partial'
     assert result['sections']['downstream']['state'] == 'unavailable'
     assert result['sections']['upstream']['state'] == 'ok'
+    assert 'fixture-preauth' not in json.dumps(result)
     for function in (16, 100, '15'):
         with pytest.raises(ValueError):
             c.request('/xml/setter.xml', {'fun': function})
     with pytest.raises(ValueError):
         c.request('/xml/getter.xml', {'fun': 99})
+
+
+@pytest.mark.parametrize('cookie', [
+    'sessionToken=fixture-preauth; Domain=other.example; Path=/',
+    'sessionToken=fixture-preauth; Path=/unrelated',
+    'sessionToken=fixture-preauth; Secure; Path=/',
+    'sessionToken=fixture-preauth; Max-Age=0; Path=/',
+    'unrelated=fixture-preauth; Path=/',
+])
+def test_session_cookie_scope(firmware, cookie):
+    firmware['cookie'] = cookie
+    c = protocol.Client('http://192.168.100.1', '', PASSWORD)
+    c.request('/common_page/login.html')
+    assert c.session_token is None
+
+
+@pytest.mark.parametrize('value', ['x'*257, 'bad value'])
+def test_session_cookie_bounded_before_credentials_sent(firmware, value):
+    firmware['cookie'] = 'sessionToken="'+value+'"; Path=/'
+    with pytest.raises(protocol.ModemError):
+        protocol.Client('http://192.168.100.1', '', PASSWORD).poll()
+    assert len(firmware['requests']) == 1
+
+
+def test_rotating_session_cookie_reused_and_both_values_redacted(firmware):
+    firmware['rotate_cookie'] = True
+    result = protocol.Client('http://192.168.100.1', '', PASSWORD).poll()
+    assert result['state'] == 'ok'
+    assert 'fixture-preauth' not in json.dumps(result)
+    assert 'fixture-rotated' not in json.dumps(result)
+    assert firmware['requests'][3][2] == 'sessionToken=fixture-rotated; SID=fixture-session'
 
 
 @pytest.mark.parametrize('username,default,expected,mode', [

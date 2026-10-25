@@ -40,7 +40,9 @@ Targets must be literal RFC1918 IPv4 addresses. Redirects, environment proxies a
 DNS lookup are not used. Only login function 15 and read functions 1, 2, 10, 11,
 13 are permitted; configuration setters are rejected by the client.
 
-The SID remains in process memory and is reused. A rejected/expired login pauses
+The pre-login `sessionToken` cookie and authenticated SID remain in process memory
+and are reused only for the configured modem. The token is bounded, never returned
+to Harbour's browser, and redacted from collected values. A rejected/expired login pauses
 automatic polling until settings are saved or a manual test succeeds. Firmware
 may allow only one administrator session: pause polling before interactive use.
 No attempt is made to evict an existing administrator or bypass a lockout.
