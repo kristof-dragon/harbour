@@ -11,6 +11,9 @@ The address field's **ⓘ** help lists common modem/gateway IP addresses.
 The default address is `http://192.168.100.1`; the Harbour container must have a
 route to it. No software, SSH work or measurement process runs on the router.
 The existing OpenWrt and network recorder settings are independent.
+Collection status and the five diagnostic sections appear in one row of chips;
+select a section to open or close its values in a bounded panel. The row scrolls
+horizontally on narrow screens. Read status describes collection, not line health.
 
 This initial adapter targets the Compal CH7465 ONE web protocol. The login
 protocol and getter numbers were checked against device-served JavaScript.
