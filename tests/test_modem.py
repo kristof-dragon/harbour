@@ -180,7 +180,7 @@ def test_draft_test_never_changes_saved_settings_or_history(router_client, monke
         assert modem.config('atlas') == before
         assert store.rows('SELECT * FROM modem_samples') == history
     assert calls == [(modem.DEFAULT['url'], '', PASSWORD), ('http://192.168.0.1', 'other', 'new-fixture-password')]
-    assert modem._clients == {}
+    assert bool(modem._clients) is (failure is None)
 
 
 def test_draft_saved_secret_target_and_concurrency_guards(router_client, monkeypatch):
@@ -217,12 +217,13 @@ def test_draft_test_reuses_only_unchanged_saved_session(router_client, monkeypat
     monkeypatch.setattr(store, 'DEMO', False)
     c.put(BASE, json=settings(username=''))
     c.post(BASE+'/test')
-    cached = modem._clients['atlas']
     assert c.post(BASE+'/test-settings', json=connection(password='')).status_code == 200
+    assert len(calls) == 1
+    assert c.post(BASE+'/test-settings', json=connection(password=PASSWORD)).status_code == 200
     assert len(calls) == 1
     assert c.post(BASE+'/test-settings', json=connection(password='new-fixture-password')).status_code == 200
     assert len(calls) == 2
-    assert modem._clients['atlas'] == cached
+    assert 'atlas' not in modem._clients  # Different credentials cannot own the saved poller session.
 
 
 @pytest.mark.parametrize('enabled', [False, True])
@@ -372,7 +373,8 @@ def firmware(monkeypatch):
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 return
-            self.send_response(302 if state['redirect'] else 200)
+            busy = state.get('single_session') and state.get('active') and 'SID=fixture-session' not in (self.headers.get('Cookie') or '')
+            self.send_response(302 if state['redirect'] or busy else 200)
             self.send_header('Location', 'http://192.168.1.2/steal')
             self.send_header('Content-Length', str(len(state['page'])))
             self.send_header('Set-Cookie', state['cookie'])
@@ -385,6 +387,21 @@ def firmware(monkeypatch):
             if 'sessionToken='+previous_token not in (self.headers.get('Cookie') or ''):
                 self.close_connection = True
                 return
+            if self.path.endswith('getter.xml') and (state.pop('expire_once', False) or state.get('expire_always')):
+                state['active'] = False
+                self.send_response(401)
+                self.end_headers()
+                return
+            if state.get('single_session') and data.get('fun') == ['15']:
+                if state.get('active'):
+                    self.send_response(409)
+                    self.end_headers()
+                    return
+                state['active'] = True
+            if data.get('fun') == ['16']:
+                assert 'SID=fixture-session' in (self.headers.get('Cookie') or '')
+                assert data.get('token') == [previous_token]
+                state['active'] = False
             self.send_response(200)
             if state.get('rotate_cookie') and self.path.endswith('getter.xml'):
                 state['token'] = 'fixture-rotated'
@@ -422,11 +439,152 @@ def test_actual_http_protocol_session_and_partial_read(firmware):
     assert result['sections']['downstream']['state'] == 'unavailable'
     assert result['sections']['upstream']['state'] == 'ok'
     assert 'fixture-preauth' not in json.dumps(result)
-    for function in (16, 100, '15'):
+    for function in (100, '15', '16'):
         with pytest.raises(ValueError):
             c.request('/xml/setter.xml', {'fun': function})
     with pytest.raises(ValueError):
+        c.request('/xml/setter.xml', {'fun': 16, 'force': 1})
+    with pytest.raises(ValueError):
         c.request('/xml/getter.xml', {'fun': 99})
+
+
+def login_count(firmware):
+    return sum(data is not None and data.get('fun') == ['15'] for _, data, _ in firmware['requests'])
+
+
+def test_saved_overlay_session_is_shared_with_scheduled_collection(router_client, firmware, monkeypatch):
+    firmware['single_session'] = True
+    monkeypatch.setattr(store, 'DEMO', False)
+    router_client.put(BASE, json=settings(username='', enabled=True))
+    before = modem.config('atlas')
+    for password in ('', PASSWORD):
+        result = router_client.post(BASE+'/test-settings', json=connection(password=password))
+        assert result.json()['sample']['state'] == 'ok'
+    assert modem.config('atlas') == before
+    assert store.one('SELECT COUNT(*) AS n FROM modem_samples')['n'] == 0
+    modem.poll_one('atlas')
+    assert router_client.get(BASE).json()['sample']['state'] == 'ok'
+    assert login_count(firmware) == 1
+    assert firmware['active']
+
+
+def test_unsaved_tests_release_owned_session_and_can_repeat(router_client, firmware, monkeypatch):
+    firmware['single_session'] = True
+    monkeypatch.setattr(store, 'DEMO', False)
+    for _ in range(2):
+        result = router_client.post(BASE+'/test-settings', json=connection())
+        assert result.json()['sample']['state'] == 'ok'
+        assert not firmware['active']
+        assert firmware['requests'][-1][1] == {'fun': ['16'], 'token': ['fixture-preauth']}
+    assert login_count(firmware) == 2
+    assert modem.config('atlas') is None
+    assert modem._clients == {}
+    assert store.one('SELECT COUNT(*) AS n FROM modem_samples')['n'] == 0
+
+
+def test_changed_draft_releases_saved_then_temporary_session(router_client, firmware, monkeypatch):
+    firmware['single_session'] = True
+    monkeypatch.setattr(store, 'DEMO', False)
+    router_client.put(BASE, json=settings(username='', enabled=True))
+    modem.poll_one('atlas')
+    before = modem.config('atlas')
+    history = store.rows('SELECT * FROM modem_samples')
+    result = router_client.post(BASE+'/test-settings', json=connection(password='new-fixture-password'))
+    assert result.json()['sample']['state'] == 'ok'
+    assert not firmware['active'] and not modem._clients
+    assert modem.config('atlas') == before
+    assert store.rows('SELECT * FROM modem_samples') == history
+    assert [data['fun'] for path, data, _ in firmware['requests'] if path.endswith('setter.xml')] == [['15'], ['16'], ['15'], ['16']]
+    modem.poll_one('atlas', manual=True)
+    assert router_client.get(BASE).json()['sample']['state'] == 'ok'
+
+
+@pytest.mark.parametrize('changes', [
+    {'enabled': False}, {'url': 'http://192.168.0.1', 'password': PASSWORD}, {'password': 'replacement-fixture-password'},
+])
+def test_disabling_or_changing_saved_connection_logs_out(router_client, firmware, monkeypatch, changes):
+    firmware['single_session'] = True
+    monkeypatch.setattr(store, 'DEMO', False)
+    router_client.put(BASE, json=settings(enabled=True))
+    modem.poll_one('atlas')
+    assert firmware['active']
+    updated = settings(enabled=True, password='')
+    updated.update(changes)
+    assert router_client.put(BASE, json=updated).status_code == 200
+    assert not firmware['active'] and not modem._clients
+
+
+def test_worker_shutdown_releases_its_session(router_client, firmware, monkeypatch):
+    firmware['single_session'] = True
+    monkeypatch.setattr(store, 'DEMO', False)
+    router_client.put(BASE, json=settings(enabled=True))
+    class OneIteration:
+        waited = False
+        def wait(self, seconds):
+            previous, self.waited = self.waited, True
+            return previous
+        def is_set(self):
+            return False
+    REAL_WORKER(OneIteration())
+    assert login_count(firmware) == 1
+    assert not firmware['active'] and not modem._clients
+
+
+def test_expired_session_reauthenticates_once(firmware):
+    firmware['single_session'] = True
+    c = protocol.Client('http://192.168.100.1', '', PASSWORD)
+    assert c.poll()['state'] == 'ok'
+    firmware['expire_once'] = True
+    assert c.poll()['state'] == 'ok'
+    assert login_count(firmware) == 2
+    firmware['expire_always'] = True
+    with pytest.raises(protocol.AuthenticationError):
+        c.poll()
+    assert login_count(firmware) == 3  # No login retry loop.
+
+
+def test_rejected_reauthentication_pauses_worker(router_client, firmware, monkeypatch):
+    monkeypatch.setattr(store, 'DEMO', False)
+    router_client.put(BASE, json=settings(enabled=True))
+    modem.poll_one('atlas')
+    firmware['expire_once'] = True
+    firmware['login'] = b'incorrect'
+    modem.poll_one('atlas', manual=True)
+    assert modem.config('atlas')['blocked']
+    assert login_count(firmware) == 2
+    modem.poll_one('atlas')
+    assert login_count(firmware) == 2
+
+
+def test_logout_requires_owned_session_and_clears_memory(firmware):
+    c = protocol.Client('http://192.168.100.1', '', PASSWORD)
+    c.logout()
+    assert not firmware['requests']
+    with pytest.raises(ValueError):
+        c.request('/xml/setter.xml', {'fun': 16})
+    c.poll()
+    c.logout()
+    assert c.sid is None and c.session_token is None and c.login_mode is None
+    assert firmware['requests'][-1][1] == {'fun': ['16'], 'token': ['fixture-preauth']}
+    assert 'SID=fixture-session' in firmware['requests'][-1][2]
+
+
+def test_temporary_logout_failure_is_reported_without_secrets(router_client, monkeypatch):
+    monkeypatch.setattr(store, 'DEMO', False)
+    class Fake:
+        sid = 'fixture-session'
+        def __init__(self, *args):
+            pass
+        def poll(self):
+            return sample()
+        def logout(self):
+            raise RuntimeError(PASSWORD + self.sid)
+    monkeypatch.setattr(modem, 'Client', Fake)
+    result = router_client.post(BASE+'/test-settings', json=connection())
+    assert result.json()['sample']['state'] == 'ok'
+    assert 'could not be released' in result.json()['sample']['cleanup_error']
+    assert PASSWORD not in result.text and 'fixture-session' not in result.text
+    assert modem._clients == {} and modem.config('atlas') is None
 
 
 @pytest.mark.parametrize('cookie', [

@@ -39,15 +39,20 @@ Access Harbour over HTTPS. Encryption at rest does not encrypt the modem’s LAN
 HTTP connection: its SHA256 password hash and SID cookie are sensitive. HTTPS
 modem URLs require a trusted certificate; certificate verification is not disabled.
 Targets must be literal RFC1918 IPv4 addresses. Redirects, environment proxies and
-DNS lookup are not used. Only login function 15 and read functions 1, 2, 10, 11,
-13 are permitted; configuration setters are rejected by the client.
+DNS lookup are not used. Only login function 15, logout function 16 with this
+client's own SID, and read functions 1, 2, 10, 11, 13 are permitted;
+configuration setters and forced logout of another session are rejected.
 
 The pre-login `sessionToken` cookie and authenticated SID remain in process memory
 and are reused only for the configured modem. The token is bounded, never returned
-to Harbour's browser, and redacted from collected values. A rejected/expired login pauses
-automatic polling until settings are saved (or the legacy saved-settings test
-API succeeds). Overlay tests do not change that state. Firmware
-may allow only one administrator session: pause polling before interactive use.
+to Harbour's browser, and redacted from collected values. An expired established
+session gets one reauthentication attempt within the collection deadline. A
+rejected login pauses automatic polling until settings are saved (or the legacy
+saved-settings test API succeeds). Overlay tests do not change that state. Firmware
+may allow only one administrator session: disable polling and save before interactive use.
+Disabling polling, replacing connection credentials, removing the monitored host,
+and orderly worker shutdown release Harbour's owned session on a best-effort basis.
+An abrupt process exit can leave it active until the modem's session timeout.
 No attempt is made to evict an existing administrator or bypass a lockout.
 
 ## Collection and limits
@@ -66,7 +71,13 @@ It requires an administrator and CSRF protection, uses the same per-server lock
 as saved collections, and returns only a transient summary. A blank password
 uses the saved secret only when address and username are unchanged. Enter a
 password when testing another address or username; it is not stored. Existing
-configured sessions may be reused for unchanged saved credentials. The legacy
+configured sessions are reused for matching saved credentials, and a new successful
+test with saved credentials supplies the poller's in-memory session. Drafts with
+different credentials release an owned session on that modem before testing, then
+log out their temporary session. A failed logout is reported without exposing its
+response; another test may need to wait for the modem session to expire. Settings
+and history remain unchanged. Testing while polling is disabled can retain a
+saved-credential session for subsequent tests or enabling polling. The legacy
 `POST .../modem/test` remains available for saved-settings collection clients;
 it is no longer used by the browser UI.
 
@@ -100,6 +111,13 @@ do not prove that a particular firmware exposes every authenticated diagnostic
 field. Confirm credentials using the settings form, inspect the first readings,
 and compare values/units with the modem interface before interpreting DOCSIS
 power, SNR, error counters or event codes as ISP evidence.
+
+Session lifecycle handling was cross-checked with the
+[DOCSight CH7465 driver](https://github.com/itsDNNS/docsight/blob/main/app/drivers/ch7465.py).
+Harbour uses its own bounded client and encrypted credential/history integration;
+DOCSight is not an installed runtime dependency. Single-session HTTP fixtures
+cover shared test/poll authentication, temporary-session logout, expiration,
+rejected reauthentication, and orderly worker cleanup.
 
 ## Address examples
 

@@ -160,10 +160,14 @@ class Client:
     def request(self, path, values=None, deadline=None):
         if path not in ('/common_page/login.html', '/js/CommonAPI.js', '/xml/getter.xml', '/xml/setter.xml'):
             raise ValueError('Unsupported modem request')
-        if path == '/xml/setter.xml' and (not values or values.get('fun') != 15):
-            raise ValueError('Only authentication is permitted on the modem setter')
+        if path == '/xml/setter.xml' and (not values or (values.get('fun') != 15
+                and not (values == {'fun': 16} and self.sid))):
+            raise ValueError('Only login and logout of an owned session are permitted on the modem setter')
         if path == '/xml/getter.xml' and (not values or values.get('fun') not in SECTIONS.values()):
             raise ValueError('Unsupported modem getter')
+        if path == '/xml/setter.xml' and values == {'fun': 16}:
+            # Match the CH7465 logout protocol with our current session token.
+            values = {**values, 'token': self.session_token or ''}
         remaining = min(4, deadline-time.monotonic()) if deadline else 4
         if remaining <= 0:
             raise ModemError('timeout', 'Modem collection exceeded its time limit.')
@@ -208,7 +212,8 @@ class Client:
             if response.status in (401, 403) or (300 <= response.status < 400 and path.startswith('/xml/')):
                 raise AuthenticationError()
             if response.status != 200:
-                raise ModemError('http_error', 'Modem did not return a successful response. Redirects are not followed.')
+                stage = 'login page' if path.endswith('login.html') else 'login/logout' if path.endswith('setter.xml') else 'diagnostics'
+                raise ModemError('http_error', f'Modem {stage} returned HTTP {response.status}. Redirects are not followed.')
             # This firmware closes XML requests that omit the pre-login cookie.
             # Keep only its known, bounded token in memory, for this origin alone.
             for name, value in response.getheaders():
@@ -282,8 +287,30 @@ class Client:
 
     def poll(self):
         deadline, started = time.monotonic()+25, time.time()
+        reusable_session = bool(self.sid)
         if not self.sid:
             self.login(deadline)
+        try:
+            return self.read_sections(deadline, started)
+        except AuthenticationError:
+            if not reusable_session:
+                raise
+            # An established session may expire independently of the password.
+            # Reauthenticate once within the same deadline; real login rejection
+            # still reaches the worker's pause logic, with no retry loop.
+            self.session_token = None
+            self.login(deadline)
+            return self.read_sections(deadline, started)
+
+    def logout(self, deadline=None):
+        """Release only our own SID; never evict another administrator."""
+        try:
+            if self.sid:
+                self.request('/xml/setter.xml', {'fun': 16}, deadline)
+        finally:
+            self.sid = self.session_token = self.login_mode = None
+
+    def read_sections(self, deadline, started):
         sections = {}
         for name, function in SECTIONS.items():
             at = time.time()

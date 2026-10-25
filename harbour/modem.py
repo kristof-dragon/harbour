@@ -71,6 +71,16 @@ def config(id_):
     return store.one('SELECT * FROM modem_settings WHERE server_id=?', (id_,))
 
 
+def release_client(connection):
+    """Best-effort, bounded logout of a session owned by this process."""
+    try:
+        if getattr(connection, 'sid', None):
+            connection.logout()
+        return True
+    except Exception:
+        return False  # Never expose raw responses, cookies or exception text.
+
+
 def public(id_):
     row = config(id_)
     settings = json.loads(row['config']) if row else dict(DEFAULT)
@@ -121,10 +131,12 @@ def save(id_: str, body: Settings, user=Depends(auth.admin)):
             con.execute('INSERT INTO modem_settings(server_id,url,config,password_encrypted,revision) VALUES (?,?,?,?,?) ON CONFLICT(server_id) DO UPDATE SET url=excluded.url,config=excluded.config,password_encrypted=excluded.password_encrypted,revision=excluded.revision,next_attempt=0,blocked=0,failures=0',
                         (id_, body.url, json.dumps(values), encrypted, revision))
         cached = _clients.get(id_)
-        if cached and old and cached[0] == old['revision'] and encrypted == old['password_encrypted'] and previous.get('url') == body.url and previous.get('username') == body.username:
+        if cached and old and cached[0] == old['revision'] and encrypted == old['password_encrypted'] and previous.get('url') == body.url and previous.get('username') == body.username and not (previous.get('enabled') and not body.enabled):
             _clients[id_] = (revision, cached[1])
         else:
             _clients.pop(id_, None)
+            if cached:
+                release_client(cached[1])
     finally:
         lock.release()
     return public(id_)
@@ -206,7 +218,9 @@ def poll_one(id_, manual=False):
             message = str(exc) if isinstance(exc, ModemError) else 'Modem collection failed; check the settings and test again.'
             sample = {'at': started, 'received_at': time.time(), 'state': 'unavailable', 'error_code': code,
                       'error': message, 'sections': {}, 'cause': 'not_established'}
-            _clients.pop(id_, None)
+            failed_client = _clients.pop(id_, None)
+            if failed_client:
+                release_client(failed_client[1])
         sample.update(observer=socket.gethostname(), source='modem', endpoint=settings['url'], adapter='compal-one', collection_ms=round((time.time()-started)*1000, 2))
         persist(id_, row['revision'], sample, blocked, failure)
     finally:
@@ -251,15 +265,26 @@ def test_settings(id_: str, body: ConnectionSettings, user=Depends(auth.admin)):
         if store.DEMO:
             return {'demo': True, 'sample': None}
         started = time.time()
+        connection = None
+        retain_session = False
+        cached = _clients.get(id_)
         try:
-            cached = _clients.get(id_) if not password and saved_identity else None
-            if cached and cached[0] == row['revision']:
+            saved_password = store.cipher().decrypt(row['password_encrypted'].encode()).decode() if saved_identity and row['password_encrypted'] else ''
+            matching_credentials = saved_identity and bool(saved_password) and (not password or secrets.compare_digest(password.encode(), saved_password.encode()))
+            if matching_credentials and cached and cached[0] == row['revision']:
                 connection = cached[1]
             else:
-                if not password:
-                    password = store.cipher().decrypt(row['password_encrypted'].encode()).decode()
-                connection = Client(body.url, body.username, password)
+                if cached and previous.get('url') == body.url:
+                    _clients.pop(id_, None)
+                    if not release_client(cached[1]):
+                        raise ModemError('session_release_failed', 'The previous modem session could not be released. Wait for it to expire before testing again.')
+                connection = Client(body.url, body.username, password or saved_password)
             result = connection.poll()
+            if matching_credentials:
+                # Keep runtime authentication only. Draft tests still do not
+                # write settings, backoff state, samples or history.
+                _clients[id_] = (row['revision'], connection)
+                retain_session = True
             # The overlay needs a connection verdict, not raw diagnostic values.
             sample = {'state': result['state'], 'authentication': result.get('authentication'),
                       'sections': {name: {'state': part['state']} for name, part in result.get('sections', {}).items()}}
@@ -270,7 +295,12 @@ def test_settings(id_: str, body: ConnectionSettings, user=Depends(auth.admin)):
             sample = {'state': 'unavailable', 'sections': {}, 'error': message,
                       'error_code': exc.code if isinstance(exc, ModemError) else 'collection_failed'}
         finally:
-            password = ''
+            password = saved_password = ''
+            if connection is not None and not retain_session:
+                if _clients.get(id_, (None, None))[1] is connection:
+                    _clients.pop(id_, None)
+                if not release_client(connection):
+                    sample['cleanup_error'] = 'The test finished, but its temporary modem session could not be released. Wait for it to expire before another check.'
         sample.update(at=started, received_at=time.time(), collection_ms=round((time.time()-started)*1000, 2))
         return {'demo': False, 'sample': sample}
     finally:
@@ -314,8 +344,14 @@ def run(stop):
                 if settings['enabled'] and not row['blocked'] and row['next_attempt'] <= time.time():
                     poll_one(row['server_id'])
             for id_ in set(_clients)-active:
-                _clients.pop(id_, None)
+                with lock_for(id_):
+                    cached = _clients.pop(id_, None)
+                    if cached:
+                        release_client(cached[1])
         except Exception:
             # A transient DB failure must not kill polling or log secrets.
             stop.wait(5)
-    _clients.clear()
+    for id_, cached in list(_clients.items()):
+        with lock_for(id_):
+            release_client(cached[1])
+            _clients.pop(id_, None)

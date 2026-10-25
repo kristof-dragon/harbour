@@ -41,11 +41,11 @@ function modemTestResult(d){
   const sample=d.sample;
   if(d.demo)return 'Demo mode: no connection was attempted.';
   if(!sample)return 'No test reading was returned.';
-  if(sample.error)return sample.error;
+  if(sample.error)return sample.error+(sample.cleanup_error?' '+sample.cleanup_error:'');
   const mode=({modem_default:'using the modem’s default username',configured_username:'using the configured username',password_only:'using password-only authentication'})[sample.authentication?.mode];
   const login=sample.authentication?.state==='authenticated'?`Login succeeded${mode?' '+mode:''}. `:'';
   const sections=Object.entries(sample.sections||{}),read=sections.filter(([,v])=>v.state==='ok').map(([k])=>k);
-  return login+(read.length?`Diagnostic sections read: ${read.join(', ')} (${read.length}/${sections.length}).`:'No usable diagnostic sections were returned.')+(read.length<sections.length?' Some diagnostics are unavailable.':'');
+  return login+(read.length?`Diagnostic sections read: ${read.join(', ')} (${read.length}/${sections.length}).`:'No usable diagnostic sections were returned.')+(read.length<sections.length?' Some diagnostics are unavailable.':'')+(sample.cleanup_error?' '+sample.cleanup_error:'');
 }
 function modemFormBusy(form,busy){
   form.dataset.busy=busy?'true':'';
